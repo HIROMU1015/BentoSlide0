@@ -25,6 +25,9 @@ python -m scripts.inspect_bento demo.generated.bento.html
 
 ```powershell
 python -m unittest discover -v
+$env:BENTO_BROWSER_TEST = "1"
+python -m unittest discover -v
+Remove-Item Env:BENTO_BROWSER_TEST
 ```
 
 5. When browser evidence or screenshots are required, install `requirements-browser.txt` if needed and run:
@@ -33,6 +36,6 @@ python -m unittest discover -v
 python -m scripts.check_bento_browser demo.generated.bento.html --design gpt_bento_design.json --screenshots-dir . --screenshot-prefix demo-slide
 ```
 
-Before replacing an existing official demo, compare its hash and extracted Bento document with the generated file. Replace it only after classifying every difference. Report build warnings, test results, runtime integrity, browser results, screenshot paths, and the observed `equationId` / `latexSource` save behavior.
+Before replacing an existing official demo, compare its hash and extracted Bento document with the generated file. Replace it only after classifying every difference. Report build warnings, test results, runtime integrity, browser results, screenshot paths, and the observed `equationId` / `latexSource` save behavior. Describe clicks as UI selection, but describe text/shape/equation mutations performed through `loadDoc()` as Bento API edits, not UI edits.
 
 Read `docs/bento-conversion-spec.md` when changing mappings, validators, supported fields, or metadata policy. Keep all transformation logic in `bento_converter/` and `scripts/`; never duplicate it in this skill.

@@ -56,6 +56,26 @@ class DesignValidationTests(unittest.TestCase):
             "image",
         )
 
+    def test_unknown_format_version_error(self):
+        self.assert_design_error(
+            lambda d: d.__setitem__("format", "gpt-bento-design/future-v2"),
+            "field=format",
+            "future-v2",
+            "Use a supported GPT design format",
+        )
+
+    def test_justify_alignment_is_supported(self):
+        design = copy.deepcopy(self.design)
+        design["slides"][0]["elements"][0]["style"]["align"] = "justify"
+        validate_design(design)
+        document = convert_design(design).document
+        title = next(
+            element
+            for element in document["slides"][0]["elements"]
+            if element["id"] == "slide-1-title"
+        )
+        self.assertEqual(title["align"], "justify")
+
     def test_unknown_style_is_warning(self):
         design = copy.deepcopy(self.design)
         design["slides"][0]["elements"][1]["style"]["unsupportedGlow"] = 12

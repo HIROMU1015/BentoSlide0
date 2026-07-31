@@ -8,9 +8,10 @@ from typing import Any
 from .errors import DesignValidationError, ValidationReport, issue
 
 ALLOWED_TYPES = {"text", "shape", "latex"}
-ALLOWED_ALIGN = {"left", "center", "right"}
+ALLOWED_ALIGN = {"left", "center", "right", "justify"}
 ALLOWED_VALIGN = {"top", "middle", "bottom"}
 SUPPORTED_SHAPES = {"rounded-rectangle", "rectangle", "rect"}
+SUPPORTED_FORMATS = {"gpt-bento-design/demo-v1"}
 
 COMMON_ELEMENT_FIELDS = {"id", "role", "type", "x", "y", "w", "h", "z", "style"}
 TYPE_FIELDS = {
@@ -202,12 +203,12 @@ def validate_design(design: dict[str, Any]) -> ValidationReport:
     errors: list[str] = []
     warnings: list[str] = []
 
-    if not _nonempty_string(design.get("format")):
+    if design.get("format") not in SUPPORTED_FORMATS:
         errors.append(
             issue(
                 field="format",
                 actual=design.get("format"),
-                fix="Set format to a non-empty GPT design format identifier.",
+                fix=f"Use a supported GPT design format: {sorted(SUPPORTED_FORMATS)}.",
             )
         )
     document = design.get("document")
@@ -581,4 +582,3 @@ def validate_design(design: dict[str, Any]) -> ValidationReport:
     if errors:
         raise DesignValidationError(errors)
     return ValidationReport(tuple(warnings))
-

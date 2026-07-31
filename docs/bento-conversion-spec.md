@@ -24,6 +24,8 @@
 }
 ```
 
+現在の `SUPPORTED_FORMATS` は `gpt-bento-design/demo-v1` のみ。値がない場合だけでなく、未知バージョンも変換前に明示的なエラーとする。形式追加時はvalidator・converter・fixtureを同時に更新する。
+
 ### document
 
 | フィールド | 要件 |
@@ -56,7 +58,7 @@
 
 - `content` はプレーンテキスト。
 - `style.fontSize` は正の数。
-- `style.align` は `left`、`center`、`right`、`justify`。
+- `style.align` は `left`、`center`、`right`、`justify`。`justify` は現BentoランタイムでDOMの `text-align: justify` として表示され、serialize後も保持されることをブラウザ実測済み。
 - `style.valign` は `top`、`middle`、`bottom`。
 - 対応styleは `fontSize`、`fontFamily`、`fontWeight`、`color`、`align`、`valign`、`lineHeight`、`letterSpacing`。
 
@@ -150,6 +152,21 @@ Chrome上で `window.bento.loadDoc()` と `window.bento.serialize()` を使っ�
 
 入力検証とBento出力検証は別モジュールで行う。エラーには `slideId`、`elementId`、問題フィールド、実値、修正方法を含める。出力検証ではformat/version、必須ルート、ID一意性、フレーム、text/shape構造、数式ソース、HTML内の `<` エスケープ、ランタイム同一性を確認する。
 
+### 汎用ブラウザ検証
+
+`browser_check.py` はデモ固有のタイトル、枚数、IDを知らない。設計JSONと生成文書から次を動的に導出する。
+
+- Bento UIの起動とJavaScript/console error不在
+- 文書内の全スライドを順に開き、全要素IDがDOMに存在すること
+- 設計JSONと全要素の `x/y/w/h`、slide順、変換内容が一致すること
+- `text`、`shape`、`latex` の個数と代表要素
+- `window.bento.loadDoc()` を介した文書モデル変更、再描画、`serialize()` 往復
+- 全スライドのスクリーンショット
+
+ブラウザ検証で実UI操作するのは要素のクリック選択だけである。テキスト変更、図形移動、数式変更はキーボード入力やドラッグではなく、Bento APIで文書モデルを変更する検証であり、CLIでも `UI selection` と `Bento API ... edit` を分けて表示する。
+
+デモ固有の「2枚」「タイトル文言」「特定ID」は `tests/test_demo_contract.py` に隔離する。汎用ブラウザテストは3枚・任意タイトル・任意IDの合成デッキを生成し、デモ依存が再導入されないことを確認する。
+
 ## 11. 対応外と拡張点
 
 現時点では `image`、`svg`、`line`、`arrow`、`table`、`chart`、`media`、speaker notes、morph/state、animation/fx、外部registry、章別JSON結合、PPTX変換を実装しない。新しいtypeは、入力検証、変換、Bento検証、独立fixture、単体・統合・ブラウザテストを同時に追加して拡張する。
@@ -163,3 +180,19 @@ python -m scripts.validate_bento demo.generated.bento.html --base Bento_Slides.b
 python -m scripts.check_bento_browser demo.generated.bento.html --design gpt_bento_design.json --screenshots-dir . --screenshot-prefix demo-slide
 python -m unittest discover -v
 ```
+
+通常のテスト探索ではローカルChrome依存のテストをskipする。ブラウザ統合を含む完全実行は次のとおり。
+
+```powershell
+$env:BENTO_BROWSER_TEST = "1"
+python -m unittest discover -v
+Remove-Item Env:BENTO_BROWSER_TEST
+```
+
+## 13. CI
+
+`.github/workflows/ci.yml` はpushとpull requestでPython 3.12、Playwright Chromiumを準備し、次を独立環境で実行する。
+
+1. デモの再ビルドとBento/runtime検証
+2. 生成デモとchecked-in `demo.bento.html` のバイト比較
+3. `BENTO_BROWSER_TEST=1` による単体・統合・ブラウザテスト全件
