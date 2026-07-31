@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bento Slide Build"
+  short_description: "Build and validate deterministic Bento slide decks"
+  default_prompt: "Build the Bento slide deck from its GPT design JSON, validate it, and report the results."
