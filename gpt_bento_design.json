@@ -1,0 +1,242 @@
+{
+  "format": "gpt-bento-design/demo-v1",
+  "document": {
+    "title": "GPT to Bento Slides Demo",
+    "canvas": {
+      "width": 1280,
+      "height": 720
+    },
+    "theme": {
+      "background": "#F8FAFC",
+      "surface": "#FFFFFF",
+      "primary": "#0F172A",
+      "accent": "#1D4ED8",
+      "text": "#1E293B",
+      "muted": "#64748B",
+      "line": "#CBD5E1"
+    }
+  },
+  "slides": [
+    {
+      "id": "demo-slide-1",
+      "background": "#F8FAFC",
+      "elements": [
+        {
+          "id": "slide-1-title",
+          "role": "title",
+          "type": "text",
+          "x": 72,
+          "y": 58,
+          "w": 760,
+          "h": 64,
+          "z": 10,
+          "content": "GPTが座標まで設計する",
+          "style": {
+            "fontSize": 38,
+            "fontWeight": 800,
+            "fontFamily": "sans-serif",
+            "color": "#0F172A",
+            "align": "left",
+            "valign": "middle"
+          }
+        },
+        {
+          "id": "slide-1-lead",
+          "role": "lead",
+          "type": "text",
+          "x": 72,
+          "y": 145,
+          "w": 720,
+          "h": 62,
+          "z": 10,
+          "content": "Codexはデザインを変更せず、Bento形式への変換と埋め込みだけを担当する。",
+          "style": {
+            "fontSize": 23,
+            "fontWeight": 700,
+            "fontFamily": "sans-serif",
+            "color": "#1D4ED8",
+            "align": "left",
+            "valign": "middle"
+          }
+        },
+        {
+          "id": "slide-1-body",
+          "role": "body",
+          "type": "text",
+          "x": 88,
+          "y": 280,
+          "w": 600,
+          "h": 180,
+          "z": 10,
+          "content": "GPTが決めるもの\n・表示内容\n・要素の種類\n・x / y / width / height\n・文字サイズと強調関係",
+          "style": {
+            "fontSize": 25,
+            "fontWeight": 500,
+            "fontFamily": "sans-serif",
+            "color": "#1E293B",
+            "align": "left",
+            "valign": "top",
+            "lineHeight": 1.55
+          }
+        },
+        {
+          "id": "slide-1-shape",
+          "role": "emphasis-shape",
+          "type": "shape",
+          "shape": "rounded-rectangle",
+          "x": 800,
+          "y": 238,
+          "w": 380,
+          "h": 238,
+          "z": 5,
+          "style": {
+            "fill": "#DBEAFE",
+            "stroke": "#1D4ED8",
+            "strokeWidth": 3,
+            "cornerRadius": 22
+          }
+        },
+        {
+          "id": "slide-1-shape-label",
+          "role": "shape-label",
+          "type": "text",
+          "x": 840,
+          "y": 305,
+          "w": 300,
+          "h": 100,
+          "z": 10,
+          "content": "Editable\nBento element",
+          "style": {
+            "fontSize": 30,
+            "fontWeight": 800,
+            "fontFamily": "sans-serif",
+            "color": "#1D4ED8",
+            "align": "center",
+            "valign": "middle",
+            "lineHeight": 1.25
+          }
+        },
+        {
+          "id": "slide-1-note",
+          "role": "note",
+          "type": "text",
+          "x": 72,
+          "y": 635,
+          "w": 1136,
+          "h": 30,
+          "z": 10,
+          "content": "確認点：テキストと図形の位置・サイズをBento Slides上で変更できること",
+          "style": {
+            "fontSize": 17,
+            "fontWeight": 600,
+            "fontFamily": "sans-serif",
+            "color": "#64748B",
+            "align": "left",
+            "valign": "middle"
+          }
+        }
+      ]
+    },
+    {
+      "id": "demo-slide-2",
+      "background": "#F8FAFC",
+      "elements": [
+        {
+          "id": "slide-2-title",
+          "role": "title",
+          "type": "text",
+          "x": 72,
+          "y": 58,
+          "w": 1000,
+          "h": 64,
+          "z": 10,
+          "content": "LaTeX数式をBento上で編集する",
+          "style": {
+            "fontSize": 38,
+            "fontWeight": 800,
+            "fontFamily": "sans-serif",
+            "color": "#0F172A",
+            "align": "left",
+            "valign": "middle"
+          }
+        },
+        {
+          "id": "slide-2-lead",
+          "role": "lead",
+          "type": "text",
+          "x": 72,
+          "y": 145,
+          "w": 1100,
+          "h": 56,
+          "z": 10,
+          "content": "数式を画像化せず、LaTeXソースを保持した編集可能な要素として配置する。",
+          "style": {
+            "fontSize": 23,
+            "fontWeight": 700,
+            "fontFamily": "sans-serif",
+            "color": "#1D4ED8",
+            "align": "left",
+            "valign": "middle"
+          }
+        },
+        {
+          "id": "hamiltonian-equation",
+          "role": "equation",
+          "type": "latex",
+          "x": 215,
+          "y": 250,
+          "w": 850,
+          "h": 155,
+          "z": 10,
+          "latex": "H = H_0 + \\alpha H_1",
+          "bentoSource": "$$H = H_0 + \\alpha H_1$$",
+          "equationId": "hamiltonian_split",
+          "style": {
+            "fontSize": 44,
+            "color": "#1E293B",
+            "align": "center",
+            "valign": "middle"
+          }
+        },
+        {
+          "id": "slide-2-explanation",
+          "role": "body",
+          "type": "text",
+          "x": 250,
+          "y": 455,
+          "w": 780,
+          "h": 90,
+          "z": 10,
+          "content": "Bento Slides上で数式を選択し、LaTeXソースを変更できるか確認する。",
+          "style": {
+            "fontSize": 22,
+            "fontWeight": 500,
+            "fontFamily": "sans-serif",
+            "color": "#1E293B",
+            "align": "center",
+            "valign": "middle"
+          }
+        },
+        {
+          "id": "slide-2-note",
+          "role": "note",
+          "type": "text",
+          "x": 72,
+          "y": 635,
+          "w": 1136,
+          "h": 30,
+          "z": 10,
+          "content": "確認点：数式の位置・サイズとLaTeXソースの両方を編集できること",
+          "style": {
+            "fontSize": 17,
+            "fontWeight": 600,
+            "fontFamily": "sans-serif",
+            "color": "#64748B",
+            "align": "left",
+            "valign": "middle"
+          }
+        }
+      ]
+    }
+  ]
+}
