@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import html as html_lib
 import json
+import math
 import mimetypes
 import re
 import uuid
@@ -17,6 +18,7 @@ from urllib.parse import unquote, urlparse
 from .errors import ConversionError, ValidationError, issue
 from .html_layout import CANVAS_HEIGHT, CANVAS_WIDTH, LayoutResult
 from .html_source import SourceChapter
+from .native_compatibility import classify_native_compatibility, classify_slide_background
 
 DOC_ID_NAMESPACE = uuid.UUID("e03e3515-25d7-5dc9-891c-a2ac311ec118")
 NATIVE_TYPES = {"text", "equation", "shape", "table", "chart", "image", "svg", "media"}
@@ -83,8 +85,22 @@ def sanitize_inline_html(value: str) -> str:
 def sanitize_svg_markup(value: str) -> str:
     value = re.sub(r"<script\b[^>]*>.*?</script\s*>", "", value, flags=re.IGNORECASE | re.DOTALL)
     value = re.sub(r"\s+on[a-z]+\s*=\s*([\"']).*?\1", "", value, flags=re.IGNORECASE | re.DOTALL)
-    value = re.sub(r"\s+(?:href|xlink:href)\s*=\s*([\"'])javascript:.*?\1", "", value, flags=re.IGNORECASE | re.DOTALL)
+    value = re.sub(r"\s+(?:href|xlink:href|src)\s*=\s*([\"'])javascript:.*?\1", "", value, flags=re.IGNORECASE | re.DOTALL)
     return value
+
+
+def _normalize_positioned_svg(markup: str, width: float, height: float) -> str:
+    """Remove HTML positioning from the outer SVG before Bento positions it."""
+
+    match = re.search(r"<svg\b([^>]*)>", markup, flags=re.IGNORECASE)
+    if not match:
+        return markup
+    attributes = match.group(1)
+    attributes = re.sub(r"\s+(?:style|x|y|width|height)\s*=\s*([\"']).*?\1", "", attributes, flags=re.IGNORECASE | re.DOTALL)
+    if not re.search(r"\sxmlns\s*=", attributes, flags=re.IGNORECASE):
+        attributes += ' xmlns="http://www.w3.org/2000/svg"'
+    opening = f'<svg{attributes} width="{_compact(width)}" height="{_compact(height)}">'
+    return markup[:match.start()] + opening + markup[match.end():]
 
 
 def _compact(value: float) -> int | float:
@@ -195,6 +211,19 @@ def _text(element: dict[str, Any], registry: dict[str, Any], corrections: list[d
         content = f"$${latex}$$"
     else:
         content = sanitize_inline_html(element.get("html", "")) or html_lib.escape(element.get("text", ""), quote=False)
+    align = style.get("textAlign") if style.get("textAlign") in {"left", "center", "right", "justify"} else "left"
+    valign = "middle" if style.get("verticalAlign") == "middle" else "top"
+    if style.get("display") in {"flex", "inline-flex"}:
+        if style.get("flexDirection") in {"column", "column-reverse"}:
+            if style.get("alignItems") == "center":
+                align = "center"
+            if style.get("justifyContent") == "center":
+                valign = "middle"
+        else:
+            if style.get("justifyContent") == "center":
+                align = "center"
+            if style.get("alignItems") == "center":
+                valign = "middle"
     result = {
         **common,
         "type": "text",
@@ -203,8 +232,8 @@ def _text(element: dict[str, Any], registry: dict[str, Any], corrections: list[d
         "fontFamily": style.get("fontFamily") or "sans-serif",
         "fontWeight": style.get("fontWeight") or 400,
         "color": style.get("color") or "#111111",
-        "align": style.get("textAlign") if style.get("textAlign") in {"left", "center", "right", "justify"} else "left",
-        "valign": "middle" if style.get("verticalAlign") == "middle" else "top",
+        "align": align,
+        "valign": valign,
         "lineHeight": _compact(max(0.1, float(style.get("lineHeight") or 1.2))),
         "letterSpacing": _compact(float(style.get("letterSpacing") or 0)),
     }
@@ -388,10 +417,79 @@ def _embed_file_url(source: str, generated_asset_id: str, assets: dict[str, Any]
     return data
 
 
-def _svg_fallback(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str) -> dict[str, Any]:
+def _slide_background(
+    slide: dict[str, Any], assets: dict[str, Any], corrections: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    compatibility = classify_slide_background(slide)
+    if compatibility.classification == "native-safe":
+        return [], None
+    slide_id = slide["id"]
+    style = slide.get("backgroundStyle", {})
+    background_image = str(style.get("backgroundImage") or "none")
+    common = {"id": f"{slide_id}--background", "x": 0, "y": 0, "w": CANVAS_WIDTH, "h": CANVAS_HEIGHT, "rotation": 0, "opacity": 1}
+    if compatibility.classification == "native-with-adjustment" and background_image.startswith("linear-gradient("):
+        gradient = _gradient(background_image)
+        if gradient:
+            output = {**common, "type": "shape", "shape": "rect", "fill": style.get("backgroundColor") or "transparent", "stroke": "none", "strokeWidth": 0, "radius": 0, "fillGradient": gradient}
+            return [output], {
+                "slideId": slide_id, "elementId": common["id"], "sourceType": "slide-background", "resultType": "shape", "bentoType": "shape",
+                "emittedIds": [common["id"]], "strategy": "native-decomposition", "conversionMode": "native-decomposition",
+                "reason": compatibility.adjustments[0], "role": "slide-background", "layout": slide.get("layout"), "layoutGroup": None,
+                "sourceFrame": {"x": 0, "y": 0, "w": CANVAS_WIDTH, "h": CANVAS_HEIGHT}, "bentoFrame": {"x": 0, "y": 0, "w": CANVAS_WIDTH, "h": CANVAS_HEIGHT},
+                "nativeCompatibility": compatibility.classification, "compatibilityReasons": [], "contentPreserved": True,
+                "adjustments": list(compatibility.adjustments), "warnings": [],
+            }
+    url_match = re.fullmatch(r'url\(["\']?(.*?)["\']?\)', background_image)
+    if compatibility.classification == "native-with-adjustment" and url_match:
+        source = _embed_file_url(url_match.group(1), f"html-{slide_id}-background", assets)
+        fit = "cover" if style.get("backgroundSize") == "cover" else "contain" if style.get("backgroundSize") == "contain" else "fill"
+        output = {**common, "type": "image", "src": source, "fit": fit, "radius": 0}
+        return [output], {
+            "slideId": slide_id, "elementId": common["id"], "sourceType": "slide-background", "resultType": "image", "bentoType": "image",
+            "emittedIds": [common["id"]], "strategy": "native-decomposition", "conversionMode": "native-decomposition",
+            "reason": compatibility.adjustments[0], "role": "slide-background", "layout": slide.get("layout"), "layoutGroup": None,
+            "sourceFrame": {"x": 0, "y": 0, "w": CANVAS_WIDTH, "h": CANVAS_HEIGHT}, "bentoFrame": {"x": 0, "y": 0, "w": CANVAS_WIDTH, "h": CANVAS_HEIGHT},
+            "nativeCompatibility": compatibility.classification, "compatibilityReasons": [], "contentPreserved": True,
+            "adjustments": list(compatibility.adjustments), "warnings": [],
+        }
+    css = ";".join([
+        "width:100%", "height:100%", f"background-color:{style.get('backgroundColor') or 'transparent'}",
+        f"background-image:{background_image}", f"background-size:{style.get('backgroundSize') or 'auto'}",
+        f"background-position:{style.get('backgroundPosition') or '0% 0%'}", f"background-repeat:{style.get('backgroundRepeat') or 'repeat'}",
+    ])
+    markup = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">'
+        f'<foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="{html_lib.escape(css, quote=True)}"></div></foreignObject></svg>'
+    )
+    output = {**common, "type": "svg", "markup": markup}
+    return [output], {
+        "slideId": slide_id, "elementId": common["id"], "sourceType": "slide-background", "resultType": "svg", "bentoType": "svg",
+        "emittedIds": [common["id"]], "strategy": "svg", "conversionMode": "background-svg-fallback",
+        "reason": compatibility.reasons[0], "role": "slide-background", "layout": slide.get("layout"), "layoutGroup": None,
+        "sourceFrame": {"x": 0, "y": 0, "w": CANVAS_WIDTH, "h": CANVAS_HEIGHT}, "bentoFrame": {"x": 0, "y": 0, "w": CANVAS_WIDTH, "h": CANVAS_HEIGHT},
+        "nativeCompatibility": compatibility.classification, "compatibilityReasons": list(compatibility.reasons), "contentPreserved": True,
+        "adjustments": [], "warnings": list(compatibility.reasons),
+    }
+
+
+def _svg_fallback(
+    element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str,
+    capture: str | None = None,
+) -> dict[str, Any]:
+    if capture and (element.get("transform", {}).get("hasSkew") or element.get("transform", {}).get("is3D")):
+        bounding = element.get("boundingFrame") or {field: element[field] for field in ("x", "y", "w", "h")}
+        fallback_element = {**element, **bounding, "rotation": 0}
+        width, height = max(1, float(bounding["w"])), max(1, float(bounding["h"]))
+        markup = (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
+            f'<image href="{html_lib.escape(capture, quote=True)}" width="{width}" height="{height}" preserveAspectRatio="none"/></svg>'
+        )
+        return {**_common(fallback_element, corrections, slide_id), "type": "svg", "markup": markup}
     width = max(1, float(element["w"]))
     height = max(1, float(element["h"]))
     markup = element.get("svg")
+    if markup:
+        markup = _normalize_positioned_svg(markup, width, height)
     if not markup:
         style = element.get("style", {})
         body = sanitize_svg_markup(element.get("html", "") or html_lib.escape(element.get("text", ""), quote=False))
@@ -409,7 +507,14 @@ def _svg_fallback(element: dict[str, Any], corrections: list[dict[str, Any]], sl
             f"line-height:{style.get('lineHeight') or 1.2}",
             f"text-align:{style.get('textAlign') or 'left'}",
             f"box-shadow:{style.get('boxShadow') or 'none'}",
+            f"filter:{style.get('filter') or 'none'}",
+            f"backdrop-filter:{style.get('backdropFilter') or 'none'}",
             f"clip-path:{style.get('clipPath') or 'none'}",
+            f"mask-image:{style.get('maskImage') or 'none'}",
+            f"mix-blend-mode:{style.get('mixBlendMode') or 'normal'}",
+            f"background-size:{style.get('backgroundSize') or 'auto'}",
+            f"background-position:{style.get('backgroundPosition') or '0% 0%'}",
+            f"background-repeat:{style.get('backgroundRepeat') or 'repeat'}",
             f"display:{style.get('display') or 'block'}",
             f"justify-content:{style.get('justifyContent') or 'normal'}",
             f"align-items:{style.get('alignItems') or 'normal'}",
@@ -421,6 +526,31 @@ def _svg_fallback(element: dict[str, Any], corrections: list[dict[str, Any]], sl
     return {**_common(element, corrections, slide_id), "type": "svg", "markup": sanitize_svg_markup(markup)}
 
 
+def _complex_table_svg(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str) -> dict[str, Any]:
+    width, height = max(1, float(element["w"])), max(1, float(element["h"]))
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">']
+    for row in element.get("table", {}).get("rows", []):
+        for cell in row:
+            rect = cell.get("rect", {})
+            x, y, w, h = (float(rect.get(field, 0)) for field in ("x", "y", "w", "h"))
+            style = cell.get("style", {})
+            fill_value = style.get("backgroundColor") or cell.get("bg")
+            fill = fill_value if fill_value and not _transparent(fill_value) else "#ffffff"
+            color = style.get("color") or cell.get("color") or "#111111"
+            weight = 700 if cell.get("bold") else 400
+            content = sanitize_svg_markup(str(cell.get("html", "")))
+            font_family = style.get("fontFamily") or "Arial,sans-serif"
+            font_size = _compact(float(style.get("fontSize") or 16))
+            text_align = style.get("textAlign") or cell.get("align") or "left"
+            parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{html_lib.escape(fill, quote=True)}" stroke="#94a3b8" stroke-width="1"/>')
+            parts.append(
+                f'<foreignObject x="{x + 8}" y="{y + 6}" width="{max(1, w - 16)}" height="{max(1, h - 12)}">'
+                f'<div xmlns="http://www.w3.org/1999/xhtml" style="font-family:{html_lib.escape(str(font_family), quote=True)};font-size:{font_size}px;font-weight:{weight};color:{html_lib.escape(color, quote=True)};text-align:{html_lib.escape(str(text_align), quote=True)}">{content}</div></foreignObject>'
+            )
+    parts.append("</svg>")
+    return {**_common(element, corrections, slide_id), "type": "svg", "markup": "".join(parts)}
+
+
 def _identity_layout(slides: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
     """Exclude machine-local URLs and browser-only diagnostics from the stable id input."""
 
@@ -428,17 +558,35 @@ def _identity_layout(slides: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]
         "id", "type", "exportMode", "role", "registryId", "equationId", "assetId", "figureId",
         "chartId", "tableId", "morphId", "link", "shape", "lineStart", "lineEnd", "from", "to",
         "layout", "layoutGroup", "x", "y", "w", "h", "rotation", "opacity", "z", "text", "html",
-        "svg", "mediaKind", "chartOption", "table", "style",
+        "svg", "mediaKind", "chartOption", "table", "style", "boundingFrame", "transform", "compatibility",
     )
     return [
         {
             "id": slide["id"], "name": slide.get("name"), "transition": slide.get("transition"),
             "stateOf": slide.get("stateOf"), "layout": slide.get("layout"), "background": slide.get("background"),
+            "backgroundStyle": slide.get("backgroundStyle"),
             "notes": slide.get("notes"),
             "elements": [{field: element.get(field) for field in element_fields if element.get(field) is not None} for element in slide["elements"]],
         }
         for slide in slides
     ]
+
+
+def _rotated_bounding_frame(element: dict[str, Any]) -> dict[str, float | int]:
+    """Return the axis-aligned frame occupied by a rotated Bento element."""
+
+    angle = math.radians(float(element.get("rotation") or 0))
+    width, height = float(element["w"]), float(element["h"])
+    bounding_width = abs(width * math.cos(angle)) + abs(height * math.sin(angle))
+    bounding_height = abs(width * math.sin(angle)) + abs(height * math.cos(angle))
+    center_x = float(element["x"]) + width / 2
+    center_y = float(element["y"]) + height / 2
+    return {
+        "x": _compact(center_x - bounding_width / 2),
+        "y": _compact(center_y - bounding_height / 2),
+        "w": _compact(bounding_width),
+        "h": _compact(bounding_height),
+    }
 
 
 def _rgb(value: object) -> tuple[float, float, float] | None:
@@ -489,40 +637,156 @@ def _correct_contrast(slides: list[dict[str, Any]], corrections: list[dict[str, 
             })
 
 
-def _correct_overlaps(slides: list[dict[str, Any]], corrections: list[dict[str, Any]], diagnostics: list[dict[str, Any]]) -> None:
+def _overlap_ratio(left: dict[str, Any], right: dict[str, Any]) -> float:
+    overlap_w = min(left["x"] + left["w"], right["x"] + right["w"]) - max(left["x"], right["x"])
+    overlap_h = min(left["y"] + left["h"], right["y"] + right["h"]) - max(left["y"], right["y"])
+    if overlap_w <= 4 or overlap_h <= 4:
+        return 0
+    smaller = min(left["w"] * left["h"], right["w"] * right["h"])
+    return overlap_w * overlap_h / max(smaller, 1)
+
+
+def _overlap_pairs(elements: list[dict[str, Any]]) -> set[tuple[str, str]]:
     movable = {"text", "table", "chart"}
+    return {
+        tuple(sorted((left["id"], right["id"])))
+        for index, left in enumerate(elements)
+        for right in elements[index + 1:]
+        if left.get("type") in movable and right.get("type") in movable and _overlap_ratio(left, right) > 0.15
+    }
+
+
+def _horizontal_separation(
+    left: dict[str, Any], right: dict[str, Any], *, boundary: float | None = None, gap: float = 12,
+) -> bool:
+    first, second = left, right
+    if boundary is not None:
+        first["w"] = _compact(max(24, min(first["w"], boundary - gap / 2 - first["x"])))
+        second["x"] = _compact(max(second["x"], boundary + gap / 2))
+        second["w"] = _compact(min(second["w"], CANVAS_WIDTH - second["x"]))
+    if first["x"] + first["w"] + gap > second["x"]:
+        available = second["x"] - gap - first["x"]
+        if available >= 24:
+            first["w"] = _compact(available)
+        else:
+            second["x"] = _compact(first["x"] + first["w"] + gap)
+            second["w"] = _compact(min(second["w"], CANVAS_WIDTH - second["x"]))
+    return second["x"] >= first["x"] + first["w"] + gap - 0.01 and second["w"] >= 24
+
+
+def _vertical_separation(top: dict[str, Any], bottom: dict[str, Any], gap: float = 12) -> bool:
+    first, second = top, bottom
+    if first["y"] + first["h"] + gap > second["y"]:
+        available = second["y"] - gap - first["y"]
+        if available >= 24:
+            first["h"] = _compact(available)
+        else:
+            second["y"] = _compact(first["y"] + first["h"] + gap)
+            second["h"] = _compact(min(second["h"], CANVAS_HEIGHT - second["y"]))
+    return second["y"] >= first["y"] + first["h"] + gap - 0.01 and second["h"] >= 24
+
+
+def _correct_overlaps(
+    slides: list[dict[str, Any]], source_slides: tuple[dict[str, Any], ...],
+    corrections: list[dict[str, Any]], diagnostics: list[dict[str, Any]],
+) -> None:
+    source_by_slide = {slide["id"]: slide for slide in source_slides}
     for slide in slides:
+        source_slide = source_by_slide[slide["id"]]
+        source_elements = {element["id"]: element for element in source_slide["elements"]}
         elements = slide["elements"]
-        for index, left in enumerate(elements):
-            for right in elements[index + 1:]:
-                if left.get("type") not in movable or right.get("type") not in movable:
-                    continue
-                overlap_w = min(left["x"] + left["w"], right["x"] + right["w"]) - max(left["x"], right["x"])
-                overlap_h = min(left["y"] + left["h"], right["y"] + right["h"]) - max(left["y"], right["y"])
-                if overlap_w <= 4 or overlap_h <= 4:
-                    continue
-                smaller = min(left["w"] * left["h"], right["w"] * right["h"])
-                ratio = overlap_w * overlap_h / max(smaller, 1)
-                if ratio <= 0.15:
-                    continue
-                before = {field: right[field] for field in ("x", "y", "w", "h")}
-                new_y = left["y"] + left["h"] + 12
-                new_x = left["x"] + left["w"] + 12
+        original_pairs = _overlap_pairs(elements)
+        diagnosed: set[tuple[str, str]] = set()
+        for pair in sorted(original_pairs):
+            left = next(element for element in elements if element["id"] == pair[0])
+            right = next(element for element in elements if element["id"] == pair[1])
+            left_source, right_source = source_elements.get(left["id"]), source_elements.get(right["id"])
+            layout_name = source_slide.get("layout") or "free"
+            same_group = left_source and right_source and left_source.get("layoutGroup") and left_source.get("layoutGroup") == right_source.get("layoutGroup")
+            context = {
+                "layout": layout_name,
+                "roles": [(left_source or {}).get("role"), (right_source or {}).get("role")],
+                "layoutGroups": [(left_source or {}).get("layoutGroup"), (right_source or {}).get("layoutGroup")],
+                "zOrder": [left.get("z"), right.get("z")],
+                "sourceOrder": [(left_source or {}).get("domIndex"), (right_source or {}).get("domIndex")],
+            }
+            policy = None
+            reason = None
+            before = {element["id"]: {field: element[field] for field in ("x", "y", "w", "h")} for element in (left, right)}
+            source_left_first = float((left_source or {}).get("x", left["x"])) <= float((right_source or {}).get("x", right["x"]))
+            source_top_first = float((left_source or {}).get("y", left["y"])) <= float((right_source or {}).get("y", right["y"]))
+            horizontal_pair = (left, right) if source_left_first else (right, left)
+            vertical_pair = (left, right) if source_top_first else (right, left)
+            if layout_name in {"two-column", "two-column-contrast"}:
+                policy = "two-column-preserve-side"
+                reason = "Both elements stay on their original side; widths are reduced before any position move."
+                corrected = _horizontal_separation(*horizontal_pair, boundary=CANVAS_WIDTH / 2)
+            elif layout_name == "observation-interpretation":
+                policy = "observation-arrow-interpretation-order"
+                reason = "Observation remains left of interpretation and the arrow row is unchanged."
+                observation = left if (left_source or {}).get("role") == "observation" else right if (right_source or {}).get("role") == "observation" else horizontal_pair[0]
+                interpretation = right if observation is left else left
+                corrected = _horizontal_separation(observation, interpretation)
+            elif layout_name == "equation-dissection":
+                equation = left if (left_source or {}).get("type") == "equation" else right if (right_source or {}).get("type") == "equation" else None
+                policy = "equation-above-explanations"
+                reason = "The equation remains above explanation blocks; left/right explanation order is retained."
+                corrected = _vertical_separation(equation, right if equation is left else left) if equation else _horizontal_separation(*horizontal_pair)
+            elif layout_name == "row":
+                policy = "row-preserve-horizontal-order"
+                reason = "Horizontal DOM/source order is retained by shrinking width and restoring the gap."
+                corrected = _horizontal_separation(*horizontal_pair)
+            elif layout_name == "stack":
+                policy = "stack-preserve-vertical-order"
+                reason = "Vertical source order is retained and the lower element moves only downward."
+                corrected = _vertical_separation(*vertical_pair)
+            elif same_group and layout_name not in {"free", "custom"}:
+                horizontal = abs(left_source["x"] - right_source["x"]) >= abs(left_source["y"] - right_source["y"])
+                policy = "layout-group-preserve-source-axis"
+                reason = "The shared layout group keeps its dominant source axis and ordering."
+                corrected = _horizontal_separation(*horizontal_pair) if horizontal else _vertical_separation(*vertical_pair)
+            else:
                 corrected = False
-                if new_y + right["h"] <= CANVAS_HEIGHT:
-                    right["y"] = _compact(new_y)
-                    corrected = True
-                elif new_x + right["w"] <= CANVAS_WIDTH:
-                    right["x"] = _compact(new_x)
-                    corrected = True
-                record = {"slideId": slide["id"], "kind": "overlap", "elements": [left["id"], right["id"]], "ratio": round(ratio, 3), "autoCorrected": corrected}
-                if corrected:
-                    corrections.append({
-                        "slideId": slide["id"], "elementId": right["id"], "kind": "overlap",
-                        "before": before, "after": {field: right[field] for field in ("x", "y", "w", "h")}, "contentChanged": False,
-                    })
-                else:
-                    diagnostics.append(record)
+                policy = "diagnostic-intent-uncertain"
+                layering_signal = left.get("z") != right.get("z") or any(context["roles"])
+                reason = (
+                    "Free/custom role or z-order indicates possible intentional layering; no safe composition-preserving move is proven."
+                    if layering_signal else
+                    "Free/custom overlap may be intentional; role, group, z-order, and layout do not prove a safe move."
+                )
+
+            new_pairs = _overlap_pairs(elements)
+            creates_new_overlap = bool(new_pairs - original_pairs)
+            if not corrected or creates_new_overlap or pair in new_pairs:
+                for element in (left, right):
+                    element.update(before[element["id"]])
+                diagnostics.append({
+                    "slideId": slide["id"], "kind": "overlap", "elements": list(pair),
+                    "ratio": round(_overlap_ratio(left, right), 3), "autoCorrected": False,
+                    "policy": policy, "reason": reason,
+                    "context": context,
+                    "reinspection": "rolled back" if creates_new_overlap else "unresolved",
+                })
+                diagnosed.add(pair)
+                continue
+            after = {element["id"]: {field: element[field] for field in ("x", "y", "w", "h")} for element in (left, right)}
+            corrections.append({
+                "slideId": slide["id"], "elementId": right["id"], "kind": "overlap",
+                "elementIds": list(pair),
+                "policy": policy, "reason": reason, "before": before, "after": after,
+                "context": context, "contentChanged": False, "reinspection": "passed-no-new-major-overlap",
+            })
+
+        for pair in sorted(_overlap_pairs(elements)):
+            if pair not in diagnosed:
+                left = next(element for element in elements if element["id"] == pair[0])
+                right = next(element for element in elements if element["id"] == pair[1])
+                diagnostics.append({
+                    "slideId": slide["id"], "kind": "overlap", "elements": list(pair),
+                    "ratio": round(_overlap_ratio(left, right), 3), "autoCorrected": False,
+                    "policy": "post-correction-reinspection", "reason": "Major overlap remains after all safe layout-aware attempts.",
+                    "reinspection": "unresolved",
+                })
 
 
 @dataclass(frozen=True)
@@ -553,7 +817,9 @@ def convert_html_layout(
         seen_slides.add(slide_id)
         if source_slide.get("layout") and source_slide["layout"] not in LAYOUTS:
             errors.append(issue(slide_id=slide_id, field="data-layout", actual=source_slide["layout"], fix=f"Use one of {sorted(LAYOUTS)}."))
-        output_elements: list[dict[str, Any]] = []
+        output_elements, background_decision = _slide_background(source_slide, assets, corrections)
+        if background_decision:
+            decisions.append(background_decision)
         local_ids: set[str] = set()
         ordered = sorted(source_slide["elements"], key=lambda item: (item.get("z", 0), item["domIndex"]))
         for element in ordered:
@@ -576,6 +842,7 @@ def convert_html_layout(
                 if reference and reference not in registry[collection]:
                     errors.append(issue(slide_id=slide_id, element_id=element_id, field=field, actual=reference, fix=f"Define this id in registry.{collection}."))
             mode = element.get("exportMode") or "auto"
+            compatibility = classify_native_compatibility(element)
             if mode not in {"native", "svg", "image", "auto", "ignore"}:
                 errors.append(issue(slide_id=slide_id, element_id=element_id, field="data-bento-export", actual=mode, fix="Use native, svg, image, auto, or ignore."))
                 continue
@@ -585,17 +852,20 @@ def convert_html_layout(
             strategy = "native"
             reason = "Supported semantic element converted to an editable Bento native type."
             try:
-                if mode == "image":
+                if mode == "image" or compatibility.classification == "image-required":
                     source = layout.image_fallbacks.get(key)
                     if not source:
                         raise ConversionError("Image fallback capture is unavailable.")
                     asset_id = f"fallback-{slide_id}-{element_id}"
                     assets[asset_id] = source
                     converted = {**_common(element, corrections, slide_id), "type": "image", "src": source, "fit": "contain", "radius": 0}
-                    strategy, reason = "image", "Explicit data-bento-export=image raster fallback."
-                elif mode == "svg" or element["type"] not in NATIVE_TYPES:
-                    converted = _svg_fallback(element, corrections, slide_id)
-                    strategy, reason = "svg", "Explicit SVG export or unsupported complex CSS block preserved as partial SVG."
+                    strategy = "image"
+                    reason = "Explicit data-bento-export=image raster fallback." if mode == "image" else "; ".join(compatibility.reasons)
+                elif mode == "svg" or compatibility.classification == "localized-svg-recommended" or element["type"] not in NATIVE_TYPES:
+                    capture = layout.image_fallbacks.get(key)
+                    converted = _complex_table_svg(element, corrections, slide_id) if element["type"] == "table" and element.get("table") and not element["table"].get("simpleTable", True) else _svg_fallback(element, corrections, slide_id, capture)
+                    strategy = "svg"
+                    reason = "Explicit data-bento-export=svg localized fallback." if mode == "svg" else "; ".join(compatibility.reasons) or "Unsupported complex block preserved as partial SVG."
                 elif element["type"] in {"text", "equation"}:
                     converted = _text(element, registry, corrections, slide_id)
                 elif element["type"] == "shape":
@@ -632,10 +902,10 @@ def convert_html_layout(
                     raise ConversionError(f"Unsupported source type {element['type']!r}")
             except ConversionError as exc:
                 if mode == "native":
-                    converted = _svg_fallback(element, corrections, slide_id)
+                    converted = _svg_fallback(element, corrections, slide_id, layout.image_fallbacks.get(key))
                     strategy, reason = "svg", f"Native conversion failed; partial SVG fallback: {exc}"
                 else:
-                    converted = _svg_fallback(element, corrections, slide_id)
+                    converted = _svg_fallback(element, corrections, slide_id, layout.image_fallbacks.get(key))
                     strategy, reason = "svg", f"Automatic native conversion failed; partial SVG fallback: {exc}"
             emitted = [converted]
             if strategy == "native" and element["type"] in {"text", "equation"}:
@@ -644,6 +914,8 @@ def convert_html_layout(
                     emitted.insert(0, decoration)
                     strategy = "native-decomposition"
                     reason = "Semantic text stayed editable; computed background/border became a native shape."
+            if strategy in {"native", "native-decomposition"} and compatibility.classification == "native-with-adjustment":
+                reason = " ".join(compatibility.adjustments)
             output_elements.extend(emitted)
             conversion_mode = {"svg": "partial-svg-fallback", "image": "image-fallback", "native-decomposition": "native-decomposition"}.get(strategy, "native")
             decisions.append({
@@ -651,9 +923,13 @@ def convert_html_layout(
                 "resultType": converted["type"], "bentoType": [item["type"] for item in emitted] if len(emitted) > 1 else converted["type"],
                 "emittedIds": [item["id"] for item in emitted], "strategy": strategy, "conversionMode": conversion_mode,
                 "reason": reason, "layout": element.get("layout"), "layoutGroup": element.get("layoutGroup"),
+                "role": element.get("role"),
                 "paperSource": element.get("paperSource"),
                 "sourceFrame": {field: _compact(element[field]) for field in ("x", "y", "w", "h")},
-                "contentPreserved": True, "adjustments": [], "warnings": [reason] if strategy in {"svg", "image"} else [],
+                "sourceBoundingFrame": {field: _compact((element.get("boundingFrame") or element)[field]) for field in ("x", "y", "w", "h")},
+                "nativeCompatibility": compatibility.classification,
+                "compatibilityReasons": list(compatibility.reasons),
+                "contentPreserved": True, "adjustments": list(compatibility.adjustments), "warnings": [reason] if strategy in {"svg", "image"} else [],
             })
         slides.append({
             "id": slide_id,
@@ -731,7 +1007,7 @@ def convert_html_layout(
             document["assets"] = assets
 
     _correct_contrast(slides, corrections)
-    _correct_overlaps(slides, corrections, diagnostics)
+    _correct_overlaps(slides, layout.slides, corrections, diagnostics)
 
     output_by_key = {
         f"{slide['id']}/{element['id']}": element
@@ -745,12 +1021,13 @@ def convert_html_layout(
         output_element = output_by_key.get(key)
         if output_element:
             decision["bentoFrame"] = {field: output_element[field] for field in ("x", "y", "w", "h")}
+            decision["bentoBoundingFrame"] = _rotated_bounding_frame(output_element)
             decision["styleChecks"] = {
                 "color": output_element.get("color") or output_element.get("fill"),
                 "fontSize": output_element.get("fontSize"),
                 "zOrderPreserved": True,
             }
-        decision["adjustments"] = [
+        decision["adjustments"] = list(decision.get("adjustments", [])) + [
             f"{item['kind']}: {item['before']} -> {item['after']}"
             for item in corrections_by_key.get(key, [])
         ]
@@ -758,6 +1035,10 @@ def convert_html_layout(
     counts: dict[str, int] = {}
     for decision in decisions:
         counts[decision["strategy"]] = counts.get(decision["strategy"], 0) + 1
+    compatibility_counts: dict[str, int] = {}
+    for decision in decisions:
+        classification = decision.get("nativeCompatibility", "not-applicable")
+        compatibility_counts[classification] = compatibility_counts.get(classification, 0) + 1
     fallback_ids = {
         f"{decision['slideId']}/{emitted_id}"
         for decision in decisions if decision["strategy"] in {"svg", "image"}
@@ -770,7 +1051,8 @@ def convert_html_layout(
                 native_counts[element["type"]] += 1
     summary = {
         "slides": len(slides), "elements": sum(len(slide["elements"]) for slide in slides), "sourceElements": len(decisions),
-        "strategies": counts, "nativeText": native_counts["text"], "nativeShape": native_counts["shape"],
+        "strategies": counts, "nativeCompatibility": compatibility_counts,
+        "nativeText": native_counts["text"], "nativeShape": native_counts["shape"],
         "nativeTable": native_counts["table"], "nativeChart": native_counts["chart"], "nativeImage": native_counts["image"],
         "nativeSvg": native_counts["svg"], "media": native_counts["media"],
         "partialSvgFallback": sum(decision["strategy"] == "svg" for decision in decisions),

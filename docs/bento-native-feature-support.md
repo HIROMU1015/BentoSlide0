@@ -15,7 +15,8 @@ The mappings implemented by this repository are:
 | rect / rounded / ellipse / triangle / arrow / line | `shape` | yes | Rounded maps to rect + radius |
 | path | `shape:path` | yes | `d` and a local path box retained when available |
 | connector | `shape:line` + `from` / `to` | yes | Endpoints must exist on the same slide |
-| HTML table | `table` | yes | Emits weighted columns and `rows[].cells[].html` |
+| rectangular HTML table | `table` | yes | At most one header row; no spans, nesting, or rich visual cell content |
+| complex HTML table | localized `svg.markup` | limited | Cell rectangles/styles preserved for colspan, rowspan, multilevel header, or image/chart/complex content |
 | structured chart JSON | `chart` | yes | `bar`, `line`, `pie`, `scatter`; ECharts-shaped pure JSON |
 | image + registry asset | `image` | yes | Original path/data is embedded in `doc.assets` and used directly as a data URI for compatibility |
 | inline SVG | `svg.markup` | markup-editable | Preserves the localized SVG block |
@@ -25,5 +26,18 @@ The mappings implemented by this repository are:
 | presenter notes | `slide.notes` | yes | `[data-speaker-notes]` is not a visible element |
 | complex CSS / unknown block | `svg.markup` | limited | Localized fallback; other elements remain native |
 | explicit raster fallback | `image` with PNG data URI | limited | Requires explicit `data-bento-id` |
+| canvas / WebGL output | captured `image` | limited | Raster is required because no editable DOM representation exists |
+| simple slide gradient/image | background-only shape/image | partly | Content remains native; the whole slide is never flattened |
 
 The converter intentionally does not turn a whole slide into one SVG while any smaller semantic/native decomposition is available. `align: justify` is accepted because the checked-in Bento runtime preserves it even though older public examples list only left/center/right.
+
+## Native compatibility classes
+
+| Class | Meaning | Typical inputs |
+|---|---|---|
+| `native-safe` | Direct native fields preserve the block | plain text/shapes, ordinary table, simple shadow |
+| `native-with-adjustment` | Native output plus an explicit geometry/style mapping | padding, letter spacing, flex centering, object-fit, simple linear gradient, 2D translate/scale/rotate |
+| `localized-svg-recommended` | Only the smallest affected block becomes SVG | clip-path, mask, filter/backdrop-filter, blend mode, visible pseudo-elements, writing mode, multiple/CSS background layers, skew/3D, complex table |
+| `image-required` | DOM semantics cannot reproduce rendered pixels | canvas/WebGL |
+
+`auto` follows this classification. An explicit `native` request still attempts native conversion but falls back locally with a report reason when representation is impossible. Computed CSS evidence includes background properties, clipping/masking/filtering, shadow, pseudo-element dependence, flex/grid values, padding, letter spacing, object fit/position, overflow/text behavior, writing mode, blending, and complete transform metadata.

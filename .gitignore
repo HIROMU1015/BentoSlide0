@@ -4,5 +4,6 @@ __pycache__/
 .coverage
 .venv/
 browser-output/
+ci-output/
 demo.generated.bento.html
-
+determinism-report.json

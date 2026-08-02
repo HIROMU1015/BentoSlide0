@@ -22,7 +22,7 @@ Every slide must be exactly 1280 × 720 computed CSS pixels and use:
 </section>
 ```
 
-`data-slide-id` is globally unique. `data-bento-id` is stable and unique within its slide. Elements without `data-bento-id` are auto-discovered only for common semantic tags (`h1`–`h6`, `p`, `li`, `table`, `img`, `svg`, `video`, and `audio`); explicit IDs are recommended for reproducibility and references.
+`data-slide-id` is globally unique. `data-bento-id` is stable and unique within its slide. Elements without `data-bento-id` are auto-discovered only for common semantic tags (`h1`–`h6`, `p`, `li`, `table`, `img`, `svg`, `video`, `audio`, and `canvas`); explicit IDs are recommended for reproducibility and references.
 
 Supported element annotations:
 
@@ -44,6 +44,10 @@ Supported element annotations:
 Supported `data-layout` values are `figure-reading-guide`, `equation-dissection`, `observation-interpretation`, `claim-evidence-boundary`, `before-gap-paper-view`, `evaluation-protocol`, `input-process-output`, `two-column-contrast`, `matrix-positioning-map`, and `custom`. The utility layouts `free`, `stack`, `row`, `grid`, and `two-column` are also accepted. They describe relationships for reports and validation; Chromium remains authoritative for final element frames.
 
 Use `data-transition="morph"`, `data-state-of="slide-id"`, and `data-slide-name="…"` on slides. Presenter notes belong in `[data-speaker-notes]` and are copied to `slide.notes`, not rendered as an element.
+
+Simple flex centering, padding, letter spacing, object-fit, gradients, shadows, and 2D translate/scale/rotation can remain native with reported adjustments. Skew/3D, clip-path, masks, filters, backdrop-filter, blend modes, visible pseudo-element-dependent visuals, non-horizontal writing, and complex/multiple background layers should be expected to use a localized fallback. Complex slide backgrounds are isolated behind native foreground elements.
+
+A native HTML table must be a rectangular grid with no rowspan/colspan, no nested table, no image/chart/complex cell, and at most one header row. Other table structures are supported through localized SVG and retain per-cell content, indices, spans, rectangles, and computed styles.
 
 Charts require pure JSON in a descendant script:
 

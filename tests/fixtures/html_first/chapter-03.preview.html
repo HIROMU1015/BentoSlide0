@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}html,body{margin:0;background:#d9dde5;font-family:Arial,sans-serif}.slide{position:relative;width:1280px;height:720px;overflow:hidden;background:#fff;color:#14213d}.title{position:absolute;left:64px;top:38px;width:1152px;height:58px;font-size:36px;font-weight:700}.box{position:absolute;width:170px;height:90px;background:#60a5fa;border:2px solid #1d4ed8;border-radius:12px}.transform-label{position:absolute;width:180px;height:60px;padding:10px;font-size:20px;background:#eef2ff}.complex-table{position:absolute;border-collapse:collapse;font-size:14px;background:#fff}.complex-table th,.complex-table td{border:1px solid #64748b;padding:8px}.compat{position:absolute;width:220px;height:120px;padding:18px;background:#dbeafe;border:1px solid #60a5fa;font-size:18px}.slide-gradient{background-image:linear-gradient(135deg,rgb(239,246,255),rgb(237,233,254));background-size:cover;background-repeat:no-repeat}
+</style></head><body>
+<section class="slide" data-slide-id="transform-matrix" data-layout="custom">
+  <h1 class="title" data-bento-id="transform-title">Transform coordinate fidelity</h1>
+  <div class="box" data-bento-id="rotate-30" data-bento-type="shape" data-bento-shape="rect" style="left:100px;top:180px;transform:rotate(30deg)"></div>
+  <div class="transform-label" data-bento-id="rotate-text-45" style="left:380px;top:190px;transform:rotate(45deg)">Rotated text</div>
+  <div class="box" data-bento-id="origin-left-top" data-bento-type="shape" data-bento-shape="rect" style="left:680px;top:180px;transform-origin:left top;transform:rotate(30deg);background:#34d399"></div>
+  <div class="box" data-bento-id="rotate-scale" data-bento-type="shape" data-bento-shape="rect" style="left:100px;top:470px;transform:rotate(18deg) scale(1.35);background:#fbbf24"></div>
+  <div class="box" data-bento-id="translate-rotate" data-bento-type="shape" data-bento-shape="rect" style="left:430px;top:460px;transform:translate(70px,-20px) rotate(-22deg);background:#fb7185"></div>
+  <div class="box" data-bento-id="skew-fallback" data-bento-type="shape" data-bento-shape="rect" style="left:860px;top:450px;transform:skewX(24deg);background:#a78bfa"></div>
+</section>
+<section class="slide slide-gradient" data-slide-id="css-compatibility" data-layout="custom">
+  <h1 class="title" data-bento-id="compat-title">CSS native compatibility</h1>
+  <div class="compat" data-bento-id="flex-center" data-bento-role="main-claim" style="left:60px;top:150px;display:flex;align-items:center;justify-content:center">Flex centered</div>
+  <div class="compat" data-bento-id="clip-auto" style="left:310px;top:150px;clip-path:polygon(0 0,100% 15%,85% 100%,5% 90%);background:#38bdf8">Clip path</div>
+  <div class="compat" data-bento-id="filter-auto" style="left:560px;top:150px;filter:blur(1.5px);background:#fbbf24">Filtered</div>
+  <div class="compat" data-bento-id="backdrop-auto" style="left:810px;top:150px;backdrop-filter:blur(8px);background:rgba(255,255,255,.45)">Backdrop</div>
+  <div class="compat" data-bento-id="shadow-native" style="left:180px;top:390px;box-shadow:0 16px 30px rgba(15,23,42,.25)">Simple shadow</div>
+  <div class="box" data-bento-id="gradient-native" data-bento-type="shape" data-bento-shape="rounded" style="left:530px;top:405px;width:260px;height:120px;background-image:linear-gradient(90deg,rgb(59,130,246),rgb(139,92,246))"></div>
+</section>
+<section class="slide" data-slide-id="complex-tables" data-layout="grid">
+  <h1 class="title" data-bento-id="complex-table-title">Complex tables use localized SVG</h1>
+  <table class="complex-table" data-bento-id="colspan-table" style="left:60px;top:140px;width:530px"><thead><tr><th colspan="2">Grouped header</th></tr></thead><tbody><tr><td>A</td><td>B</td></tr></tbody></table>
+  <table class="complex-table" data-bento-id="rowspan-table" style="left:690px;top:140px;width:530px"><tbody><tr><th rowspan="2">Group</th><td>First</td></tr><tr><td>Second</td></tr></tbody></table>
+  <table class="complex-table" data-bento-id="multilevel-table" style="left:60px;top:390px;width:530px"><thead><tr><th>Level 1</th><th>Metric</th></tr><tr><th>Level 2</th><th>Value</th></tr></thead><tbody><tr><td>Item</td><td>42</td></tr></tbody></table>
+  <table class="complex-table" data-bento-id="image-cell-table" style="left:690px;top:390px;width:530px"><thead><tr><th>Figure</th><th>Meaning</th></tr></thead><tbody><tr><td><img alt="dot" width="32" height="32" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%233b82f6'/%3E%3C/svg%3E"></td><td>Inline image</td></tr></tbody></table>
+</section>
+</body></html>

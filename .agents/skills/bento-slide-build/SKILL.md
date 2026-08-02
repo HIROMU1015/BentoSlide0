@@ -16,9 +16,15 @@ Work from the repository root. For new work, treat chapter HTML/CSS and registry
 python -m scripts.build_bento_from_html --html-dir input/ --registry-dir input/ --base Bento_Slides.base.bento.html --output output/presentation.bento.html
 ```
 
-3. Inspect `conversion-report.json`. Report every fallback, correction, unresolved overlap diagnostic, protected-content check, semantic screenshot comparison, and runtime result.
+3. Inspect `conversion-report.json`. Report every native compatibility class, fallback, correction policy/reinspection, unresolved overlap diagnostic, protected-content check, actual screenshot metric/crop result, and runtime result. Treat Bento API mutations through `loadDoc()` as API edits, not simulated user typing/dragging.
 4. Keep semantic elements native. Use SVG/image only for the smallest block that requires fallback. Never silently flatten a whole slide.
-5. Run the full test matrix shown below.
+5. Verify the deterministic double build when reproducibility evidence is requested:
+
+```powershell
+python -m scripts.check_html_first_determinism --html-dir input/ --registry-dir input/ --base Bento_Slides.base.bento.html --report output/determinism-report.json
+```
+
+6. Run the full test matrix shown below. For CI handoff, confirm the `html-first-evidence` artifact contains the HTML/JSON, report, computed layout, browser check, paired screenshots, tests, and determinism report.
 
 ## Legacy JSON-first flow
 

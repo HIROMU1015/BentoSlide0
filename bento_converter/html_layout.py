@@ -10,6 +10,7 @@ from typing import Any
 from .browser_check import find_browser_executable
 from .errors import BrowserCheckError, ValidationError, issue
 from .html_source import SourceChapter
+from .native_compatibility import classify_native_compatibility
 
 CANVAS_WIDTH = 1280
 CANVAS_HEIGHT = 720
@@ -20,12 +21,34 @@ EXTRACT_LAYOUT_JS = r"""
     const parsed = Number.parseFloat(value);
     return Number.isFinite(parsed) ? parsed : 0;
   };
-  const rotation = transform => {
-    if (!transform || transform === 'none') return 0;
-    const match = transform.match(/^matrix\(([^)]+)\)$/);
-    if (!match) return 0;
-    const [a, b] = match[1].split(',').map(Number);
-    return Math.round(Math.atan2(b, a) * 180 / Math.PI * 1000) / 1000;
+  const transformInfo = (el, cs, r, sr, sx, sy) => {
+    const matrix = cs.transform === 'none' ? new DOMMatrixReadOnly() : new DOMMatrixReadOnly(cs.transform);
+    const scaleX = Math.hypot(matrix.a, matrix.b) || 1;
+    const determinant = matrix.a * matrix.d - matrix.b * matrix.c;
+    const scaleY = Math.abs(determinant / scaleX) || 1;
+    const dot = matrix.a * matrix.c + matrix.b * matrix.d;
+    const hasSkew = matrix.is2D && Math.abs(dot) > 0.0001;
+    const rotation = matrix.is2D ? Math.atan2(matrix.b, matrix.a) * 180 / Math.PI : 0;
+    const baseWidth = Number.isFinite(el.offsetWidth) ? el.offsetWidth : r.width / scaleX;
+    const baseHeight = Number.isFinite(el.offsetHeight) ? el.offsetHeight : r.height / scaleY;
+    const width = baseWidth * scaleX * sx;
+    const height = baseHeight * scaleY * sy;
+    const centerX = (r.left - sr.left + r.width / 2) * sx;
+    const centerY = (r.top - sr.top + r.height / 2) * sy;
+    return {
+      raw: cs.transform,
+      origin: cs.transformOrigin,
+      matrix: matrix.is2D ? [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f] : [...matrix.toFloat64Array()],
+      is2D: matrix.is2D,
+      is3D: !matrix.is2D,
+      hasTransform: cs.transform !== 'none',
+      hasSkew,
+      rotation: Math.round(rotation * 1000) / 1000,
+      scaleX, scaleY, translateX: matrix.e * sx, translateY: matrix.f * sy,
+      centerX, centerY,
+      frame: {x: centerX - width / 2, y: centerY - height / 2, w: width, h: height},
+      boundingFrame: {x:(r.left-sr.left)*sx,y:(r.top-sr.top)*sy,w:r.width*sx,h:r.height*sy},
+    };
   };
   const slides = [...document.querySelectorAll('section.slide[data-slide-id]')];
   return slides.map((slide, slideIndex) => {
@@ -33,12 +56,13 @@ EXTRACT_LAYOUT_JS = r"""
     const sx = 1280 / sr.width;
     const sy = 720 / sr.height;
     const explicit = [...slide.querySelectorAll('[data-bento-id],[data-bento-type],[data-bento-export]')];
-    const implicit = [...slide.querySelectorAll('h1,h2,h3,h4,h5,h6,p,span,li,table,img,svg,video,audio')]
+    const implicit = [...slide.querySelectorAll('h1,h2,h3,h4,h5,h6,p,span,li,table,img,svg,video,audio,canvas')]
       .filter(el => !el.closest('[data-bento-id],[data-bento-type],[data-bento-export]') && !el.parentElement?.closest('h1,h2,h3,h4,h5,h6,p,span,li,table'));
     const candidates = [...explicit, ...implicit];
     const elements = candidates.map((el, index) => {
       const cs = getComputedStyle(el);
       const r = el.getBoundingClientRect();
+      const tx = transformInfo(el, cs, r, sr, sx, sy);
       const tag = el.tagName.toLowerCase();
       const explicitType = el.dataset.bentoType;
       let inferred = explicitType || 'text';
@@ -46,27 +70,62 @@ EXTRACT_LAYOUT_JS = r"""
       if (!explicitType && tag === 'img') inferred = 'image';
       if (!explicitType && tag === 'svg') inferred = 'svg';
       if (!explicitType && (tag === 'video' || tag === 'audio')) inferred = 'media';
+      if (!explicitType && tag === 'canvas') inferred = 'canvas';
       const chartScript = el.querySelector?.('script[type="application/json"][data-bento-chart],script[type="application/json"][data-chart-option]');
       let chartOption = null;
       if (chartScript) {
         try { chartOption = JSON.parse(chartScript.textContent); } catch (_) {}
       }
+      const tableRows = tag === 'table' || inferred === 'table' ? [...el.querySelectorAll(':scope > thead > tr,:scope > tbody > tr,:scope > tfoot > tr,:scope > tr')] : [];
       const table = tag === 'table' || inferred === 'table' ? {
-        rows: [...el.querySelectorAll('tr')].map(row => [...row.cells].map(cell => {
+        rows: tableRows.map((row, rowIndex) => [...row.cells].map((cell, columnIndex) => {
           const cellStyle = getComputedStyle(cell);
+          const cellRect = cell.getBoundingClientRect();
           return {
             html: cell.innerHTML,
             align: cellStyle.textAlign,
             color: cellStyle.color,
             bg: cellStyle.backgroundColor,
             bold: Number.parseInt(cellStyle.fontWeight, 10) >= 600,
+            rowSpan: cell.rowSpan,
+            colSpan: cell.colSpan,
+            rowIndex,
+            columnIndex,
+            rect: {x:(cellRect.left-r.left)*sx,y:(cellRect.top-r.top)*sy,w:cellRect.width*sx,h:cellRect.height*sy},
+            style: {
+              color: cellStyle.color,
+              backgroundColor: cellStyle.backgroundColor,
+              fontFamily: cellStyle.fontFamily,
+              fontSize: px(cellStyle.fontSize),
+              fontWeight: Number.parseInt(cellStyle.fontWeight, 10) || cellStyle.fontWeight,
+              textAlign: cellStyle.textAlign,
+              verticalAlign: cellStyle.verticalAlign,
+              padding: cellStyle.padding,
+              border: cellStyle.border,
+            },
+            hasComplexContent: Boolean(cell.querySelector('img,svg,canvas,video,audio,table,[data-bento-type="chart"],[data-bento-type="complex"]')),
           };
         })),
         columnWidths: [...(el.querySelector('tr')?.cells || [])].map(cell => cell.getBoundingClientRect().width),
         headerRows: el.querySelectorAll('thead tr').length,
+        nestedTable: Boolean(el.querySelector('table')),
       } : null;
+      if (table) {
+        const effectiveCounts = table.rows.map(row => row.reduce((sum, cell) => sum + cell.colSpan, 0));
+        table.complexityReasons = [];
+        if (table.rows.some(row => row.some(cell => cell.rowSpan > 1))) table.complexityReasons.push('HTML table contains rowspan unsupported by Bento native table');
+        if (table.rows.some(row => row.some(cell => cell.colSpan > 1))) table.complexityReasons.push('HTML table contains colspan unsupported by Bento native table');
+        if (new Set(effectiveCounts).size > 1) table.complexityReasons.push('HTML table rows have inconsistent effective column counts');
+        if (table.nestedTable) table.complexityReasons.push('HTML table contains a nested table');
+        if (table.rows.some(row => row.some(cell => cell.hasComplexContent))) table.complexityReasons.push('HTML table cell contains image/chart/complex content');
+        if (table.headerRows > 1) table.complexityReasons.push('HTML table contains a multilevel header');
+        table.simpleTable = table.complexityReasons.length === 0;
+      }
       const layout = el.closest('[data-layout]');
       const exportMode = el.dataset.bentoExport || 'auto';
+      const before = getComputedStyle(el, '::before');
+      const after = getComputedStyle(el, '::after');
+      const pseudoElementDependent = [before, after].some(pseudo => pseudo.content && !['none','normal','""'].includes(pseudo.content) && (pseudo.display !== 'none') && (Number.parseFloat(pseudo.opacity) || 1) > 0);
       return {
         id: el.dataset.bentoId || `auto-${slideIndex + 1}-${index + 1}`,
         domIndex: index,
@@ -91,13 +150,19 @@ EXTRACT_LAYOUT_JS = r"""
         to: el.dataset.to || null,
         layout: layout?.dataset.layout || null,
         layoutGroup: layout?.dataset.layoutId || layout?.dataset.bentoId || null,
-        x: (r.left - sr.left) * sx,
-        y: (r.top - sr.top) * sy,
-        w: r.width * sx,
-        h: r.height * sy,
-        scrollWidth: el.scrollWidth * sx,
-        scrollHeight: el.scrollHeight * sy,
-        rotation: rotation(cs.transform),
+        x: tx.frame.x,
+        y: tx.frame.y,
+        w: tx.frame.w,
+        h: tx.frame.h,
+        boundingFrame: tx.boundingFrame,
+        offsetWidth: (Number.isFinite(el.offsetWidth) ? el.offsetWidth : r.width / tx.scaleX) * sx,
+        offsetHeight: (Number.isFinite(el.offsetHeight) ? el.offsetHeight : r.height / tx.scaleY) * sy,
+        clientWidth: (Number.isFinite(el.clientWidth) ? el.clientWidth : r.width / tx.scaleX) * sx,
+        clientHeight: (Number.isFinite(el.clientHeight) ? el.clientHeight : r.height / tx.scaleY) * sy,
+        scrollWidth: (Number.isFinite(el.scrollWidth) ? el.scrollWidth : r.width / tx.scaleX) * tx.scaleX * sx,
+        scrollHeight: (Number.isFinite(el.scrollHeight) ? el.scrollHeight : r.height / tx.scaleY) * tx.scaleY * sy,
+        rotation: tx.rotation,
+        transform: tx,
         opacity: Number.parseFloat(cs.opacity) || 1,
         z: Number.isFinite(Number.parseInt(el.dataset.bentoZ, 10)) ? Number.parseInt(el.dataset.bentoZ, 10) : (Number.parseInt(cs.zIndex, 10) || index),
         text: el.textContent.trim(),
@@ -113,10 +178,14 @@ EXTRACT_LAYOUT_JS = r"""
         muted: Boolean(el.muted),
         chartOption,
         table,
+        pseudoElementDependent,
         style: {
           color: cs.color,
           backgroundColor: cs.backgroundColor,
           backgroundImage: cs.backgroundImage,
+          backgroundSize: cs.backgroundSize,
+          backgroundPosition: cs.backgroundPosition,
+          backgroundRepeat: cs.backgroundRepeat,
           borderColor: cs.borderColor,
           borderWidth: px(cs.borderWidth),
           borderTopWidth: px(cs.borderTopWidth),
@@ -131,18 +200,32 @@ EXTRACT_LAYOUT_JS = r"""
           textAlign: cs.textAlign,
           verticalAlign: cs.verticalAlign,
           boxShadow: cs.boxShadow,
+          filter: cs.filter,
+          backdropFilter: cs.backdropFilter,
           padding: cs.padding,
           paddingLeft: px(cs.paddingLeft),
           paddingRight: px(cs.paddingRight),
           paddingTop: px(cs.paddingTop),
           paddingBottom: px(cs.paddingBottom),
           display: cs.display,
+          flexDirection: cs.flexDirection,
           justifyContent: cs.justifyContent,
           alignItems: cs.alignItems,
+          gridTemplateColumns: cs.gridTemplateColumns,
+          gridTemplateRows: cs.gridTemplateRows,
           objectFit: cs.objectFit,
           objectPosition: cs.objectPosition,
           overflow: cs.overflow,
+          overflowX: cs.overflowX,
+          overflowY: cs.overflowY,
+          whiteSpace: cs.whiteSpace,
+          textOverflow: cs.textOverflow,
+          writingMode: cs.writingMode,
           clipPath: cs.clipPath,
+          maskImage: cs.maskImage,
+          mixBlendMode: cs.mixBlendMode,
+          transform: cs.transform,
+          transformOrigin: cs.transformOrigin,
         }
       };
     });
@@ -155,6 +238,13 @@ EXTRACT_LAYOUT_JS = r"""
       stateOf: slide.dataset.stateOf || null,
       layout: slide.dataset.layout || null,
       background: scs.backgroundColor,
+      backgroundStyle: {
+        backgroundColor: scs.backgroundColor,
+        backgroundImage: scs.backgroundImage,
+        backgroundSize: scs.backgroundSize,
+        backgroundPosition: scs.backgroundPosition,
+        backgroundRepeat: scs.backgroundRepeat,
+      },
       notes: notes ? notes.textContent.trim() : '',
       sourceWidth: sr.width,
       sourceHeight: sr.height,
@@ -204,6 +294,7 @@ def extract_computed_layout(
             page = browser.new_page(viewport={"width": 1400, "height": 900}, device_scale_factor=1)
             for chapter in chapters:
                 page.goto(chapter.html_path.as_uri(), wait_until="load")
+                page.add_style_tag(content="*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}")
                 page.evaluate("document.fonts && document.fonts.ready")
                 page.wait_for_timeout(100)
                 computed = page.evaluate(EXTRACT_LAYOUT_JS)
@@ -220,7 +311,19 @@ def extract_computed_layout(
                     locator.screenshot(path=str(target))
                     screenshots.append(str(target.resolve()))
                     for element in slide["elements"]:
-                        if element["exportMode"] != "image":
+                        compatibility = classify_native_compatibility(element)
+                        element["compatibility"] = {
+                            "classification": compatibility.classification,
+                            "reasons": list(compatibility.reasons),
+                            "adjustments": list(compatibility.adjustments),
+                        }
+                        capture_needed = (
+                            element["exportMode"] == "image"
+                            or compatibility.classification == "image-required"
+                            or element.get("transform", {}).get("hasSkew")
+                            or element.get("transform", {}).get("is3D")
+                        )
+                        if not capture_needed:
                             continue
                         explicit = page.locator(f'[data-bento-id="{element["id"]}"]').first
                         if explicit.count() != 1:

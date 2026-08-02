@@ -1,0 +1,15 @@
+{
+  "format": "bento/html-registry/v1",
+  "chapterId": "chapter-03",
+  "document": {
+    "title": "HTML-first Bento feature matrix",
+    "modified": "2026-08-02T00:00:00Z",
+    "theme": {"background": "#ffffff", "color": "#14213d", "accent": "#2563eb", "fontFamily": "Arial"}
+  },
+  "assets": {}, "fonts": {}, "equations": {}, "figures": {}, "tables": {}, "charts": {},
+  "protected": {
+    "slideIds": ["transform-matrix", "css-compatibility", "complex-tables"],
+    "elementIds": ["rotate-30", "skew-fallback", "colspan-table", "rowspan-table", "multilevel-table", "image-cell-table"],
+    "requiredText": ["Transform coordinate fidelity", "Complex tables use localized SVG"]
+  }
+}

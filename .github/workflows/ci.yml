@@ -28,16 +28,44 @@ jobs:
 
       - name: Build and validate deterministic demo
         run: |
+          mkdir -p ci-output
           python -m scripts.build_bento --base Bento_Slides.base.bento.html --design gpt_bento_design.json --output demo.generated.bento.html
           python -m scripts.validate_bento demo.generated.bento.html --base Bento_Slides.base.bento.html
           cmp demo.generated.bento.html demo.bento.html
+          echo PASS > ci-output/legacy-byte-match.txt
 
       - name: Build HTML-first feature matrix and evidence bundle
         run: |
           python -m scripts.build_bento_from_html --html-dir tests/fixtures/html_first --registry-dir tests/fixtures/html_first --base Bento_Slides.base.bento.html --output ci-output/presentation.bento.html
           python -m scripts.validate_bento ci-output/presentation.bento.html --base Bento_Slides.base.bento.html
 
+      - name: Verify independent-build determinism
+        run: python -m scripts.check_html_first_determinism --html-dir tests/fixtures/html_first --registry-dir tests/fixtures/html_first --base Bento_Slides.base.bento.html --report ci-output/determinism-report.json
+
       - name: Run unit, integration, and browser tests
         env:
           BENTO_BROWSER_TEST: "1"
-        run: python -m unittest discover -v
+        run: |
+          set -o pipefail
+          python -m unittest discover -v 2>&1 | tee ci-output/test-output.txt
+
+      - name: Write Bento job summary
+        if: always()
+        run: python -m scripts.write_ci_summary --report ci-output/conversion-report.json --determinism ci-output/determinism-report.json --tests ci-output/test-output.txt --legacy ci-output/legacy-byte-match.txt --output "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload HTML-first evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: html-first-evidence
+          if-no-files-found: warn
+          path: |
+            ci-output/presentation.bento.html
+            ci-output/presentation.bento.json
+            ci-output/conversion-report.json
+            ci-output/determinism-report.json
+            ci-output/test-output.txt
+            ci-output/legacy-byte-match.txt
+            ci-output/diagnostics/
+            ci-output/screenshots/source/
+            ci-output/screenshots/bento/

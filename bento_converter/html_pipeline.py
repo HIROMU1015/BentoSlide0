@@ -14,6 +14,7 @@ from .html_converter import HtmlConversionResult, convert_html_layout
 from .html_document import assert_runtime_integrity, extract_bento_doc, load_html, write_embedded_document
 from .html_layout import LayoutResult, extract_computed_layout
 from .html_source import discover_chapters, merge_registries
+from .visual_comparison import compare_crops, compare_images
 
 
 @dataclass(frozen=True)
@@ -61,23 +62,52 @@ def _semantic_comparison(layout: LayoutResult, conversion: HtmlConversionResult,
         expected_ids = [emitted_id for decision in slide_decisions if decision["strategy"] != "ignore" for emitted_id in decision.get("emittedIds", [])]
         actual_ids = [element["id"] for element in output_slide["elements"]]
         bento_path = screenshots[index] if index < len(screenshots) else None
+        checks = {
+            "allEmittedElementsPresent": expected_ids == actual_ids,
+            "contentPreserved": all(decision.get("contentPreserved", True) for decision in slide_decisions),
+            "majorPlacementTracked": all("bentoFrame" in decision for decision in slide_decisions if decision["strategy"] != "ignore"),
+            "hierarchyAndZOrderPreserved": expected_ids == actual_ids,
+            "stylesTracked": all("styleChecks" in decision for decision in slide_decisions if decision["strategy"] != "ignore"),
+            "insideCanvas": all(element["x"] >= 0 and element["y"] >= 0 and element["x"] + element["w"] <= 1280 and element["y"] + element["h"] <= 720 for element in output_slide["elements"]),
+        }
+        image_comparison = compare_images(source_path, bento_path) if bento_path else {
+            "status": "fail", "warnings": ["Bento screenshot is missing"]
+        }
+        element_comparisons = []
+        for decision in slide_decisions:
+            source_type = decision.get("sourceType")
+            role = decision.get("role")
+            important = role in {"title", "main-claim", "primary-visual"} or source_type in {"equation", "table", "chart", "image", "svg"} or "title" in decision["elementId"].lower()
+            if not important or not bento_path or "sourceFrame" not in decision or "bentoFrame" not in decision:
+                continue
+            crop = compare_crops(
+                source_path,
+                bento_path,
+                decision.get("sourceBoundingFrame", decision["sourceFrame"]),
+                decision.get("bentoBoundingFrame", decision["bentoFrame"]),
+            )
+            if crop:
+                element_comparisons.append({
+                    "elementId": decision["elementId"], "role": role, "sourceType": source_type,
+                    "imageComparison": crop,
+                })
+        semantic_ok = all(checks.values())
+        status = "fail" if not semantic_ok or image_comparison["status"] == "fail" else image_comparison["status"]
+        if status == "pass" and any(item["imageComparison"]["status"] != "pass" for item in element_comparisons):
+            status = "warning"
         pairs.append({
             "slideId": slide_id,
             "source": Path(source_path).resolve().relative_to(root).as_posix(),
             "bento": Path(bento_path).resolve().relative_to(root).as_posix() if bento_path else None,
-            "checks": {
-                "allEmittedElementsPresent": expected_ids == actual_ids,
-                "contentPreserved": all(decision.get("contentPreserved", True) for decision in slide_decisions),
-                "majorPlacementTracked": all("bentoFrame" in decision for decision in slide_decisions if decision["strategy"] != "ignore"),
-                "hierarchyAndZOrderPreserved": expected_ids == actual_ids,
-                "stylesTracked": all("styleChecks" in decision for decision in slide_decisions if decision["strategy"] != "ignore"),
-                "insideCanvas": all(element["x"] >= 0 and element["y"] >= 0 and element["x"] + element["w"] <= 1280 and element["y"] + element["h"] <= 720 for element in output_slide["elements"]),
-            },
+            "status": status,
+            "checks": checks,
+            "imageComparison": image_comparison,
+            "elementComparisons": element_comparisons,
         })
     pair_checks_pass = all(all(pair["checks"].values()) for pair in pairs)
     return {
         "method": "semantic structure plus paired Chromium screenshots; pixel identity is not required",
-        "passed": source_ids == output_ids and len(pairs) == len(source_ids) and all(pair["bento"] for pair in pairs) and pair_checks_pass,
+        "passed": source_ids == output_ids and len(pairs) == len(source_ids) and all(pair["bento"] for pair in pairs) and pair_checks_pass and not any(pair["status"] == "fail" for pair in pairs),
         "slideOrderMatches": source_ids == output_ids,
         "sourceElementCandidates": len(decisions),
         "emittedSourceElements": len(emitted),
@@ -144,8 +174,18 @@ def build_from_html(
     report["runtimeIntegrity"] = True
     report["browserCheck"] = browser_report.as_dict() if browser_report else {"skipped": True}
     report["visualComparison"] = _semantic_comparison(layout, conversion, bento_screenshots, root) if browser_report else {"skipped": True}
-    if browser_report and not report["visualComparison"]["passed"]:
-        raise BentoConverterError("Semantic source/Bento screenshot comparison failed.")
+    if browser_report:
+        visual_pairs = report["visualComparison"]["pairs"]
+        report["summary"].update({
+            "visualPassSlides": sum(pair["status"] == "pass" for pair in visual_pairs),
+            "visualWarningSlides": sum(pair["status"] == "warning" for pair in visual_pairs),
+            "visualFailSlides": sum(pair["status"] == "fail" for pair in visual_pairs),
+            "maxVisualDifference": max((pair["imageComparison"].get("normalizedPixelDifference", 1) for pair in visual_pairs), default=0),
+            "averageVisualDifference": round(sum(pair["imageComparison"].get("normalizedPixelDifference", 1) for pair in visual_pairs) / max(len(visual_pairs), 1), 6),
+        })
     report_path = root / "conversion-report.json"
     _write_json(report_path, report)
+    if browser_report and not report["visualComparison"]["passed"]:
+        failed = [pair["slideId"] for pair in report["visualComparison"]["pairs"] if pair["status"] == "fail"]
+        raise BentoConverterError(f"Source/Bento visual comparison failed for slides: {failed}")
     return HtmlBuildResult(output, json_path, report_path, layout.source_screenshots, bento_screenshots, conversion.document, report)
