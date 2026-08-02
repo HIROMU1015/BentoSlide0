@@ -32,6 +32,11 @@ jobs:
           python -m scripts.validate_bento demo.generated.bento.html --base Bento_Slides.base.bento.html
           cmp demo.generated.bento.html demo.bento.html
 
+      - name: Build HTML-first feature matrix and evidence bundle
+        run: |
+          python -m scripts.build_bento_from_html --html-dir tests/fixtures/html_first --registry-dir tests/fixtures/html_first --base Bento_Slides.base.bento.html --output ci-output/presentation.bento.html
+          python -m scripts.validate_bento ci-output/presentation.bento.html --base Bento_Slides.base.bento.html
+
       - name: Run unit, integration, and browser tests
         env:
           BENTO_BROWSER_TEST: "1"

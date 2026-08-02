@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html as html_lib
 import math
+import re
 from typing import Any
 
 from .errors import BentoValidationError, ValidationReport, issue
@@ -89,8 +90,14 @@ SHAPE_FIELDS = {
     "from",
     "to",
 }
+IMAGE_FIELDS = {"src", "fit", "radius"}
+SVG_FIELDS = {"asset", "markup"}
+MEDIA_FIELDS = {"kind", "src", "poster", "fit", "radius", "controls", "autoplay", "loop", "muted"}
+CHART_FIELDS = {"preset", "option"}
+TABLE_FIELDS = {"columns", "rows", "header", "style"}
 CONVERTER_EXTENSION_FIELDS = {"equationId", "latexSource"}
-SUPPORTED_TYPES = {"text", "shape"}
+SUPPORTED_TYPES = {"text", "shape", "image", "svg", "media", "chart", "table"}
+SHAPE_NAMES = {"rect", "ellipse", "triangle", "arrow", "line", "path"}
 
 
 def _is_number(value: object) -> bool:
@@ -128,6 +135,13 @@ def validate_bento_doc(document: dict[str, Any]) -> ValidationReport:
                 )
     if not isinstance(document.get("theme"), dict):
         errors.append(issue(field="theme", actual=document.get("theme"), fix="Provide a Bento theme object."))
+    if "assets" in document and (
+        not isinstance(document["assets"], dict)
+        or not all(_nonempty(key) and _nonempty(value) for key, value in document["assets"].items())
+    ):
+        errors.append(issue(field="assets", actual=document.get("assets"), fix="Use an object mapping stable asset ids to non-empty data URIs."))
+    if "fonts" in document and not isinstance(document["fonts"], list):
+        errors.append(issue(field="fonts", actual=document.get("fonts"), fix="Use an array of Bento font descriptors."))
     for field in sorted(set(document) - ROOT_FIELDS):
         warnings.append(issue(field=field, actual=document[field], fix="Unknown root field is preserved but not validated."))
     slides = document.get("slides")
@@ -216,12 +230,88 @@ def validate_bento_doc(document: dict[str, Any]) -> ValidationReport:
                     if not _nonempty(element.get("latexSource")):
                         errors.append(issue(slide_id=slide_id, element_id=element_id, field="latexSource", actual=element.get("latexSource"), fix="Provide the original LaTeX source for generated equations."))
             elif element_type == "shape":
-                if not _nonempty(element.get("shape")):
-                    errors.append(issue(slide_id=slide_id, element_id=element_id, field="shape", actual=element.get("shape"), fix="Provide a native Bento shape name."))
-            known = ELEMENT_BASE_FIELDS | (TEXT_FIELDS if element_type == "text" else SHAPE_FIELDS)
+                if element.get("shape") not in SHAPE_NAMES:
+                    errors.append(issue(slide_id=slide_id, element_id=element_id, field="shape", actual=element.get("shape"), fix=f"Use one of {sorted(SHAPE_NAMES)}."))
+            elif element_type == "image":
+                if not _nonempty(element.get("src")):
+                    errors.append(issue(slide_id=slide_id, element_id=element_id, field="src", actual=element.get("src"), fix="Provide an asset id, URL, or data URI."))
+                if element.get("fit") not in {"cover", "contain", "fill"}:
+                    errors.append(issue(slide_id=slide_id, element_id=element_id, field="fit", actual=element.get("fit"), fix="Use cover, contain, or fill."))
+            elif element_type == "svg":
+                if not _nonempty(element.get("asset")) and not _nonempty(element.get("markup")):
+                    errors.append(issue(slide_id=slide_id, element_id=element_id, field="asset/markup", actual=None, fix="Provide SVG markup or an asset id."))
+            elif element_type == "media":
+                if element.get("kind") not in {"video", "audio"} or not _nonempty(element.get("src")):
+                    errors.append(issue(slide_id=slide_id, element_id=element_id, field="kind/src", actual=(element.get("kind"), element.get("src")), fix="Use video/audio and a non-empty source."))
+            elif element_type == "chart":
+                if element.get("preset") not in {"bar", "line", "pie", "scatter"} or not isinstance(element.get("option"), dict):
+                    errors.append(issue(slide_id=slide_id, element_id=element_id, field="preset/option", actual=(element.get("preset"), element.get("option")), fix="Use a supported preset and pure JSON option object."))
+            elif element_type == "table":
+                if not isinstance(element.get("columns"), list) or not isinstance(element.get("rows"), list):
+                    errors.append(issue(slide_id=slide_id, element_id=element_id, field="columns/rows", actual=(element.get("columns"), element.get("rows")), fix="Use structured column and row arrays."))
+                else:
+                    columns = element["columns"]
+                    for column_index, column in enumerate(columns):
+                        if not isinstance(column, dict) or not _is_number(column.get("w")) or column["w"] <= 0:
+                            errors.append(issue(slide_id=slide_id, element_id=element_id, field=f"columns[{column_index}].w", actual=column, fix="Use a positive fractional width."))
+                    for row_index, row in enumerate(element["rows"]):
+                        cells = row.get("cells") if isinstance(row, dict) else None
+                        if not isinstance(cells, list) or len(cells) != len(columns):
+                            errors.append(issue(slide_id=slide_id, element_id=element_id, field=f"rows[{row_index}].cells", actual=cells, fix="Use one structured cell per column."))
+                            continue
+                        for cell_index, cell in enumerate(cells):
+                            if not isinstance(cell, dict) or not isinstance(cell.get("html"), str):
+                                errors.append(issue(slide_id=slide_id, element_id=element_id, field=f"rows[{row_index}].cells[{cell_index}].html", actual=cell, fix="Provide inline HTML as a string."))
+            type_fields = {
+                "text": TEXT_FIELDS,
+                "shape": SHAPE_FIELDS,
+                "image": IMAGE_FIELDS,
+                "svg": SVG_FIELDS,
+                "media": MEDIA_FIELDS,
+                "chart": CHART_FIELDS,
+                "table": TABLE_FIELDS,
+            }
+            known = ELEMENT_BASE_FIELDS | type_fields.get(element_type, set())
             unknown = set(element) - known - CONVERTER_EXTENSION_FIELDS
             for field in sorted(unknown):
                 warnings.append(issue(slide_id=slide_id, element_id=element_id, field=field, actual=element[field], fix="Unknown element field is preserved but not validated."))
+    slide_by_id = {slide.get("id"): slide for slide in slides if isinstance(slide, dict) and _nonempty(slide.get("id"))}
+    for slide_index, slide in enumerate(slides):
+        if not isinstance(slide, dict):
+            continue
+        slide_id = slide.get("id")
+        state_of = slide.get("stateOf")
+        if state_of and state_of not in slide_by_id:
+            errors.append(issue(slide_id=slide_id, field="stateOf", actual=state_of, fix="Reference an existing slide id."))
+        element_ids = {element.get("id") for element in slide.get("elements", []) if isinstance(element, dict)}
+        for element in slide.get("elements", []):
+            if not isinstance(element, dict):
+                continue
+            link = element.get("link")
+            if isinstance(link, str) and link and not re.match(r"^(?:https?://|mailto:|#)", link) and link not in slide_by_id:
+                errors.append(issue(slide_id=slide_id, element_id=element.get("id"), field="link", actual=link, fix="Reference an existing slide/state id or an explicit external URL."))
+            for endpoint_name in ("from", "to"):
+                endpoint = element.get(endpoint_name)
+                if endpoint is not None and (
+                    not isinstance(endpoint, dict)
+                    or endpoint.get("el") not in element_ids
+                    or not _nonempty(endpoint.get("side"))
+                ):
+                    errors.append(issue(slide_id=slide_id, element_id=element.get("id"), field=endpoint_name, actual=endpoint, fix="Reference an element and side on the same slide."))
+        if slide.get("transition") == "morph":
+            previous = slides[slide_index - 1] if slide_index else None
+            previous_keys = {
+                element.get("morphId") or element.get("id")
+                for element in previous.get("elements", [])
+                if isinstance(element, dict)
+            } if isinstance(previous, dict) else set()
+            current_keys = {
+                element.get("morphId") or element.get("id")
+                for element in slide.get("elements", [])
+                if isinstance(element, dict)
+            }
+            if not previous_keys.intersection(current_keys):
+                errors.append(issue(slide_id=slide_id, field="transition", actual="morph", fix="Share at least one element id or morphId with the previous slide."))
     if errors:
         raise BentoValidationError(errors)
     return ValidationReport(tuple(warnings))
@@ -301,9 +391,9 @@ def unknown_fields(document: dict[str, Any]) -> dict[str, list[str]]:
             result[f"slide:{slide_id}"] = slide_unknown
         for element in slide.get("elements", []):
             element_type = element.get("type")
-            known = ELEMENT_BASE_FIELDS | (TEXT_FIELDS if element_type == "text" else SHAPE_FIELDS if element_type == "shape" else set())
-            custom = sorted(set(element) - known)
+            type_fields = {"text": TEXT_FIELDS, "shape": SHAPE_FIELDS, "image": IMAGE_FIELDS, "svg": SVG_FIELDS, "media": MEDIA_FIELDS, "chart": CHART_FIELDS, "table": TABLE_FIELDS}
+            known = ELEMENT_BASE_FIELDS | type_fields.get(element_type, set())
+            custom = sorted(set(element) - known - CONVERTER_EXTENSION_FIELDS)
             if custom:
                 result[f"element:{slide_id}/{element.get('id', '<unknown>')}"] = custom
     return result
-

@@ -1,0 +1,11 @@
+{
+  "format": "bento/html-registry/v1",
+  "chapterId": "chapter-02",
+  "document": {
+    "title": "HTML-first Bento feature matrix",
+    "modified": "2026-08-02T00:00:00Z",
+    "theme": {"background": "#ffffff", "color": "#14213d", "accent": "#2563eb", "fontFamily": "Arial"}
+  },
+  "assets": {}, "equations": {}, "figures": {}, "tables": {}, "charts": {},
+  "protected": {"slideIds": ["chapter-combine"], "elementIds": ["complex-block", "unsupported-shape"], "requiredText": ["fallback policy"]}
+}

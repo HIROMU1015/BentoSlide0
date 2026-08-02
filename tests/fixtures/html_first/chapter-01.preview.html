@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<style>
+*{box-sizing:border-box}html,body{margin:0;background:#d9dde5;font-family:Arial,sans-serif}.slide{position:relative;width:1280px;height:720px;overflow:hidden;background:#fff;color:#14213d}.title{position:absolute;left:64px;top:42px;width:1152px;height:64px;font-size:38px;font-weight:700}.card{position:absolute;background:#f4f7fb;border:2px solid #c7d2e3;border-radius:18px;padding:22px;font-size:22px}.label{font-size:20px;color:#39506f}.equation{position:absolute;font:30px Georgia,serif;text-align:center;padding:20px;background:#eef4ff;border-radius:14px}.shape{position:absolute}.grid-table{position:absolute;border-collapse:collapse;font-size:20px}.grid-table th,.grid-table td{border:1px solid #8da0bc;padding:12px 18px}.chart{position:absolute;border:1px solid #b8c5d8;background:linear-gradient(#fff,#edf3fb)}.bar{position:absolute;bottom:50px;width:70px;background:#3973d4}.complex{position:absolute;padding:28px;border-radius:28px;background:linear-gradient(135deg,#3b82f6,#7c3aed);color:white;box-shadow:0 18px 40px #37415155;clip-path:polygon(0 0,100% 8%,92% 100%,5% 92%)}
+</style>
+</head>
+<body>
+<section class="slide" data-slide-id="text-equation" data-layout="free">
+  <h1 class="title" data-bento-id="te-title">Text and equation</h1>
+  <div class="card" data-bento-id="te-text" style="left:80px;top:160px;width:500px;height:230px">Editable <strong>rich text</strong><br>keeps its hierarchy.</div>
+  <div class="equation" data-bento-id="te-equation" data-bento-type="equation" data-equation-id="energy" style="left:650px;top:190px;width:500px;height:110px">E = mc²</div>
+</section>
+<section class="slide" data-slide-id="basic-shapes">
+  <h1 class="title" data-bento-id="bs-title">Basic shapes</h1>
+  <div class="shape" data-bento-id="shape-rect" data-bento-type="shape" data-bento-shape="rect" style="left:100px;top:190px;width:220px;height:150px;background:#60a5fa;border:3px solid #1d4ed8"></div>
+  <div class="shape" data-bento-id="shape-round" data-bento-type="shape" data-bento-shape="rounded" style="left:390px;top:190px;width:220px;height:150px;background:#34d399;border-radius:28px"></div>
+  <div class="shape" data-bento-id="shape-ellipse" data-bento-type="shape" data-bento-shape="ellipse" style="left:690px;top:190px;width:220px;height:150px;background:#fbbf24;border-radius:50%"></div>
+  <div class="shape" data-bento-id="shape-triangle" data-bento-type="shape" data-bento-shape="triangle" style="left:990px;top:190px;width:160px;height:150px;background:#fb7185"></div>
+</section>
+<section class="slide" data-slide-id="vectors">
+  <h1 class="title" data-bento-id="v-title">Arrows, lines, paths and connectors</h1>
+  <div class="shape" data-bento-id="v-line" data-bento-type="shape" data-bento-shape="line" data-line-end="arrow" style="left:110px;top:210px;width:300px;height:12px;border-top:4px solid #2563eb"></div>
+  <div class="shape" data-bento-id="v-arrow" data-bento-type="shape" data-bento-shape="arrow" style="left:480px;top:170px;width:240px;height:90px;background:#10b981"></div>
+  <svg data-bento-id="v-path" data-bento-type="shape" data-bento-shape="path" style="position:absolute;left:790px;top:170px;width:300px;height:130px" viewBox="0 0 300 130"><path d="M10 110 Q150 0 290 110" fill="none" stroke="#7c3aed" stroke-width="8"/></svg>
+  <div class="shape" data-bento-id="node-a" data-bento-type="shape" data-bento-shape="ellipse" style="left:260px;top:430px;width:130px;height:90px;background:#dbeafe"></div>
+  <div class="shape" data-bento-id="node-b" data-bento-type="shape" data-bento-shape="ellipse" style="left:850px;top:430px;width:130px;height:90px;background:#dcfce7"></div>
+  <div class="shape" data-bento-id="v-connector" data-bento-type="shape" data-bento-shape="connector" data-from="node-a:right" data-to="node-b:left" style="left:390px;top:469px;width:460px;height:8px;border-top:3px solid #334155"></div>
+</section>
+<section class="slide" data-slide-id="table">
+  <h1 class="title" data-bento-id="table-title">Structured table</h1>
+  <table class="grid-table" data-bento-id="results-table" data-table-id="results-table" style="left:150px;top:170px;width:980px"><thead><tr><th>Method</th><th>Accuracy</th><th>Latency</th></tr></thead><tbody><tr><td>Baseline</td><td>81%</td><td>44 ms</td></tr><tr><td>Proposed</td><td>92%</td><td>31 ms</td></tr></tbody></table>
+</section>
+<section class="slide" data-slide-id="bar-chart">
+  <h1 class="title" data-bento-id="bar-title">Bar chart</h1>
+  <div class="chart" data-bento-id="bar-native" data-bento-type="chart" data-chart-id="bar-data" style="left:170px;top:150px;width:940px;height:470px">
+    <div class="bar" style="left:150px;height:140px"></div><div class="bar" style="left:350px;height:240px"></div><div class="bar" style="left:550px;height:320px"></div>
+    <script type="application/json" data-chart-option>{"preset":"bar","xAxis":{"type":"category","data":["A","B","C"]},"yAxis":{"type":"value"},"series":[{"type":"bar","data":[3,5,7]}]}</script>
+  </div>
+</section>
+<section class="slide" data-slide-id="line-chart">
+  <h1 class="title" data-bento-id="line-title">Line chart</h1>
+  <div class="chart" data-bento-id="line-native" data-bento-type="chart" data-chart-id="line-data" style="left:170px;top:150px;width:940px;height:470px">
+    <svg style="width:100%;height:100%" viewBox="0 0 940 470"><polyline points="60,370 260,270 460,310 660,150 860,80" fill="none" stroke="#7c3aed" stroke-width="8"/></svg>
+    <script type="application/json" data-bento-chart>{"_bentoPreset":"line","xAxis":{"type":"category","data":[1,2,3,4,5]},"yAxis":{"type":"value"},"series":[{"type":"line","data":[2,4,3,7,9]}]}</script>
+  </div>
+</section>
+<section class="slide" data-slide-id="image">
+  <h1 class="title" data-bento-id="image-title">Original image asset</h1>
+  <img data-bento-id="image-native" data-asset-id="fixture-image" data-figure-id="fixture-image" alt="fixture" style="position:absolute;left:350px;top:150px;width:580px;height:430px;object-fit:contain" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='580' height='430'%3E%3Crect width='580' height='430' fill='%23dbeafe'/%3E%3Ccircle cx='290' cy='190' r='110' fill='%233b82f6'/%3E%3Ctext x='290' y='360' text-anchor='middle' font-size='38'%3EIMAGE%3C/text%3E%3C/svg%3E">
+</section>
+<section class="slide" data-slide-id="svg">
+  <h1 class="title" data-bento-id="svg-title">Editable SVG</h1>
+  <svg data-bento-id="svg-native" style="position:absolute;left:340px;top:150px;width:600px;height:430px" viewBox="0 0 600 430"><defs><linearGradient id="g"><stop stop-color="#2563eb"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient></defs><rect x="30" y="30" width="540" height="370" rx="48" fill="url(#g)"/><circle cx="300" cy="215" r="100" fill="#fff" opacity=".8"/></svg>
+</section>
+<section class="slide" data-slide-id="two-column" data-layout="two-column">
+  <h1 class="title" data-bento-id="two-title">Two-column layout</h1>
+  <div class="card" data-bento-id="two-left" data-layout="stack" data-layout-id="left-column" style="left:70px;top:150px;width:540px;height:470px"><strong>Evidence</strong><br><br>Measured observations remain grouped in the left column.</div>
+  <div class="card" data-bento-id="two-right" data-layout="stack" data-layout-id="right-column" style="left:670px;top:150px;width:540px;height:470px"><strong>Conclusion</strong><br><br>The interpretation remains grouped in the right column.</div>
+</section>
+<section class="slide" data-slide-id="observation-interpretation" data-layout="observation-interpretation">
+  <h1 class="title" data-bento-id="oi-title">Observation → interpretation</h1>
+  <div class="card" data-bento-id="observation" style="left:90px;top:180px;width:440px;height:300px">Observation<br><br>Loss decreases monotonically.</div>
+  <div class="shape" data-bento-id="oi-arrow" data-bento-type="shape" data-bento-shape="arrow" style="left:570px;top:280px;width:140px;height:70px;background:#2563eb"></div>
+  <div class="card" data-bento-id="interpretation" style="left:750px;top:180px;width:440px;height:300px">Interpretation<br><br>Optimization is stable.</div>
+</section>
+<section class="slide" data-slide-id="equation-dissection" data-layout="equation-dissection">
+  <h1 class="title" data-bento-id="ed-title">Equation dissection</h1>
+  <div class="equation" data-bento-id="ed-equation" data-bento-type="equation" data-equation-id="objective" style="left:190px;top:150px;width:900px;height:100px">L = data + regularizer</div>
+  <div class="card" data-bento-id="ed-data" style="left:120px;top:340px;width:440px;height:190px">Data term<br>fits observations</div>
+  <div class="card" data-bento-id="ed-regularizer" style="left:720px;top:340px;width:440px;height:190px">Regularizer<br>controls complexity</div>
+</section>
+<section class="slide" data-slide-id="morph-start">
+  <h1 class="title" data-bento-id="morph-title" data-morph-id="morph-title">Morph start</h1>
+  <div class="shape" data-bento-id="morph-box" data-morph-id="morph-box" data-bento-type="shape" data-bento-shape="rounded" style="left:160px;top:230px;width:260px;height:180px;background:#60a5fa;border-radius:24px"></div>
+</section>
+<section class="slide" data-slide-id="morph-end" data-transition="morph">
+  <h1 class="title" data-bento-id="morph-title" data-morph-id="morph-title">Morph end</h1>
+  <div class="shape" data-bento-id="morph-box" data-morph-id="morph-box" data-bento-type="shape" data-bento-shape="rounded" style="left:780px;top:350px;width:360px;height:220px;background:#8b5cf6;border-radius:48px"></div>
+</section>
+<section class="slide" data-slide-id="state-base" data-slide-name="Base state">
+  <h1 class="title" data-bento-id="state-title">State and link</h1>
+  <div class="card" data-bento-id="state-link" data-link="state-detail" style="left:320px;top:220px;width:640px;height:180px;text-align:center">Open detailed state</div>
+</section>
+<section class="slide" data-slide-id="state-detail" data-state-of="state-base" data-slide-name="Detail state">
+  <h1 class="title" data-bento-id="state-detail-title">Detailed state</h1>
+  <div class="card" data-bento-id="state-detail-card" style="left:250px;top:180px;width:780px;height:350px">This slide is a named state of the base slide.</div>
+</section>
+<section class="slide" data-slide-id="speaker-notes">
+  <h1 class="title" data-bento-id="notes-title">Speaker notes</h1>
+  <div class="card" data-bento-id="notes-body" style="left:220px;top:190px;width:840px;height:260px">The visible slide excludes presenter-only notes.</div>
+  <aside data-speaker-notes style="display:none">Explain why the deterministic boundary matters.</aside>
+  <div data-bento-id="authoring-guide" data-bento-export="ignore" style="display:none">HTML-only authoring guide</div>
+</section>
+</body>
+</html>

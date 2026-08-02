@@ -1,0 +1,31 @@
+{
+  "format": "bento/html-registry/v1",
+  "chapterId": "chapter-01",
+  "document": {
+    "title": "HTML-first Bento feature matrix",
+    "modified": "2026-08-02T00:00:00Z",
+    "theme": {"background": "#ffffff", "color": "#14213d", "accent": "#2563eb", "fontFamily": "Arial"}
+  },
+  "assets": {
+    "fixture-image": {
+      "mimeType": "image/svg+xml",
+      "data": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='580' height='430'%3E%3Crect width='580' height='430' fill='%23dbeafe'/%3E%3Ccircle cx='290' cy='190' r='110' fill='%233b82f6'/%3E%3Ctext x='290' y='360' text-anchor='middle' font-size='38'%3EIMAGE%3C/text%3E%3C/svg%3E",
+      "paperSource": "Synthetic fixture image"
+    }
+  },
+  "equations": {
+    "energy": {"latex": "E = mc^2", "paperSource": "Fixture equation 1"},
+    "objective": {"latex": "\\mathcal{L}=\\mathcal{L}_{data}+\\lambda\\mathcal{R}", "paperSource": "Fixture equation 2"}
+  },
+  "charts": {
+    "bar-data": {"paperSource": "Fixture table A"},
+    "line-data": {"paperSource": "Fixture table B"}
+  },
+  "tables": {"results-table": {"paperSource": "Fixture results"}},
+  "figures": {"fixture-image": {"paperSource": "Synthetic fixture"}},
+  "protected": {
+    "slideIds": ["text-equation", "morph-start", "morph-end", "state-base", "state-detail"],
+    "elementIds": ["te-equation", "results-table", "state-link"],
+    "requiredText": ["Editable", "Optimization is stable"]
+  }
+}
