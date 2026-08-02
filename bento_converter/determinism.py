@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,10 @@ def sha256_file(path: str | Path) -> str:
 def normalize_evidence(value: Any, build_root: str | Path | None = None) -> Any:
     """Remove only machine/run-local evidence while retaining computed values."""
 
-    root = str(Path(build_root).resolve()).replace("\\", "/") if build_root else None
+    root = None
+    if build_root:
+        supplied = str(build_root).replace("\\", "/").rstrip("/")
+        root = supplied if re.match(r"^[A-Za-z]:/", supplied) else str(Path(build_root).resolve()).replace("\\", "/").rstrip("/")
     if isinstance(value, dict):
         return {
             key: normalize_evidence(item, build_root)
