@@ -10,13 +10,17 @@ import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import unquote, urlparse
 
 from .errors import ConversionError
 
 
 ResourceLookup = Callable[[str], str]
+
+
+class ResourceResolutionError(ConversionError):
+    """A resource-bearing field cannot be made portable."""
 
 
 def _data_uri(path: Path) -> tuple[str, str]:
@@ -87,55 +91,68 @@ class ResourceContext:
         )
 
 
-def resolve_embedded_resource(value: str, *, context: ResourceContext) -> str:
+def resolve_embedded_resource(value: str, *, context: ResourceContext, field: str | None = None) -> str:
     """Return a portable resource URL and record local-resource embedding."""
 
     original = html.unescape(value).strip()
     if not original or original.startswith(("data:", "#", "http:", "https:", "mailto:", "tel:")):
         return original
     if original.lower().startswith("javascript:"):
-        raise ConversionError(f"Unsafe javascript resource reference in {context.slide_id}/{context.element_id}.")
+        raise ResourceResolutionError(f"Unsafe javascript resource reference in {context.slide_id}/{context.element_id}.")
     if original.startswith("asset:"):
-        asset_id = original[len("asset:"):]
+        asset_reference = original[len("asset:"):]
+        asset_id, separator, fragment = asset_reference.partition("#")
         if not asset_id or context.asset_lookup is None:
-            raise ConversionError(f"Registry asset {asset_id!r} is unavailable for {context.slide_id}/{context.element_id}.")
+            raise ResourceResolutionError(f"Registry asset {asset_id!r} is unavailable for {context.slide_id}/{context.element_id}.")
         try:
             result = context.asset_lookup(asset_id)
-        except ConversionError:
-            raise
+        except ConversionError as exc:
+            raise ResourceResolutionError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - defensive wrapper for registry loaders
-            raise ConversionError(f"Registry asset {asset_id!r} cannot be resolved for {context.slide_id}/{context.element_id}: {exc}") from exc
-        context.records.append({
+            raise ResourceResolutionError(f"Registry asset {asset_id!r} cannot be resolved for {context.slide_id}/{context.element_id}: {exc}") from exc
+        record = {
             "slideId": context.slide_id, "elementId": context.element_id,
             "kind": "embedded-local-asset", "source": f"asset:{asset_id}",
             "resolvedMimeType": result.split(";", 1)[0].removeprefix("data:") if result.startswith("data:") else "registry-asset",
             "result": "data-uri", "contentChanged": False,
-        })
-        return result
+        }
+        if field:
+            record["resourceField"] = field
+        if separator:
+            record["fragmentPreserved"] = True
+        context.records.append(record)
+        return result + (f"#{fragment}" if separator else "")
 
     resolved: Path
+    parsed = urlparse(original)
+    fragment = parsed.fragment
     if original.lower().startswith("file:"):
         resolved = _path_from_file_uri(original)
     elif _is_windows_path(original) or os.path.isabs(original):
-        resolved = Path(unquote(original))
+        path_value = original[: -(len(fragment) + 1)] if fragment else original
+        resolved = Path(unquote(path_value))
     else:
-        parsed = urlparse(original)
         if parsed.scheme:
             return original
         resolved = context.source_root / unquote(parsed.path)
     if not resolved.is_file():
         redacted = _redacted_source(original, resolved, context.source_root)
-        raise ConversionError(
+        raise ResourceResolutionError(
             f"Local resource is missing for slideId={context.slide_id!r}, elementId={context.element_id!r}: "
             f"{redacted}. Resolve the path relative to {context.source_html_path.name} or provide a registry asset."
         )
     data, mime = _data_uri(resolved)
-    context.records.append({
+    record = {
         "slideId": context.slide_id, "elementId": context.element_id,
         "kind": "embedded-local-asset", "source": _redacted_source(original, resolved, context.source_root),
         "resolvedMimeType": mime, "result": "data-uri", "contentChanged": False,
-    })
-    return data
+    }
+    if field:
+        record["resourceField"] = field
+    if fragment:
+        record["fragmentPreserved"] = True
+    context.records.append(record)
+    return data + (f"#{fragment}" if fragment else "")
 
 
 def _css_url_ranges(value: str) -> Iterable[tuple[int, int, str, str]]:
@@ -180,7 +197,7 @@ def replace_css_urls(value: str, *, context: ResourceContext) -> str:
     cursor = 0
     for start, end, resource, quote in _css_url_ranges(value):
         parts.append(value[cursor:start])
-        resolved = resolve_embedded_resource(resource, context=context)
+        resolved = resolve_embedded_resource(resource, context=context, field="css-url")
         delimiter = quote or '"'
         parts.append(f"url({delimiter}{resolved}{delimiter})")
         cursor = end
@@ -218,7 +235,7 @@ class _ResourceEmbeddingParser(HTMLParser):
             elif lower in self._always_resource_attrs or (lower in {"href", "xlink:href"} and tag.lower() in self._href_resource_tags):
                 if value.lower().startswith("javascript:"):
                     continue
-                value = resolve_embedded_resource(value, context=self.context)
+                value = resolve_embedded_resource(value, context=self.context, field=lower)
             values.append(f' {name}="{html.escape(value, quote=True)}"')
         return "".join(values)
 
@@ -279,6 +296,46 @@ def embed_markup_resources(markup: str, *, context: ResourceContext) -> str:
     return "".join(parser.parts)
 
 
+RESOURCE_EXTENSIONS = {
+    ".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp",
+    ".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav",
+    ".m4v", ".mov", ".mp4", ".ogv", ".webm",
+    ".woff", ".woff2", ".ttf", ".otf",
+}
+
+
+def _looks_relative_resource(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    suffix = Path(unquote(parsed.path)).suffix.lower()
+    return suffix in RESOURCE_EXTENSIONS
+
+
+def _looks_explicit_local(value: str) -> bool:
+    normalized = html.unescape(value).strip()
+    return normalized.lower().startswith("file:") or _is_windows_path(normalized) or normalized.startswith("/")
+
+
+def embed_chart_option_resources(value: Any, *, context: ResourceContext) -> Any:
+    """Recursively embed resource-bearing strings inside a chart option."""
+
+    if isinstance(value, dict):
+        return {key: embed_chart_option_resources(item, context=context) for key, item in value.items()}
+    if isinstance(value, list):
+        return [embed_chart_option_resources(item, context=context) for item in value]
+    if not isinstance(value, str):
+        return value
+    if value.startswith("image://"):
+        resource = value[len("image://"):]
+        if _is_local_resource(resource):
+            return "image://" + resolve_embedded_resource(resource, context=context, field="chart-option")
+        return value
+    if any(True for _ in _css_url_ranges(value)):
+        return replace_css_urls(value, context=context)
+    if _looks_explicit_local(value) or (_is_local_resource(value) and _looks_relative_resource(value)):
+        return resolve_embedded_resource(value, context=context, field="chart-option")
+    return value
+
+
 class _ResourceScanParser(HTMLParser):
     _always_resource_attrs = {"src", "poster", "data"}
     _href_resource_tags = {"image", "use", "feimage", "object"}
@@ -317,31 +374,126 @@ def unresolved_markup_resources(markup: str) -> list[str]:
 
 
 def scan_document_resources(document: dict[str, object]) -> dict[str, object]:
-    """Scan structured resource fields, not prose text, for leaked local URLs."""
+    """Recursively scan the final Bento document without treating prose as paths."""
 
     unresolved: list[dict[str, str]] = []
+    by_category: dict[str, int] = {}
     scanned = 0
-    for slide in document.get("slides", []):
-        if not isinstance(slide, dict):
-            continue
-        for element in slide.get("elements", []):
-            if not isinstance(element, dict):
-                continue
-            slide_id, element_id = str(slide.get("id")), str(element.get("id"))
-            for field in ("src", "poster", "data"):
-                value = element.get(field)
-                if isinstance(value, str):
-                    scanned += 1
-                    if _is_local_resource(value):
-                        unresolved.append({"slideId": slide_id, "elementId": element_id, "field": field, "value": "$LOCAL_RESOURCE"})
-            markup = element.get("markup")
-            if isinstance(markup, str):
-                for value in unresolved_markup_resources(markup):
-                    scanned += 1
-                    unresolved.append({"slideId": slide_id, "elementId": element_id, "field": "markup", "value": "$LOCAL_RESOURCE"})
+    embedded = 0
+    document_assets = document.get("assets", {}) if isinstance(document.get("assets"), dict) else {}
+
+    def record(
+        value: str, *, category: str, field: str, slide_id: str = "<document>",
+        element_id: str = "<none>", require_embedded: bool = False, asset_reference: bool = False,
+    ) -> None:
+        nonlocal scanned, embedded
+        scanned += 1
+        by_category[category] = by_category.get(category, 0) + 1
+        normalized = html.unescape(value).strip()
+        if asset_reference and normalized in document_assets:
+            return
+        if normalized.startswith("data:"):
+            embedded += 1
+            return
+        safe_external = normalized.startswith(("#", "http:", "https:", "mailto:", "tel:"))
+        if safe_external and not require_embedded:
+            return
+        local = _is_local_resource(normalized)
+        if require_embedded or local:
+            unresolved.append({
+                "slideId": slide_id, "elementId": element_id, "field": field,
+                "value": "$NON_SELF_CONTAINED_RESOURCE" if require_embedded and not local else "$LOCAL_RESOURCE",
+            })
+
+    def scan_markup(markup: str, *, slide_id: str, element_id: str, field: str) -> None:
+        parser = _ResourceScanParser()
+        parser.feed(markup)
+        parser.close()
+        for reference in parser.references:
+            record(reference, category="svgMarkup", field=field, slide_id=slide_id, element_id=element_id)
+
+    def scan_chart(value: Any, *, slide_id: str, element_id: str, field: str) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                scan_chart(item, slide_id=slide_id, element_id=element_id, field=f"{field}.{key}")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                scan_chart(item, slide_id=slide_id, element_id=element_id, field=f"{field}[{index}]")
+        elif isinstance(value, str):
+            if value.startswith("image://"):
+                record(value[len("image://"):], category="chartOption", field=field, slide_id=slide_id, element_id=element_id)
+                return
+            css_references = [resource for _, _, resource, _ in _css_url_ranges(value)]
+            if css_references:
+                for reference in css_references:
+                    record(reference, category="chartOption", field=field, slide_id=slide_id, element_id=element_id)
+            elif _looks_explicit_local(value) or (_is_local_resource(value) and _looks_relative_resource(value)):
+                record(value, category="chartOption", field=field, slide_id=slide_id, element_id=element_id)
+
+    direct_resource_fields = {"src", "poster", "data", "href", "xlink:href"}
+    css_resource_fields = {
+        "background", "backgroundImage", "background-image", "mask", "maskImage", "mask-image",
+        "filter", "clipPath", "clip-path", "fill", "stroke", "content",
+    }
+
+    def walk(value: Any, *, path: tuple[str, ...], slide_id: str = "<document>", element_id: str = "<none>") -> None:
+        if isinstance(value, dict):
+            current_slide = str(value.get("id")) if path and path[-1] == "slides[]" and isinstance(value.get("id"), str) else slide_id
+            current_element = str(value.get("id")) if path and path[-1] == "elements[]" and isinstance(value.get("id"), str) else element_id
+            element_type = value.get("type") if path and path[-1] == "elements[]" else None
+            for key, item in value.items():
+                field_path = ".".join((*path, str(key)))
+                if path == () and key == "assets" and isinstance(item, dict):
+                    for asset_id, asset_value in item.items():
+                        if isinstance(asset_value, str):
+                            record(asset_value, category="assets", field=f"assets.{asset_id}", require_embedded=True)
+                    continue
+                if key == "markup" and isinstance(item, str):
+                    scan_markup(item, slide_id=current_slide, element_id=current_element, field="markup")
+                    continue
+                if key == "option" and element_type == "chart":
+                    scan_chart(item, slide_id=current_slide, element_id=current_element, field="option")
+                    continue
+                if isinstance(item, str) and key == "asset" and element_type == "svg":
+                    record(item, category="svgAsset", field="asset", slide_id=current_slide, element_id=current_element, asset_reference=True)
+                    continue
+                if isinstance(item, str) and key in direct_resource_fields:
+                    category = "mediaPoster" if key == "poster" else "mediaSrc" if element_type == "media" else "imageSrc"
+                    record(item, category=category, field=key, slide_id=current_slide, element_id=current_element)
+                    continue
+                if isinstance(item, str) and key in css_resource_fields:
+                    refs = [resource for _, _, resource, _ in _css_url_ranges(item)]
+                    if refs:
+                        for reference in refs:
+                            record(reference, category="theme" if path[:1] == ("theme",) else "nested", field=field_path, slide_id=current_slide, element_id=current_element)
+                    elif _looks_explicit_local(item) or (_is_local_resource(item) and _looks_relative_resource(item)):
+                        record(item, category="theme" if path[:1] == ("theme",) else "nested", field=field_path, slide_id=current_slide, element_id=current_element)
+                    continue
+                walk(item, path=(*path, str(key)), slide_id=current_slide, element_id=current_element)
+        elif isinstance(value, list):
+            next_path = ("slides[]",) if path == ("slides",) else (*path[:-1], "elements[]") if path and path[-1] == "elements" else (*path, "[]")
+            for item in value:
+                walk(item, path=next_path, slide_id=slide_id, element_id=element_id)
+        elif isinstance(value, str):
+            field_path = ".".join(path)
+            prose_field = bool(path and path[-1] in {"html", "notes", "title", "text", "latexSource"})
+            if value.startswith("image://"):
+                record(value[len("image://"):], category="nested", field=field_path, slide_id=slide_id, element_id=element_id)
+            else:
+                refs = [resource for _, _, resource, _ in _css_url_ranges(value)]
+                if refs:
+                    for reference in refs:
+                        record(reference, category="nested", field=field_path, slide_id=slide_id, element_id=element_id)
+                elif _looks_explicit_local(value) or (not prose_field and _is_local_resource(value) and _looks_relative_resource(value)):
+                    record(value, category="nested", field=field_path, slide_id=slide_id, element_id=element_id)
+
+    walk(document, path=())
     return {
-        "format": "bento/resource-scan/v1",
+        "format": "bento/resource-scan/v2",
         "passed": not unresolved,
+        "scannedFields": scanned,
         "scannedResourceFields": scanned,
+        "embeddedResources": embedded,
         "unresolved": unresolved,
+        "byCategory": dict(sorted(by_category.items())),
     }

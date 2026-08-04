@@ -18,7 +18,7 @@ from .errors import ConversionError, ValidationError, issue
 from .html_layout import CANVAS_HEIGHT, CANVAS_WIDTH, LayoutResult
 from .html_source import SourceChapter
 from .native_compatibility import classify_native_compatibility, classify_slide_background
-from .resource_embedding import ResourceContext, embed_markup_resources, replace_css_urls, resolve_embedded_resource, scan_document_resources
+from .resource_embedding import ResourceContext, ResourceResolutionError, embed_chart_option_resources, embed_markup_resources, replace_css_urls, resolve_embedded_resource, scan_document_resources
 
 DOC_ID_NAMESPACE = uuid.UUID("e03e3515-25d7-5dc9-891c-a2ac311ec118")
 NATIVE_TYPES = {"text", "equation", "shape", "table", "chart", "image", "svg", "media"}
@@ -366,14 +366,17 @@ def _table(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id:
     }
 
 
-def _chart(element: dict[str, Any], registry: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str) -> dict[str, Any]:
+def _chart(
+    element: dict[str, Any], registry: dict[str, Any], corrections: list[dict[str, Any]],
+    slide_id: str, resource_context: ResourceContext,
+) -> dict[str, Any]:
     option = element.get("chartOption")
     if option is None and element.get("chartId"):
         source = registry["charts"].get(element["chartId"], {})
         option = source.get("option") if isinstance(source, dict) else None
     if not isinstance(option, dict):
         raise ConversionError("Native chart requires a structured JSON option.")
-    option = json.loads(json.dumps(option, ensure_ascii=False))
+    option = embed_chart_option_resources(json.loads(json.dumps(option, ensure_ascii=False)), context=resource_context)
     preset = option.pop("_bentoPreset", None) if "_bentoPreset" in option else option.pop("preset", None)
     if not preset:
         series = option.get("series", [])
@@ -884,15 +887,15 @@ def convert_html_layout(
                 elif element["type"] == "table":
                     converted = _table(element, corrections, slide_id)
                 elif element["type"] == "chart":
-                    converted = _chart(element, registry, corrections, slide_id)
+                    converted = _chart(element, registry, corrections, slide_id, element_resource_context)
                 elif element["type"] == "image":
                     source = element.get("src")
                     asset_id = element.get("assetId")
                     if asset_id:
-                        source = resolve_embedded_resource(f"asset:{asset_id}", context=element_resource_context)
+                        source = resolve_embedded_resource(f"asset:{asset_id}", context=element_resource_context, field="src")
                         assets[asset_id] = source
                     elif source:
-                        source = resolve_embedded_resource(source, context=element_resource_context)
+                        source = resolve_embedded_resource(source, context=element_resource_context, field="src")
                     if not source:
                         raise ConversionError("Image has no src or registry asset id.")
                     fit = element["style"].get("objectFit")
@@ -902,15 +905,27 @@ def convert_html_layout(
                 elif element["type"] == "media":
                     media_source = element.get("src")
                     if element.get("assetId"):
-                        media_source = resolve_embedded_resource(f"asset:{element['assetId']}", context=element_resource_context)
+                        media_source = resolve_embedded_resource(f"asset:{element['assetId']}", context=element_resource_context, field="src")
                         assets[element["assetId"]] = media_source
                     elif media_source:
-                        media_source = resolve_embedded_resource(media_source, context=element_resource_context)
+                        media_source = resolve_embedded_resource(media_source, context=element_resource_context, field="src")
                     if not media_source:
                         raise ConversionError("Media has no src.")
-                    converted = {**_common(element, corrections, slide_id), "type": "media", "kind": element.get("mediaKind", "video"), "src": media_source, "controls": element.get("controls", True), "autoplay": element.get("autoplay", False), "loop": element.get("loop", False), "muted": element.get("muted", False), "fit": "contain", "radius": _compact(element["style"].get("borderRadius") or 0)}
+                    poster_source = element.get("poster")
+                    if poster_source:
+                        poster_source = resolve_embedded_resource(poster_source, context=element_resource_context, field="poster")
+                    converted = {
+                        **_common(element, corrections, slide_id), "type": "media",
+                        "kind": element.get("mediaKind", "video"), "src": media_source,
+                        **({"poster": poster_source} if poster_source else {}),
+                        "controls": element.get("controls", True), "autoplay": element.get("autoplay", False),
+                        "loop": element.get("loop", False), "muted": element.get("muted", False),
+                        "fit": "contain", "radius": _compact(element["style"].get("borderRadius") or 0),
+                    }
                 else:
                     raise ConversionError(f"Unsupported source type {element['type']!r}")
+            except ResourceResolutionError:
+                raise
             except ConversionError as exc:
                 if mode == "native":
                     converted = _svg_fallback(element, corrections, slide_id, element_resource_context, layout.image_fallbacks.get(key))
@@ -1082,7 +1097,10 @@ def convert_html_layout(
         "otherCorrections": sum(correction["kind"] not in {"overflow-frame-growth", "text-overflow", "bounds", "overlap"} for correction in corrections),
         "unresolvedWarnings": len(diagnostics), "corrections": len(corrections), "diagnostics": len(diagnostics),
         "embeddedLocalAssets": len(asset_resolutions),
+        "mediaPosterEmbeddings": sum(item.get("resourceField") == "poster" for item in asset_resolutions),
+        "svgFragmentPreservations": sum(bool(item.get("fragmentPreserved")) for item in asset_resolutions),
         "unresolvedLocalResourceReferences": len(resource_scan["unresolved"]),
+        "recursiveResourceScanCount": resource_scan["scannedFields"],
     }
     report = {
         "format": "bento/html-conversion-report/v1",

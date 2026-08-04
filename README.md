@@ -20,19 +20,22 @@ python -m scripts.build_bento_from_html `
   --html-dir input/ `
   --registry-dir input/ `
   --base Bento_Slides.base.bento.html `
-  --output output/presentation.bento.html
+  --output output/presentation.generated.bento.html
 ```
 
-The command creates:
+The build and finalization workflow creates:
 
 ```text
 output/
-├── presentation.bento.html
-├── presentation.bento.json
+├── presentation.generated.bento.html
+├── presentation.generated.bento.json
+├── presentation.final.bento.html
+├── presentation.final.bento.json
 ├── conversion-report.json
 ├── screenshots/
 │   ├── source/
 │   └── bento/
+├── revisions/
 └── diagnostics/
     ├── browser-check.json
     ├── computed-layout.json
@@ -40,9 +43,23 @@ output/
     └── resource-scan.json
 ```
 
-`presentation.bento.html` differs from the selected base only inside `script#bento-doc`. Local image, media, SVG, foreignObject, and CSS `url(...)` resources are embedded as data URIs. The command fails on unresolved local resource references and on fail-level crops for critical elements (titles/main claims/primary visuals/conclusions, equations, tables, charts, images, SVGs, or `data-bento-critical="true"`). Non-critical requested crops (`data-bento-compare="true"`) remain warnings. Other failures include malformed registries, duplicate IDs, missing protected content, broken references, invalid source sizes, runtime mutations, and serialize failures.
+`presentation.generated.bento.html` differs from the selected base only inside `script#bento-doc`. Local image, media/poster, chart, SVG/foreignObject, and CSS `url(...)` resources are embedded as data URIs; external SVG fragments are retained. A recursive final-document scan rejects unresolved resources. Critical crop failures, malformed registries, missing protected content, broken references, runtime mutations, and serialize failures also fail the build.
 
-See [the authoring contract](docs/html-first-authoring-contract.md), [conversion specification](docs/html-to-bento-conversion-spec.md), [native support matrix](docs/bento-native-feature-support.md), and [fallback policy](docs/fallback-policy.md).
+## Work editor finalization
+
+Start the localhost-only editor after conversion:
+
+```powershell
+python -m scripts.run_bento_work_editor `
+  --source output/presentation.generated.bento.html `
+  --target output/presentation.final.bento.html `
+  --registry output/diagnostics/merged-registry.json `
+  --port 8765
+```
+
+Open `http://127.0.0.1:8765/` in the ChatGPT Work browser. On first start, `final` is copied from `generated`; an existing final is never overwritten unless `--reset-final` is supplied. The injected toolbar saves `window.bento.serialize()` through a revision-checked API. Only `#bento-doc` is persisted, the runtime stays byte-identical, `presentation.final.bento.json` is synchronized, and prior revisions are retained under `output/revisions/`. Content edits are rejected by default; use `--allow-content-edit` only when explicitly intended.
+
+See [the authoring contract](docs/html-first-authoring-contract.md), [conversion specification](docs/html-to-bento-conversion-spec.md), [Work editor finalization](docs/work-editor-finalization.md), [source-of-truth policy](docs/source-of-truth-policy.md), [native support matrix](docs/bento-native-feature-support.md), and [fallback policy](docs/fallback-policy.md).
 
 ## Legacy JSON-first build
 
@@ -67,6 +84,6 @@ python -m scripts.check_html_first_determinism --html-dir tests/fixtures/html_fi
 Remove-Item Env:BENTO_BROWSER_TEST
 ```
 
-The browser-gated suite covers the feature matrix under `tests/fixtures/html_first`, including chapter combination, native feature rendering, CSS compatibility classification, six transform cases, simple and complex tables, morph/state metadata, slide-scoped localized fallback capture, local-resource self-containment, runtime integrity, Bento API editing, serialization, perceptual screenshot comparison, and independent-directory determinism.
+The browser-gated suite covers the feature matrix and the localhost Work editor, including browser serialize/save/reload, revision conflict rejection, runtime preservation, media poster embedding, external SVG fragments, recursive resource scanning, chapter combination, native rendering, localized fallback, visual comparison, and determinism.
 
-GitHub Actions uploads the complete `html-first-evidence` artifact and writes a job summary with test count, native/fallback counts, embedded/unresolved resource counts, visual and critical-crop counts/failure IDs, unresolved diagnostics, serialize status, determinism status, and HTML/Bento JSON SHA-256 values.
+GitHub Actions uploads the complete `html-first-evidence` artifact and writes a job summary with test count, native/fallback and visual results, Work editor save/conflict/runtime checks, poster/fragment/recursive-scan counts, unresolved resources, serialize and determinism status, and HTML/Bento JSON SHA-256 values.

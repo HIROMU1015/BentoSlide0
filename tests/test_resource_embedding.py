@@ -7,6 +7,7 @@ from pathlib import Path
 from bento_converter.errors import ConversionError
 from bento_converter.resource_embedding import (
     ResourceContext,
+    embed_chart_option_resources,
     embed_markup_resources,
     replace_css_urls,
     resolve_embedded_resource,
@@ -62,6 +63,30 @@ class ResourceEmbeddingTests(unittest.TestCase):
             self.assertIn("data:image/png;base64,", markup)
             self.assertIn('xlink:href="#symbol-a"', markup)
 
+    def test_external_svg_fragments_survive_href_xlink_and_css_embedding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "symbols.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
+            context = self.context(root)
+            markup = embed_markup_resources(
+                '<svg><use href="symbols.svg#symbol-a"/><use xlink:href="symbols.svg#symbol-b"/>'
+                '<rect style="filter:url(symbols.svg#blur);clip-path:url(symbols.svg#clip-a);fill:url(symbols.svg#gradient-a)"/></svg>',
+                context=context,
+            )
+            for fragment in ("#symbol-a", "#symbol-b", "#blur", "#clip-a", "#gradient-a"):
+                self.assertIn(fragment, markup)
+            self.assertEqual(markup.count("data:image/svg+xml;base64,"), 5)
+            self.assertNotIn("symbols.svg", markup)
+
+    def test_registry_asset_fragment_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            context = self.context(Path(temporary))
+            context.asset_lookup = lambda _: "data:image/svg+xml;base64,PHN2Zy8+"
+            self.assertEqual(
+                resolve_embedded_resource("asset:symbols#symbol-a", context=context),
+                "data:image/svg+xml;base64,PHN2Zy8+#symbol-a",
+            )
+
     def test_data_http_and_fragment_references_are_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             context = self.context(Path(temporary))
@@ -92,6 +117,48 @@ class ResourceEmbeddingTests(unittest.TestCase):
         scan = scan_document_resources(document)
         self.assertFalse(scan["passed"])
         self.assertEqual(scan["unresolved"], [{"slideId": "s", "elementId": "image", "field": "src", "value": "$LOCAL_RESOURCE"}])
+
+    def test_recursive_scan_covers_assets_media_chart_svg_theme_and_nested_values(self) -> None:
+        document = {
+            "assets": {"bad": "../asset.png", "good": "data:image/png;base64,AAAA"},
+            "theme": {"backgroundImage": "url(theme.png)"},
+            "slides": [{"id": "s", "elements": [
+                {"id": "media", "type": "media", "src": "data:video/mp4;base64,AAAA", "poster": "poster.png"},
+                {"id": "chart", "type": "chart", "option": {"series": [{"symbol": "image://relative.png"}]}},
+                {"id": "svg", "type": "svg", "markup": '<svg><image href="local.svg#figure"/></svg>'},
+            ]}],
+            "meta": {"nested": [{"download": "file:///tmp/local.png", "thumbnail": "nested.png"}]},
+        }
+        scan = scan_document_resources(document)
+        self.assertFalse(scan["passed"])
+        fields = {item["field"] for item in scan["unresolved"]}
+        self.assertTrue({"assets.bad", "poster", "option.series[0].symbol", "markup", "theme.backgroundImage", "meta.nested.[].download", "meta.nested.[].thumbnail"}.issubset(fields))
+        self.assertGreaterEqual(scan["embeddedResources"], 2)
+        self.assertTrue({"assets", "mediaPoster", "chartOption", "svgMarkup", "theme"}.issubset(scan["byCategory"]))
+
+    def test_recursive_scan_allows_data_fragments_and_does_not_flag_prose(self) -> None:
+        document = {
+            "assets": {"symbols": "data:image/svg+xml;base64,PHN2Zy8+#symbol-a"},
+            "slides": [{"id": "s", "elements": [
+                {"id": "text", "type": "text", "html": "Example ../assets/figure.png and C:/paper/image.png"},
+                {"id": "chart", "type": "chart", "option": {"symbol": "image://data:image/png;base64,AAAA"}},
+            ]}],
+        }
+        scan = scan_document_resources(document)
+        self.assertTrue(scan["passed"])
+        self.assertEqual(scan["unresolved"], [])
+
+    def test_chart_option_local_resources_are_embedded_recursively(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "point.png").write_bytes(b"point")
+            context = self.context(root)
+            option = embed_chart_option_resources(
+                {"series": [{"symbol": "image://point.png", "decal": {"color": "url(point.png)"}}]},
+                context=context,
+            )
+            self.assertTrue(option["series"][0]["symbol"].startswith("image://data:image/png;base64,"))
+            self.assertIn("url(\"data:image/png;base64,", option["series"][0]["decal"]["color"])
 
 
 if __name__ == "__main__":

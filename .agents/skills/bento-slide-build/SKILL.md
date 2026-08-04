@@ -1,6 +1,6 @@
 ---
 name: bento-slide-build
-description: Build, inspect, validate, and browser-check deterministic Bento Slides HTML from HTML/CSS plus registry JSON, or from the legacy coordinate design JSON, using an existing Bento base HTML. Use when asked to generate or regenerate a .bento.html deck, verify Bento runtime integrity, inspect native-versus-fallback decisions, compare source and Bento screenshots, or refresh slide evidence in this repository.
+description: Build, inspect, validate, browser-check, and finalize deterministic Bento Slides HTML from HTML/CSS plus registry JSON, or from the legacy coordinate design JSON, using an existing Bento base HTML. Use when asked to generate or regenerate a .bento.html deck, run the localhost Work editor, save final Bento edits, verify runtime integrity, inspect native-versus-fallback decisions, compare screenshots, or refresh slide evidence in this repository.
 ---
 
 # Bento slide build
@@ -9,22 +9,43 @@ Work from the repository root. For new work, treat chapter HTML/CSS and registry
 
 ## HTML-first flow
 
-1. Read `docs/html-first-authoring-contract.md` and identify matching sorted `*.preview.html` / `*.registry.json` chapters.
-2. Build the complete evidence bundle:
+Use these four ordered stages. Do not skip from source authoring directly to final editing.
+
+### 1. HTML-first build
+
+Read `docs/html-first-authoring-contract.md`, identify matching sorted `*.preview.html` / `*.registry.json` chapters, and build the complete evidence bundle:
 
 ```powershell
-python -m scripts.build_bento_from_html --html-dir input/ --registry-dir input/ --base Bento_Slides.base.bento.html --output output/presentation.bento.html
+python -m scripts.build_bento_from_html --html-dir input/ --registry-dir input/ --base Bento_Slides.base.bento.html --output output/presentation.generated.bento.html
 ```
 
-3. Inspect `conversion-report.json`. Report every native compatibility class, fallback, embedded/unresolved local resource count, correction policy/reinspection, unresolved overlap diagnostic, protected-content check, actual screenshot metric/crop result, critical reason/status contribution, and runtime result. Treat Bento API mutations through `loadDoc()` as API edits, not simulated user typing/dragging.
-4. Keep semantic elements native. Use SVG/image only for the smallest block that requires fallback. Never silently flatten a whole slide.
-5. Verify the deterministic double build when reproducibility evidence is requested:
+Keep semantic elements native. Use SVG/image only for the smallest block that requires fallback. Never silently flatten a whole slide.
+
+### 2. Conversion verification
+
+Inspect `conversion-report.json`. Report every native compatibility class, fallback, embedded/unresolved local resource count, correction policy/reinspection, unresolved overlap diagnostic, protected-content check, actual screenshot metric/crop result, critical reason/status contribution, and runtime result. Treat Bento API mutations through `loadDoc()` as API edits, not simulated user typing/dragging.
+
+Verify the deterministic double build when reproducibility evidence is requested:
 
 ```powershell
 python -m scripts.check_html_first_determinism --html-dir input/ --registry-dir input/ --base Bento_Slides.base.bento.html --report output/determinism-report.json
 ```
 
-6. Run the full test matrix shown below. Confirm `diagnostics/resource-scan.json` passes, `summary.criticalElementFail` is zero, fallback capture is scoped to each slide, and missing/duplicate captures include contextual errors. For CI handoff, confirm the `html-first-evidence` artifact contains the HTML/JSON, report, resource scan, computed layout, browser check, paired screenshots, tests, and determinism report.
+Run the full test matrix shown below. Confirm `diagnostics/resource-scan.json` recursively covers the generated document and passes, media posters/fragments are portable, `summary.criticalElementFail` is zero, and fallback capture remains slide-scoped.
+
+### 3. Work editor finalization
+
+Complete the HTML-first build and conversion verification first. Then start finalization with:
+
+```powershell
+python -m scripts.run_bento_work_editor --source output/presentation.generated.bento.html --target output/presentation.final.bento.html --registry output/diagnostics/merged-registry.json --port 8765
+```
+
+Open the localhost URL in the Work browser and use the injected controls to save, validate, revert, or reload. Describe Bento canvas interaction as UI editing and the persistence step as Work editor API saving. Treat an existing final `#bento-doc` as authoritative. Never rerun HTML-first conversion into the final path or overwrite it unless the user explicitly requests `--reset-final`.
+
+### 4. Final validation
+
+After editing, validate final HTML/JSON equality, runtime fingerprint, resource scan, protected content, revision/backup evidence, browser serialize round-trip, and the usual Bento browser check. For CI handoff, confirm `html-first-evidence` includes `work-editor-evidence/`.
 
 ## Legacy JSON-first flow
 

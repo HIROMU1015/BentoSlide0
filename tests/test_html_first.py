@@ -36,7 +36,7 @@ def element(element_id: str, element_type: str, **updates: object) -> dict[str, 
 class HtmlSourceTests(unittest.TestCase):
     def test_fixture_chapters_sort_and_merge_without_losing_registry_data(self) -> None:
         chapters = discover_chapters(HTML_FIXTURES, HTML_FIXTURES)
-        self.assertEqual([chapter.chapter_id for chapter in chapters], ["chapter-01", "chapter-02", "chapter-03"])
+        self.assertEqual([chapter.chapter_id for chapter in chapters], ["chapter-01", "chapter-02", "chapter-03", "chapter-04"])
         registry = merge_registries(chapters)
         self.assertEqual(registry["equations"]["energy"]["latex"], "E = mc^2")
         self.assertIn("chapter-combine", registry["protected"]["slideIds"])
@@ -193,17 +193,18 @@ class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
                 base_path=ROOT / "Bento_Slides.base.bento.html",
                 output_path=output,
             )
-            self.assertEqual(len(result.document["slides"]), 22)
+            self.assertEqual(len(result.document["slides"]), 23)
             self.assertTrue(result.json_path.is_file())
             self.assertTrue(result.report_path.is_file())
-            self.assertEqual(len(result.source_screenshots), 22)
-            self.assertEqual(len(result.bento_screenshots), 22)
+            self.assertEqual(len(result.source_screenshots), 23)
+            self.assertEqual(len(result.bento_screenshots), 23)
             self.assertTrue(result.report["runtimeIntegrity"])
             self.assertTrue(result.report["visualComparison"]["passed"])
             self.assertGreaterEqual(result.report["summary"]["strategies"]["svg"], 2)
             self.assertEqual(result.report["summary"]["nativeTable"], 1)
             self.assertEqual(result.report["summary"]["nativeChart"], 2)
             self.assertEqual(result.report["summary"]["nativeImage"], 1)
+            self.assertEqual(result.report["summary"]["media"], 1)
             self.assertEqual(result.report["summary"]["unresolvedWarnings"], 0)
             self.assertEqual(result.report["summary"]["unresolvedLocalResourceReferences"], 0)
             self.assertGreaterEqual(result.report["summary"]["embeddedLocalAssets"], 1)
@@ -212,7 +213,7 @@ class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
             self.assertTrue(result.report["resourceScan"]["passed"])
             self.assertTrue((output.parent / "diagnostics" / "resource-scan.json").is_file())
             self.assertTrue(result.report["browserCheck"]["serialize_roundtrip"])
-            self.assertEqual(result.report["browserCheck"]["rendered_slide_count"], 22)
+            self.assertEqual(result.report["browserCheck"]["rendered_slide_count"], 23)
             self.assertIsInstance(result.document["assets"]["fixture-image"], str)
             image = next(element for slide in result.document["slides"] for element in slide["elements"] if element["id"] == "image-native")
             self.assertEqual(image["src"], result.document["assets"]["fixture-image"])
@@ -244,6 +245,12 @@ class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
             self.assertEqual(compatibility["elements"][0]["id"], "css-compatibility--background")
             self.assertEqual(compatibility["elements"][0]["type"], "shape")
             self.assertTrue(all(element["x"] >= 0 and element["y"] >= 0 and element["x"] + element["w"] <= 1280 and element["y"] + element["h"] <= 720 for slide in result.document["slides"] for element in slide["elements"]))
+            portable = next(slide for slide in result.document["slides"] if slide["id"] == "portable-media-fragment")
+            portable_by_id = {element["id"]: element for element in portable["elements"]}
+            self.assertTrue(portable_by_id["native-video-poster"]["poster"].startswith("data:image/svg+xml;base64,"))
+            self.assertTrue(portable_by_id["native-video-poster"]["poster"].endswith("#poster-root"))
+            self.assertGreaterEqual(result.report["summary"]["mediaPosterEmbeddings"], 1)
+            self.assertGreaterEqual(result.report["summary"]["svgFragmentPreservations"], 1)
 
 
 if __name__ == "__main__":

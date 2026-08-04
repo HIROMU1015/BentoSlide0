@@ -29,11 +29,13 @@ def main() -> int:
     parser.add_argument("--determinism", required=True, type=Path)
     parser.add_argument("--tests", required=True, type=Path)
     parser.add_argument("--legacy", required=True, type=Path)
+    parser.add_argument("--work-editor", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
     report = _load(args.report)
     determinism = _load(args.determinism)
+    work_editor = _load(args.work_editor)
     test_count, tests_passed = _test_result(args.tests)
     legacy_passed = args.legacy.is_file() and args.legacy.read_text(encoding="utf-8").strip().lstrip("\ufeff") == "PASS"
     summary = report.get("summary", {}) if report else {}
@@ -68,6 +70,9 @@ def main() -> int:
         "No unresolved diagnostics": not unresolved,
         "No unresolved local resources": bool(resource_scan.get("passed")),
         "No critical crop failures": int(summary.get("criticalElementFail", 0)) == 0,
+        "Work editor save": bool(work_editor and work_editor.get("workEditorSaveTest")),
+        "Revision conflict rejection": bool(work_editor and work_editor.get("revisionConflictTest")),
+        "Work editor runtime integrity": bool(work_editor and work_editor.get("runtimeIntegrity")),
     }
     hashes = determinism.get("sha256", {}) if determinism else {}
     native_total = sum(int(summary.get(field, 0)) for field in ("nativeText", "nativeShape", "nativeTable", "nativeChart", "nativeImage", "nativeSvg", "media"))
@@ -85,6 +90,9 @@ def main() -> int:
         f"- Visual slides: pass {summary.get('visualPassSlides', 0)}, warning {summary.get('visualWarningSlides', 0)}, fail {summary.get('visualFailSlides', 0)}",
         f"- Critical crops: pass {summary.get('criticalElementPass', 0)}, warning {summary.get('criticalElementWarning', 0)}, fail {summary.get('criticalElementFail', 0)}",
         f"- Local resources: embedded {summary.get('embeddedLocalAssets', 0)}, unresolved {summary.get('unresolvedLocalResourceReferences', len(unresolved_resources))}",
+        f"- Media poster embeddings: {summary.get('mediaPosterEmbeddings', 0)}",
+        f"- SVG fragments preserved: {summary.get('svgFragmentPreservations', 0)}",
+        f"- Recursive resource fields scanned: {summary.get('recursiveResourceScanCount', 0)}",
         f"- Visual difference: max {summary.get('maxVisualDifference', 'n/a')}, average {summary.get('averageVisualDifference', 'n/a')}",
         f"- HTML SHA-256: {(hashes.get('html') or ['unavailable'])[0]}",
         f"- Bento JSON SHA-256: {(hashes.get('bentoJson') or ['unavailable'])[0]}",

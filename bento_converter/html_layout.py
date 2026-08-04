@@ -173,7 +173,7 @@ EXTRACT_LAYOUT_JS = r"""
         outerHTML: el.outerHTML,
         svg: tag === 'svg' ? el.outerHTML : el.querySelector?.(':scope > svg')?.outerHTML || null,
         src: el.currentSrc || el.src || null,
-        poster: el.poster || null,
+        poster: el.getAttribute('poster') || el.poster || null,
         mediaKind: tag === 'audio' ? 'audio' : 'video',
         controls: Boolean(el.controls),
         autoplay: Boolean(el.autoplay),

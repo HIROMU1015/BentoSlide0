@@ -25,6 +25,8 @@ The Bento runtime, styles, and scripts outside `script#bento-doc[type="applicati
 
 The standalone `.bento.json` must equal the embedded document. The final browser check loads that embedded document, verifies all slide and element frames, exercises Bento API edits for available text/shape/equation types, calls `serialize()`, and restores the original before screenshots.
 
+The converter writes a regenerable `presentation.generated.bento.html`. Finalization uses the localhost Work editor, which creates `presentation.final.bento.html` only when absent and thereafter treats its embedded document as authoritative. Browser responses temporarily inject save controls, but persisted HTML is rebuilt from the current final runtime plus the validated serialized `#bento-doc` only. Normalized document SHA-256 revisions, backups, same-directory temporary files, `os.replace()`, rollback, runtime fingerprints, and synchronized JSON sidecars protect saves.
+
 ## Layout and correction policy
 
 Computed source frames are normalized from the slide rectangle to the 1280 × 720 Bento canvas. Frames crossing the canvas are clamped and the report records before/after coordinates with `contentChanged: false`. A text box whose computed scroll height exceeds its frame receives a font-size reduction capped at 20%; text content is never shortened, summarized, translated, or reflowed into another element.
@@ -43,11 +45,15 @@ Each HTML cell records `rowSpan`, `colSpan`, row/column index, relative rectangl
 
 The pipeline rejects duplicate slide ids, duplicate per-slide element ids, conflicting registry ids, unsupported layouts/export modes, missing protected items, missing equation/asset sources, broken `stateOf` targets, and connector endpoints that do not exist on the same slide. Morph relationships are carried through stable IDs/`morphId`; visual pairing is inspected in the output report.
 
+## Portable resources
+
+Native media preserves both `src` and an optional `poster`; each passes through the common resolver. Local resources in chart options, document assets, SVG/foreignObject markup, media, images, theme/background structures, and nested resource-bearing keys are recursively embedded or rejected. `symbols.svg#symbol-a` becomes a data URI ending in `#symbol-a`, while an internal `#symbol-a` stays unchanged. The v2 resource scan traverses dicts/lists across the complete final document, records category counts, accepts data URIs (including fragments), and avoids interpreting ordinary prose as a path.
+
 ## Visual comparison
 
 Source and Bento slides are captured in the same Chromium engine. Every pair is normalized to 256×144 RGB and measured with 64-bit pHash distance, normalized mean absolute pixel difference, an 8×8×8 RGB distribution distance, edge-map difference, and a global SSIM-like score. Title, `main-claim`, `primary-visual`, `conclusion`, equation, table, chart, image, and SVG blocks also receive bounding-box crop comparison. Authors may add `data-bento-critical="true"` or request a non-critical crop with `data-bento-compare="true"`. Crops expand by 8 pixels and to at least 24×24 pixels before both images are normalized to the same analysis size.
 
-Whole-slide warning thresholds are pHash ≥ 10, pixel difference ≥ 0.075, color-distribution difference ≥ 0.10, or edge difference ≥ 0.065. A pair fails at pixel ≥ 0.30, color ≥ 0.35, edge ≥ 0.25, or at combined pixel ≥ 0.16 with edge ≥ 0.12 or pHash ≥ 20. These thresholds are calibrated against `tests/fixtures/html_first`: the 22-slide fixture produced no visual failures, maximum pixel difference 0.087774, and average 0.007179, while synthetic tests with a missing background, missing primary block, or large displacement fail. Native chart/SVG/font rasterization can be warning-level without hiding the metric.
+Whole-slide warning thresholds are pHash ≥ 10, pixel difference ≥ 0.075, color-distribution difference ≥ 0.10, or edge difference ≥ 0.065. A pair fails at pixel ≥ 0.30, color ≥ 0.35, edge ≥ 0.25, or at combined pixel ≥ 0.16 with edge ≥ 0.12 or pHash ≥ 20. These thresholds are calibrated against `tests/fixtures/html_first`: the 23-slide fixture produced no visual failures, maximum pixel difference 0.087774, and average 0.006934, while synthetic tests with a missing background, missing primary block, or large displacement fail. Native chart/SVG/font rasterization can be warning-level without hiding the metric.
 
 Critical crop failures escalate the owning slide to `fail`, even when the whole-slide image passes. Non-critical crop failures contribute a slide warning. Crop classification uses relaxed localized fail thresholds (pixel 0.45, color 0.75, edge 0.35, or combined pixel 0.30 with edge 0.16/pHash 32) to avoid treating renderer detail as missing content.
 

@@ -20,7 +20,7 @@ The mappings implemented by this repository are:
 | structured chart JSON | `chart` | yes | `bar`, `line`, `pie`, `scatter`; ECharts-shaped pure JSON |
 | image + registry asset | `image` | yes | Original path/data is embedded in `doc.assets` and used directly as a data URI for compatibility |
 | inline SVG | `svg.markup` | markup-editable | Preserves the localized SVG block and embeds local `href`/`xlink:href` resources |
-| video/audio | `media` | yes | Source, playback flags, fit, and radius retained |
+| video/audio | `media` | yes | Source, optional embedded video poster, playback flags, fit, and radius retained |
 | morph metadata | stable `id` / `morphId`, morph transition | yes | Consecutive slides remain separate native slides |
 | state/link metadata | `stateOf`, `name`, `link` | yes | Targets are validated |
 | presenter notes | `slide.notes` | yes | `[data-speaker-notes]` is not a visible element |
@@ -31,7 +31,7 @@ The mappings implemented by this repository are:
 
 The converter intentionally does not turn a whole slide into one SVG while any smaller semantic/native decomposition is available. `align: justify` is accepted because the checked-in Bento runtime preserves it even though older public examples list only left/center/right.
 
-Generated `.bento.html` files are portable and self-contained: local image/media/SVG/foreignObject/CSS resources resolve relative to the source chapter and become data URIs. A structured post-conversion scan fails when a local resource URL remains. Visual checks treat headings, critical roles, equations, tables, charts, images, SVGs, and `data-bento-critical="true"` elements as critical; a fail-level critical crop fails its slide while a requested non-critical crop can remain a warning.
+Generated `.bento.html` files are portable and self-contained: local image/media/poster/chart/SVG/foreignObject/CSS resources resolve relative to the source chapter and become data URIs. External SVG fragments survive embedding. A recursive post-conversion scan covers document assets and nested option/theme/meta structures and fails when a local resource URL remains. Visual checks treat headings, critical roles, equations, tables, charts, images, SVGs, and `data-bento-critical="true"` elements as critical; a fail-level critical crop fails its slide while a requested non-critical crop can remain a warning.
 
 ## Native compatibility classes
 

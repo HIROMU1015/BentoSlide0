@@ -1,0 +1,6 @@
+<svg id="poster-root" xmlns="http://www.w3.org/2000/svg" width="560" height="360" viewBox="0 0 560 360">
+  <rect width="560" height="360" rx="20" fill="#dbeafe"/>
+  <circle cx="280" cy="170" r="78" fill="#2563eb"/>
+  <path d="M260 125L340 170L260 215Z" fill="white"/>
+  <text x="280" y="300" text-anchor="middle" font-family="Arial" font-size="28" fill="#14213d">PORTABLE POSTER</text>
+</svg>

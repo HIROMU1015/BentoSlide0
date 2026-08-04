@@ -36,8 +36,12 @@ jobs:
 
       - name: Build HTML-first feature matrix and evidence bundle
         run: |
-          python -m scripts.build_bento_from_html --html-dir tests/fixtures/html_first --registry-dir tests/fixtures/html_first --base Bento_Slides.base.bento.html --output ci-output/presentation.bento.html
-          python -m scripts.validate_bento ci-output/presentation.bento.html --base Bento_Slides.base.bento.html
+          python -m scripts.build_bento_from_html --html-dir tests/fixtures/html_first --registry-dir tests/fixtures/html_first --base Bento_Slides.base.bento.html --output ci-output/presentation.generated.bento.html
+          python -m scripts.validate_bento ci-output/presentation.generated.bento.html --base Bento_Slides.base.bento.html
+
+      - name: Create Work editor save evidence
+        run: |
+          python -m scripts.check_work_editor --source ci-output/presentation.generated.bento.html --evidence-dir ci-output/work-editor-evidence --registry ci-output/diagnostics/merged-registry.json --output ci-output/work-editor-evidence/work-editor-report.json
 
       - name: Verify independent-build determinism
         run: python -m scripts.check_html_first_determinism --html-dir tests/fixtures/html_first --registry-dir tests/fixtures/html_first --base Bento_Slides.base.bento.html --report ci-output/determinism-report.json
@@ -51,7 +55,7 @@ jobs:
 
       - name: Write Bento job summary
         if: always()
-        run: python -m scripts.write_ci_summary --report ci-output/conversion-report.json --determinism ci-output/determinism-report.json --tests ci-output/test-output.txt --legacy ci-output/legacy-byte-match.txt --output "$GITHUB_STEP_SUMMARY"
+        run: python -m scripts.write_ci_summary --report ci-output/conversion-report.json --determinism ci-output/determinism-report.json --tests ci-output/test-output.txt --legacy ci-output/legacy-byte-match.txt --work-editor ci-output/work-editor-evidence/work-editor-report.json --output "$GITHUB_STEP_SUMMARY"
 
       - name: Upload HTML-first evidence
         if: always()
@@ -60,8 +64,8 @@ jobs:
           name: html-first-evidence
           if-no-files-found: warn
           path: |
-            ci-output/presentation.bento.html
-            ci-output/presentation.bento.json
+            ci-output/presentation.generated.bento.html
+            ci-output/presentation.generated.bento.json
             ci-output/conversion-report.json
             ci-output/determinism-report.json
             ci-output/test-output.txt
@@ -69,3 +73,4 @@ jobs:
             ci-output/diagnostics/
             ci-output/screenshots/source/
             ci-output/screenshots/bento/
+            ci-output/work-editor-evidence/
