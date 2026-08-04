@@ -19,17 +19,19 @@ The mappings implemented by this repository are:
 | complex HTML table | localized `svg.markup` | limited | Cell rectangles/styles preserved for colspan, rowspan, multilevel header, or image/chart/complex content |
 | structured chart JSON | `chart` | yes | `bar`, `line`, `pie`, `scatter`; ECharts-shaped pure JSON |
 | image + registry asset | `image` | yes | Original path/data is embedded in `doc.assets` and used directly as a data URI for compatibility |
-| inline SVG | `svg.markup` | markup-editable | Preserves the localized SVG block |
+| inline SVG | `svg.markup` | markup-editable | Preserves the localized SVG block and embeds local `href`/`xlink:href` resources |
 | video/audio | `media` | yes | Source, playback flags, fit, and radius retained |
 | morph metadata | stable `id` / `morphId`, morph transition | yes | Consecutive slides remain separate native slides |
 | state/link metadata | `stateOf`, `name`, `link` | yes | Targets are validated |
 | presenter notes | `slide.notes` | yes | `[data-speaker-notes]` is not a visible element |
-| complex CSS / unknown block | `svg.markup` | limited | Localized fallback; other elements remain native |
-| explicit raster fallback | `image` with PNG data URI | limited | Requires explicit `data-bento-id` |
+| complex CSS / unknown block | `svg.markup` | limited | Localized fallback; foreignObject and CSS local resources are embedded; other elements remain native |
+| explicit raster fallback | `image` with PNG data URI | limited | Requires a slide-local unique `data-bento-id`; the same ID may be shared across slides |
 | canvas / WebGL output | captured `image` | limited | Raster is required because no editable DOM representation exists |
 | simple slide gradient/image | background-only shape/image | partly | Content remains native; the whole slide is never flattened |
 
 The converter intentionally does not turn a whole slide into one SVG while any smaller semantic/native decomposition is available. `align: justify` is accepted because the checked-in Bento runtime preserves it even though older public examples list only left/center/right.
+
+Generated `.bento.html` files are portable and self-contained: local image/media/SVG/foreignObject/CSS resources resolve relative to the source chapter and become data URIs. A structured post-conversion scan fails when a local resource URL remains. Visual checks treat headings, critical roles, equations, tables, charts, images, SVGs, and `data-bento-critical="true"` elements as critical; a fail-level critical crop fails its slide while a requested non-critical crop can remain a warning.
 
 ## Native compatibility classes
 
