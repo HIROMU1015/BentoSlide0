@@ -212,25 +212,24 @@ class WindowsLauncherTests(unittest.TestCase):
     def test_repository_mutex_rejects_concurrent_launcher(self) -> None:
         repository = self.copy_repository("Bento concurrent start")
         common = repository / "scripts" / "bento_editor_launcher.common.ps1"
+        ready_path = repository / "output" / "mutex-ready"
         command = (
             f". '{common}'; "
             f"$handle = Enter-BentoLauncherMutex -Repository '{repository}'; "
             "if (-not $handle.Acquired) { exit 2 }; "
-            "[Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); "
+            f"Set-Content -LiteralPath '{ready_path}' -Value 'ready' -Encoding ascii; "
             "try { Start-Sleep -Seconds 30 } finally { Exit-BentoLauncherMutex -Handle $handle }"
         )
         encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
         holder = subprocess.Popen(
             ["powershell.exe", "-NoProfile", "-EncodedCommand", encoded],
-            cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         try:
-            ready = False
-            for _ in range(10):
-                if b"ready" in holder.stdout.readline():
-                    ready = True
-                    break
-            self.assertTrue(ready, "mutex holder did not report readiness")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not ready_path.is_file() and holder.poll() is None:
+                time.sleep(0.05)
+            self.assertTrue(ready_path.is_file(), "mutex holder did not report readiness")
             started_at = time.monotonic()
             result = self.run_powershell(
                 repository / "scripts" / "start_bento_editor.ps1",
@@ -242,7 +241,6 @@ class WindowsLauncherTests(unittest.TestCase):
         finally:
             holder.terminate()
             holder.wait(timeout=10)
-            holder.stdout.close()
 
     def test_stale_and_reused_pid_are_handled_safely(self) -> None:
         repository = self.copy_repository("Bento stale session")
