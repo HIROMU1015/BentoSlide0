@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -262,6 +263,13 @@ class WorkEditorBrowserTests(unittest.TestCase):
         except ImportError as exc:  # pragma: no cover
             self.skipTest(str(exc))
         storage = self.storage()
+        immediate_status = storage.status
+
+        def delayed_status() -> dict:
+            time.sleep(0.5)
+            return immediate_status()
+
+        storage.status = delayed_status  # type: ignore[method-assign]
         server, thread, base = self.running_server(storage)
         try:
             with sync_playwright() as playwright:
@@ -281,6 +289,7 @@ class WorkEditorBrowserTests(unittest.TestCase):
                 page.wait_for_function("document.querySelector('#bento-work-editor-status').textContent.includes('保存しました')")
                 page.reload(wait_until="load")
                 page.wait_for_function("window.bento && typeof window.bento.serialize === 'function'")
+                page.wait_for_function("document.querySelector('#work-save') && !document.querySelector('#work-save').disabled")
                 after = page.evaluate("window.bento.doc.slides.flatMap(s=>s.elements).find(e=>e.type==='shape').x")
                 serialized = page.evaluate("window.bento.serialize()")
                 browser.close()

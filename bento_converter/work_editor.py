@@ -40,6 +40,8 @@ TOOLBAR = r"""
 
     let revision = null;
     const status = document.getElementById('bento-work-editor-status');
+    const controls = Array.from(host.querySelectorAll('button'));
+    controls.forEach(button => { button.disabled = true; });
     const message = text => { status.textContent = text; };
     const errorText = payload => (payload.errors || [payload.error || '\u4e0d\u660e\u306a\u30a8\u30e9\u30fc']).join('\n');
     const originalSerialize = window.bento.serialize.bind(window.bento);
@@ -59,6 +61,7 @@ TOOLBAR = r"""
       const payload = await response.json();
       revision = payload.revision;
       message(`revision ${revision.slice(0, 19)}... / validation ${payload.validation}`);
+      controls.forEach(button => { button.disabled = false; });
     }
     async function post(path, payload) {
       const response = await fetch(path, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
