@@ -121,8 +121,12 @@ jobs:
             $stdout = Join-Path $copy "launcher-call-$script:callNumber.log"
             $stderr = Join-Path $copy "launcher-call-$script:callNumber.error.log"
             $commandLine = "/d /s /c `"`"$Path`" $Arguments`""
-            $process = Start-Process -FilePath cmd.exe -ArgumentList $commandLine -Wait -PassThru `
+            $process = Start-Process -FilePath cmd.exe -ArgumentList $commandLine -PassThru `
               -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            if (-not $process.WaitForExit(60000)) {
+              try { $process.Kill() } catch { }
+              throw "CMD launcher timed out: $Path $Arguments"
+            }
             if ($process.ExitCode -ne 0) {
               Get-Content $stdout, $stderr -ErrorAction SilentlyContinue
             }
