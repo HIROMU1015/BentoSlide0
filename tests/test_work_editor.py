@@ -223,6 +223,27 @@ class WorkEditorTests(unittest.TestCase):
             code, conflict = self.post(base + "/api/save", {"baseRevision": revision, "serializedHtml": html})
             self.assertEqual(code, 409)
             self.assertIn("already", conflict["error"])
+
+            current_html = load_html(storage.target)
+            invalid_document = extract_bento_doc(current_html)
+            invalid_document["slides"] = []
+            code, _ = self.post(base + "/api/save", {
+                "baseRevision": saved["revision"],
+                "serializedHtml": embed_bento_doc(current_html, invalid_document),
+            })
+            self.assertEqual(code, 422)
+
+            protected_document = extract_bento_doc(current_html)
+            next(
+                element for slide in protected_document["slides"] for element in slide["elements"]
+                if element["id"] == "slide-1-title"
+            )["html"] = "Changed"
+            code, _ = self.post(base + "/api/save", {
+                "baseRevision": saved["revision"],
+                "serializedHtml": embed_bento_doc(current_html, protected_document),
+            })
+            self.assertEqual(code, 422)
+
             code, checked = self.post(base + "/api/validate", {"baseRevision": saved["revision"], "serializedHtml": load_html(storage.target)})
             self.assertEqual((code, checked["validation"]), (200, "pass"))
         finally:
@@ -327,6 +348,7 @@ class WorkEditorBrowserTests(unittest.TestCase):
                     isString: typeof result === 'string',
                     isPromise: result instanceof Promise,
                     hasThen: Boolean(result && typeof result.then === 'function'),
+                    guardMarker: window.bento.serialize.workEditorGuard === true,
                     excludedToolbarIds: toolbarIds.every(id => !result.includes(id)),
                     containsWorkEditor: result.includes('bento-work-editor'),
                     sameParent: host.parentNode === parent,
@@ -338,6 +360,23 @@ class WorkEditorBrowserTests(unittest.TestCase):
                       return Boolean(button && button.isConnected && !button.disabled);
                     })
                   };
+                }""")
+                detached_contract = page.evaluate("""() => {
+                  const host = document.getElementById('bento-work-editor-host');
+                  const parent = host.parentNode;
+                  const next = host.nextSibling;
+                  host.remove();
+                  try {
+                    const result = window.bento.serialize();
+                    return {
+                      isString: typeof result === 'string',
+                      isPromise: result instanceof Promise,
+                      hasThen: Boolean(result && typeof result.then === 'function'),
+                      remainedDetached: !host.isConnected
+                    };
+                  } finally {
+                    parent.insertBefore(host, next);
+                  }
                 }""")
                 exception_contract = page.evaluate("""() => {
                   const host = document.getElementById('bento-work-editor-host');
@@ -394,6 +433,7 @@ class WorkEditorBrowserTests(unittest.TestCase):
             self.assertTrue(serialize_contract["isString"])
             self.assertFalse(serialize_contract["isPromise"])
             self.assertFalse(serialize_contract["hasThen"])
+            self.assertTrue(serialize_contract["guardMarker"])
             self.assertTrue(serialize_contract["excludedToolbarIds"])
             self.assertFalse(serialize_contract["containsWorkEditor"])
             self.assertTrue(serialize_contract["sameParent"])
@@ -401,6 +441,9 @@ class WorkEditorBrowserTests(unittest.TestCase):
             self.assertTrue(serialize_contract["connected"])
             self.assertTrue(serialize_contract["visible"])
             self.assertTrue(serialize_contract["buttonsUsable"])
+            self.assertEqual(detached_contract, {
+                "isString": True, "isPromise": False, "hasThen": False, "remainedDetached": True,
+            })
             self.assertEqual(exception_contract["error"], "serialize-test-error")
             self.assertTrue(exception_contract["sameParent"])
             self.assertTrue(exception_contract["sameNextSibling"])
