@@ -209,16 +209,16 @@ class WindowsLauncherTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
-    def test_repository_mutex_rejects_concurrent_launcher(self) -> None:
+    def test_repository_lock_rejects_concurrent_launcher(self) -> None:
         repository = self.copy_repository("Bento concurrent start")
         common = repository / "scripts" / "bento_editor_launcher.common.ps1"
-        ready_path = repository / "output" / "mutex-ready"
+        ready_path = repository / "output" / "lock-ready"
         command = (
             f". '{common}'; "
-            f"$handle = Enter-BentoLauncherMutex -Repository '{repository}'; "
+            f"$handle = Enter-BentoLauncherLock -Repository '{repository}'; "
             "if (-not $handle.Acquired) { exit 2 }; "
             f"Set-Content -LiteralPath '{ready_path}' -Value 'ready' -Encoding ascii; "
-            "try { Start-Sleep -Seconds 30 } finally { Exit-BentoLauncherMutex -Handle $handle }"
+            "try { Start-Sleep -Seconds 30 } finally { Exit-BentoLauncherLock -Handle $handle }"
         )
         encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
         holder = subprocess.Popen(
@@ -229,7 +229,7 @@ class WindowsLauncherTests(unittest.TestCase):
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and not ready_path.is_file() and holder.poll() is None:
                 time.sleep(0.05)
-            self.assertTrue(ready_path.is_file(), "mutex holder did not report readiness")
+            self.assertTrue(ready_path.is_file(), "lock holder did not report readiness")
             started_at = time.monotonic()
             result = self.run_powershell(
                 repository / "scripts" / "start_bento_editor.ps1",

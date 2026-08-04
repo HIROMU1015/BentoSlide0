@@ -12,11 +12,11 @@ $stateDirectory = Join-Path $repository 'output'
 $pidPath = Join-Path $stateDirectory 'work-editor.pid'
 $sessionPath = Join-Path $stateDirectory 'work-editor-session.json'
 $logPath = Join-Path $stateDirectory 'work-editor.log'
-$mutexHandle = $null
+$lockHandle = $null
 
 try {
-    $mutexHandle = Enter-BentoLauncherMutex -Repository $repository
-    if (-not $mutexHandle.Acquired) {
+    $lockHandle = Enter-BentoLauncherLock -Repository $repository
+    if (-not $lockHandle.Acquired) {
         throw '別のBento Work editorランチャーが起動または停止処理中です。数秒後にもう一度実行してください。'
     }
 
@@ -114,5 +114,5 @@ catch {
     exit 1
 }
 finally {
-    Exit-BentoLauncherMutex -Handle $mutexHandle
+    Exit-BentoLauncherLock -Handle $lockHandle
 }

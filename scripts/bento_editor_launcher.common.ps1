@@ -157,39 +157,36 @@ function Test-BentoSessionProcessIdentity {
     return [pscustomobject]@{ Valid = $true; Exists = $true; Reason = 'match'; Snapshot = $snapshot }
 }
 
-function Enter-BentoLauncherMutex {
+function Enter-BentoLauncherLock {
     param([Parameter(Mandatory = $true)][string]$Repository)
 
-    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stateDirectory = Join-Path $Repository 'output'
+    [System.IO.Directory]::CreateDirectory($stateDirectory) | Out-Null
+    $lockPath = Join-Path $stateDirectory 'work-editor-launcher.lock'
     try {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Repository.ToLowerInvariant())
-        $hash = ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').Substring(0, 32)
+        $stream = [System.IO.File]::Open(
+            $lockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+        return [pscustomobject]@{ Stream = $stream; Acquired = $true; Path = $lockPath }
     }
-    finally {
-        $sha.Dispose()
+    catch [System.IO.IOException] {
+        return [pscustomobject]@{ Stream = $null; Acquired = $false; Path = $lockPath }
     }
-
-    $mutex = New-Object System.Threading.Mutex($false, ("Local\BentoWorkEditorLauncher_{0}" -f $hash))
-    $acquired = $false
-    try {
-        $acquired = $mutex.WaitOne(0, $false)
-    }
-    catch [System.Threading.AbandonedMutexException] {
-        $acquired = $true
-    }
-    return [pscustomobject]@{ Mutex = $mutex; Acquired = $acquired }
 }
 
-function Exit-BentoLauncherMutex {
+function Exit-BentoLauncherLock {
     param($Handle)
 
     if ($null -eq $Handle) {
         return
     }
     if ($Handle.Acquired) {
-        try { $Handle.Mutex.ReleaseMutex() } catch { }
+        try { $Handle.Stream.Dispose() } catch { }
+        try { Remove-Item -LiteralPath $Handle.Path -Force -ErrorAction SilentlyContinue } catch { }
     }
-    $Handle.Mutex.Dispose()
 }
 
 function ConvertTo-BentoProcessArgument {

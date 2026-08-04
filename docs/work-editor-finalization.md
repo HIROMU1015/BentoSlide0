@@ -24,7 +24,7 @@ Defaults are `output/presentation.generated.bento.html`, `output/presentation.fi
 
 Relative paths resolve from the repository, not the caller's current directory. Python detection checks `.venv`, `venv`, and `env` under the repository, then `py.exe -3`, then `python.exe`; every candidate must successfully import `bento_converter`. `-NoClipboard` disables clipboard access for automation.
 
-The start launcher first validates `/api/status`. The same target and port is reported as already running without spawning another process. A different Bento target or any unrelated service on the port is left untouched and returns an error suggesting `start_bento_editor.cmd -Port 8766`. A repository-derived Windows named mutex rejects simultaneous launcher starts.
+The start launcher first validates `/api/status`. The same target and port is reported as already running without spawning another process. A different Bento target or any unrelated service on the port is left untouched and returns an error suggesting `start_bento_editor.cmd -Port 8766`. An exclusive `output/work-editor-launcher.lock` file, held with `FileShare.None` only during launcher work, rejects simultaneous starts.
 
 State is stored in `output/work-editor.pid` and `output/work-editor-session.json` using format `bento/work-editor-session/v1`. The session records PID, launcher/start timestamps, repository, absolute source/target/registry paths, loopback host, port, and URL. `output/work-editor.log` records launcher metadata and captured startup output; raw stdout and stderr remain in `output/work-editor.stdout.log` and `output/work-editor.error.log`. One `.previous.log` generation is retained.
 
