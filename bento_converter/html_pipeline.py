@@ -17,6 +17,22 @@ from .html_source import discover_chapters, merge_registries
 from .visual_comparison import compare_crops, compare_images
 
 
+CRITICAL_ROLES = {"title", "main-claim", "primary-visual", "conclusion"}
+CRITICAL_SOURCE_TYPES = {"equation", "table", "chart", "image", "svg"}
+
+
+def _critical_reason(decision: dict[str, Any]) -> str | None:
+    if decision.get("critical"):
+        return "data-bento-critical=true"
+    if decision.get("role") in CRITICAL_ROLES:
+        return f"role={decision['role']}"
+    if decision.get("sourceTag") in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        return f"sourceTag={decision['sourceTag']}"
+    if decision.get("sourceType") in CRITICAL_SOURCE_TYPES:
+        return f"sourceType={decision['sourceType']}"
+    return None
+
+
 @dataclass(frozen=True)
 class HtmlBuildResult:
     html_path: Path
@@ -77,7 +93,8 @@ def _semantic_comparison(layout: LayoutResult, conversion: HtmlConversionResult,
         for decision in slide_decisions:
             source_type = decision.get("sourceType")
             role = decision.get("role")
-            important = role in {"title", "main-claim", "primary-visual"} or source_type in {"equation", "table", "chart", "image", "svg"} or "title" in decision["elementId"].lower()
+            critical_reason = _critical_reason(decision)
+            important = critical_reason is not None or decision.get("compareCrop") or "title" in decision["elementId"].lower()
             if not important or not bento_path or "sourceFrame" not in decision or "bentoFrame" not in decision:
                 continue
             crop = compare_crops(
@@ -87,12 +104,20 @@ def _semantic_comparison(layout: LayoutResult, conversion: HtmlConversionResult,
                 decision.get("bentoBoundingFrame", decision["bentoFrame"]),
             )
             if crop:
+                contribution = "none"
+                if crop["status"] == "fail":
+                    contribution = "slide-fail" if critical_reason else "slide-warning"
+                elif crop["status"] == "warning":
+                    contribution = "slide-warning"
                 element_comparisons.append({
                     "elementId": decision["elementId"], "role": role, "sourceType": source_type,
+                    "critical": critical_reason is not None, "criticalReason": critical_reason,
+                    "statusContribution": contribution,
                     "imageComparison": crop,
                 })
         semantic_ok = all(checks.values())
-        status = "fail" if not semantic_ok or image_comparison["status"] == "fail" else image_comparison["status"]
+        critical_crop_fail = any(item["critical"] and item["imageComparison"]["status"] == "fail" for item in element_comparisons)
+        status = "fail" if not semantic_ok or image_comparison["status"] == "fail" or critical_crop_fail else image_comparison["status"]
         if status == "pass" and any(item["imageComparison"]["status"] != "pass" for item in element_comparisons):
             status = "warning"
         pairs.append({
@@ -182,10 +207,17 @@ def build_from_html(
             "visualFailSlides": sum(pair["status"] == "fail" for pair in visual_pairs),
             "maxVisualDifference": max((pair["imageComparison"].get("normalizedPixelDifference", 1) for pair in visual_pairs), default=0),
             "averageVisualDifference": round(sum(pair["imageComparison"].get("normalizedPixelDifference", 1) for pair in visual_pairs) / max(len(visual_pairs), 1), 6),
+            "criticalElementPass": sum(item["imageComparison"]["status"] == "pass" for pair in visual_pairs for item in pair["elementComparisons"] if item["critical"]),
+            "criticalElementWarning": sum(item["imageComparison"]["status"] == "warning" for pair in visual_pairs for item in pair["elementComparisons"] if item["critical"]),
+            "criticalElementFail": sum(item["imageComparison"]["status"] == "fail" for pair in visual_pairs for item in pair["elementComparisons"] if item["critical"]),
         })
     report_path = root / "conversion-report.json"
     _write_json(report_path, report)
+    resource_scan = report.get("resourceScan", {"passed": True, "unresolved": []})
+    _write_json(diagnostics_dir / "resource-scan.json", resource_scan)
     if browser_report and not report["visualComparison"]["passed"]:
         failed = [pair["slideId"] for pair in report["visualComparison"]["pairs"] if pair["status"] == "fail"]
         raise BentoConverterError(f"Source/Bento visual comparison failed for slides: {failed}")
+    if not resource_scan["passed"]:
+        raise BentoConverterError(f"Unresolved local resource references: {resource_scan['unresolved']}")
     return HtmlBuildResult(output, json_path, report_path, layout.source_screenshots, bento_screenshots, conversion.document, report)

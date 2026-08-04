@@ -30,6 +30,8 @@ Supported element annotations:
 |---|---|
 | `data-bento-type` | `text`, `equation`, `shape`, `table`, `chart`, `image`, `svg`, `media`, or a custom complex block |
 | `data-bento-export` | `native`, `svg`, `image`, `auto`, or `ignore`; default is `auto` |
+| `data-bento-critical` | `true` explicitly makes a localized crop failure fail the slide/build |
+| `data-bento-compare` | `true` requests a crop metric without making the element critical |
 | `data-bento-z` | Explicit stable z-order override; otherwise computed `z-index` and DOM order are used |
 | `data-paper-source` | Per-element paper provenance copied into the conversion report |
 | `data-equation-id` | Registry equation whose original LaTeX must be used |
@@ -46,6 +48,10 @@ Supported `data-layout` values are `figure-reading-guide`, `equation-dissection`
 Use `data-transition="morph"`, `data-state-of="slide-id"`, and `data-slide-name="…"` on slides. Presenter notes belong in `[data-speaker-notes]` and are copied to `slide.notes`, not rendered as an element.
 
 Simple flex centering, padding, letter spacing, object-fit, gradients, shadows, and 2D translate/scale/rotation can remain native with reported adjustments. Skew/3D, clip-path, masks, filters, backdrop-filter, blend modes, visible pseudo-element-dependent visuals, non-horizontal writing, and complex/multiple background layers should be expected to use a localized fallback. Complex slide backgrounds are isolated behind native foreground elements.
+
+Any fallback-capable element must have an explicit `data-bento-id`. Capture lookup is scoped to its containing slide, so the same stable ID may be reused on different slides for morph/state continuity. Duplicate matches within one slide fail with the slide ID, element ID, capture reason, and matched count.
+
+Local references in image/media sources, SVG `href`/`xlink:href`, foreignObject HTML, inline styles, style blocks, and CSS `url(...)` are resolved relative to the chapter HTML and embedded as data URIs. `asset:id` resolves through the registry. `data:`, `http:`, `https:`, and `#fragment` references remain unchanged. Missing local files fail with redacted source-relative context; generated Bento JSON must contain no unresolved local resource URL in a structured resource field.
 
 A native HTML table must be a rectangular grid with no rowspan/colspan, no nested table, no image/chart/complex cell, and at most one header row. Other table structures are supported through localized SVG and retain per-cell content, indices, spans, rectangles, and computed styles.
 

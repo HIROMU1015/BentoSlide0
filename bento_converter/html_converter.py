@@ -13,12 +13,12 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 from .errors import ConversionError, ValidationError, issue
 from .html_layout import CANVAS_HEIGHT, CANVAS_WIDTH, LayoutResult
 from .html_source import SourceChapter
 from .native_compatibility import classify_native_compatibility, classify_slide_background
+from .resource_embedding import ResourceContext, embed_markup_resources, replace_css_urls, resolve_embedded_resource, scan_document_resources
 
 DOC_ID_NAMESPACE = uuid.UUID("e03e3515-25d7-5dc9-891c-a2ac311ec118")
 NATIVE_TYPES = {"text", "equation", "shape", "table", "chart", "image", "svg", "media"}
@@ -405,27 +405,15 @@ def _asset_source(asset_id: str, chapters: list[SourceChapter]) -> tuple[str, st
     raise ConversionError(f"Asset {asset_id!r} is missing or has neither path nor data.")
 
 
-def _embed_file_url(source: str, generated_asset_id: str, assets: dict[str, Any]) -> str:
-    if not source.lower().startswith("file:"):
-        return source
-    parsed = urlparse(source)
-    local = unquote(parsed.path)
-    if re.match(r"^/[A-Za-z]:/", local):
-        local = local[1:]
-    data = _data_uri(Path(local))
-    assets[generated_asset_id] = data
-    return data
-
-
 def _slide_background(
-    slide: dict[str, Any], assets: dict[str, Any], corrections: list[dict[str, Any]],
+    slide: dict[str, Any], assets: dict[str, Any], corrections: list[dict[str, Any]], resource_context: ResourceContext,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     compatibility = classify_slide_background(slide)
     if compatibility.classification == "native-safe":
         return [], None
     slide_id = slide["id"]
     style = slide.get("backgroundStyle", {})
-    background_image = str(style.get("backgroundImage") or "none")
+    background_image = replace_css_urls(str(style.get("backgroundImage") or "none"), context=resource_context)
     common = {"id": f"{slide_id}--background", "x": 0, "y": 0, "w": CANVAS_WIDTH, "h": CANVAS_HEIGHT, "rotation": 0, "opacity": 1}
     if compatibility.classification == "native-with-adjustment" and background_image.startswith("linear-gradient("):
         gradient = _gradient(background_image)
@@ -441,7 +429,7 @@ def _slide_background(
             }
     url_match = re.fullmatch(r'url\(["\']?(.*?)["\']?\)', background_image)
     if compatibility.classification == "native-with-adjustment" and url_match:
-        source = _embed_file_url(url_match.group(1), f"html-{slide_id}-background", assets)
+        source = resolve_embedded_resource(url_match.group(1), context=resource_context)
         fit = "cover" if style.get("backgroundSize") == "cover" else "contain" if style.get("backgroundSize") == "contain" else "fill"
         output = {**common, "type": "image", "src": source, "fit": fit, "radius": 0}
         return [output], {
@@ -474,7 +462,7 @@ def _slide_background(
 
 def _svg_fallback(
     element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str,
-    capture: str | None = None,
+    resource_context: ResourceContext, capture: str | None = None,
 ) -> dict[str, Any]:
     if capture and (element.get("transform", {}).get("hasSkew") or element.get("transform", {}).get("is3D")):
         bounding = element.get("boundingFrame") or {field: element[field] for field in ("x", "y", "w", "h")}
@@ -487,12 +475,15 @@ def _svg_fallback(
         return {**_common(fallback_element, corrections, slide_id), "type": "svg", "markup": markup}
     width = max(1, float(element["w"]))
     height = max(1, float(element["h"]))
-    markup = element.get("svg")
+    # A complex HTML block may contain a direct child SVG alongside other
+    # content. Treat only semantic SVG elements as standalone SVG markup.
+    markup = element.get("svg") if element.get("type") == "svg" else None
     if markup:
         markup = _normalize_positioned_svg(markup, width, height)
+        markup = embed_markup_resources(markup, context=resource_context)
     if not markup:
         style = element.get("style", {})
-        body = sanitize_svg_markup(element.get("html", "") or html_lib.escape(element.get("text", ""), quote=False))
+        body = embed_markup_resources(element.get("html", "") or html_lib.escape(element.get("text", ""), quote=False), context=resource_context)
         css = ";".join([
             "box-sizing:border-box", "width:100%", "height:100%",
             f"color:{style.get('color') or '#111'}",
@@ -523,10 +514,11 @@ def _svg_fallback(
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
             f'<foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="{html_lib.escape(css, quote=True)}">{body}</div></foreignObject></svg>'
         )
+        markup = embed_markup_resources(markup, context=resource_context)
     return {**_common(element, corrections, slide_id), "type": "svg", "markup": sanitize_svg_markup(markup)}
 
 
-def _complex_table_svg(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str) -> dict[str, Any]:
+def _complex_table_svg(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str, resource_context: ResourceContext) -> dict[str, Any]:
     width, height = max(1, float(element["w"])), max(1, float(element["h"]))
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">']
     for row in element.get("table", {}).get("rows", []):
@@ -538,7 +530,7 @@ def _complex_table_svg(element: dict[str, Any], corrections: list[dict[str, Any]
             fill = fill_value if fill_value and not _transparent(fill_value) else "#ffffff"
             color = style.get("color") or cell.get("color") or "#111111"
             weight = 700 if cell.get("bold") else 400
-            content = sanitize_svg_markup(str(cell.get("html", "")))
+            content = sanitize_svg_markup(embed_markup_resources(str(cell.get("html", "")), context=resource_context))
             font_family = style.get("fontFamily") or "Arial,sans-serif"
             font_size = _compact(float(style.get("fontSize") or 16))
             text_align = style.get("textAlign") or cell.get("align") or "left"
@@ -555,7 +547,7 @@ def _identity_layout(slides: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]
     """Exclude machine-local URLs and browser-only diagnostics from the stable id input."""
 
     element_fields = (
-        "id", "type", "exportMode", "role", "registryId", "equationId", "assetId", "figureId",
+        "id", "type", "exportMode", "critical", "compareCrop", "role", "registryId", "equationId", "assetId", "figureId",
         "chartId", "tableId", "morphId", "link", "shape", "lineStart", "lineEnd", "from", "to",
         "layout", "layoutGroup", "x", "y", "w", "h", "rotation", "opacity", "z", "text", "html",
         "svg", "mediaKind", "chartOption", "table", "style", "boundingFrame", "transform", "compatibility",
@@ -804,10 +796,15 @@ def convert_html_layout(
     corrections: list[dict[str, Any]] = []
     decisions: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
+    asset_resolutions: list[dict[str, object]] = []
     seen_slides: set[str] = set()
     seen_elements: set[str] = set()
     assets: dict[str, Any] = {}
     slides: list[dict[str, Any]] = []
+    chapters_by_id = {chapter.chapter_id: chapter for chapter in chapters}
+
+    def asset_lookup(asset_id: str) -> str:
+        return _asset_source(asset_id, chapters)[0]
 
     for source_slide in layout.slides:
         slide_id = source_slide["id"]
@@ -815,9 +812,22 @@ def convert_html_layout(
             errors.append(issue(slide_id=slide_id, field="data-slide-id", actual=slide_id, fix="Use a non-empty globally unique slide id."))
             continue
         seen_slides.add(slide_id)
+        chapter_id = source_slide.get("chapterId")
+        chapter = chapters_by_id.get(chapter_id) if chapter_id else (chapters[0] if len(chapters) == 1 else None)
+        if chapter is None:
+            errors.append(issue(slide_id=slide_id, field="chapterId", actual=chapter_id, fix="Keep source layout associated with a discovered HTML chapter."))
+            continue
+        resource_context = ResourceContext(
+            source_html_path=chapter.html_path,
+            slide_id=slide_id,
+            element_id=f"{slide_id}--background",
+            asset_prefix=f"html-{slide_id}",
+            records=asset_resolutions,
+            asset_lookup=asset_lookup,
+        )
         if source_slide.get("layout") and source_slide["layout"] not in LAYOUTS:
             errors.append(issue(slide_id=slide_id, field="data-layout", actual=source_slide["layout"], fix=f"Use one of {sorted(LAYOUTS)}."))
-        output_elements, background_decision = _slide_background(source_slide, assets, corrections)
+        output_elements, background_decision = _slide_background(source_slide, assets, corrections, resource_context)
         if background_decision:
             decisions.append(background_decision)
         local_ids: set[str] = set()
@@ -825,6 +835,7 @@ def convert_html_layout(
         for element in ordered:
             element_id = element["id"]
             key = f"{slide_id}/{element_id}"
+            element_resource_context = resource_context.for_element(element_id, f"html-{slide_id}-{element_id}")
             if element_id in local_ids:
                 errors.append(issue(slide_id=slide_id, element_id=element_id, field="data-bento-id", actual=element_id, fix="Use an id unique within the slide."))
                 continue
@@ -863,7 +874,7 @@ def convert_html_layout(
                     reason = "Explicit data-bento-export=image raster fallback." if mode == "image" else "; ".join(compatibility.reasons)
                 elif mode == "svg" or compatibility.classification == "localized-svg-recommended" or element["type"] not in NATIVE_TYPES:
                     capture = layout.image_fallbacks.get(key)
-                    converted = _complex_table_svg(element, corrections, slide_id) if element["type"] == "table" and element.get("table") and not element["table"].get("simpleTable", True) else _svg_fallback(element, corrections, slide_id, capture)
+                    converted = _complex_table_svg(element, corrections, slide_id, element_resource_context) if element["type"] == "table" and element.get("table") and not element["table"].get("simpleTable", True) else _svg_fallback(element, corrections, slide_id, element_resource_context, capture)
                     strategy = "svg"
                     reason = "Explicit data-bento-export=svg localized fallback." if mode == "svg" else "; ".join(compatibility.reasons) or "Unsupported complex block preserved as partial SVG."
                 elif element["type"] in {"text", "equation"}:
@@ -878,23 +889,23 @@ def convert_html_layout(
                     source = element.get("src")
                     asset_id = element.get("assetId")
                     if asset_id:
-                        source, mime = _asset_source(asset_id, chapters)
+                        source = resolve_embedded_resource(f"asset:{asset_id}", context=element_resource_context)
                         assets[asset_id] = source
                     elif source:
-                        source = _embed_file_url(source, f"html-{slide_id}-{element_id}", assets)
+                        source = resolve_embedded_resource(source, context=element_resource_context)
                     if not source:
                         raise ConversionError("Image has no src or registry asset id.")
                     fit = element["style"].get("objectFit")
                     converted = {**_common(element, corrections, slide_id), "type": "image", "src": source, "fit": fit if fit in {"cover", "contain", "fill"} else "contain", "radius": _compact(element["style"].get("borderRadius") or 0)}
                 elif element["type"] == "svg":
-                    converted = _svg_fallback(element, corrections, slide_id)
+                    converted = _svg_fallback(element, corrections, slide_id, element_resource_context)
                 elif element["type"] == "media":
                     media_source = element.get("src")
                     if element.get("assetId"):
-                        media_source, mime = _asset_source(element["assetId"], chapters)
+                        media_source = resolve_embedded_resource(f"asset:{element['assetId']}", context=element_resource_context)
                         assets[element["assetId"]] = media_source
                     elif media_source:
-                        media_source = _embed_file_url(media_source, f"html-{slide_id}-{element_id}", assets)
+                        media_source = resolve_embedded_resource(media_source, context=element_resource_context)
                     if not media_source:
                         raise ConversionError("Media has no src.")
                     converted = {**_common(element, corrections, slide_id), "type": "media", "kind": element.get("mediaKind", "video"), "src": media_source, "controls": element.get("controls", True), "autoplay": element.get("autoplay", False), "loop": element.get("loop", False), "muted": element.get("muted", False), "fit": "contain", "radius": _compact(element["style"].get("borderRadius") or 0)}
@@ -902,10 +913,10 @@ def convert_html_layout(
                     raise ConversionError(f"Unsupported source type {element['type']!r}")
             except ConversionError as exc:
                 if mode == "native":
-                    converted = _svg_fallback(element, corrections, slide_id, layout.image_fallbacks.get(key))
+                    converted = _svg_fallback(element, corrections, slide_id, element_resource_context, layout.image_fallbacks.get(key))
                     strategy, reason = "svg", f"Native conversion failed; partial SVG fallback: {exc}"
                 else:
-                    converted = _svg_fallback(element, corrections, slide_id, layout.image_fallbacks.get(key))
+                    converted = _svg_fallback(element, corrections, slide_id, element_resource_context, layout.image_fallbacks.get(key))
                     strategy, reason = "svg", f"Automatic native conversion failed; partial SVG fallback: {exc}"
             emitted = [converted]
             if strategy == "native" and element["type"] in {"text", "equation"}:
@@ -923,7 +934,9 @@ def convert_html_layout(
                 "resultType": converted["type"], "bentoType": [item["type"] for item in emitted] if len(emitted) > 1 else converted["type"],
                 "emittedIds": [item["id"] for item in emitted], "strategy": strategy, "conversionMode": conversion_mode,
                 "reason": reason, "layout": element.get("layout"), "layoutGroup": element.get("layoutGroup"),
-                "role": element.get("role"),
+                "role": element.get("role"), "sourceTag": element.get("tag"),
+                "critical": bool(element.get("critical")),
+                "compareCrop": bool(element.get("compareCrop")),
                 "paperSource": element.get("paperSource"),
                 "sourceFrame": {field: _compact(element[field]) for field in ("x", "y", "w", "h")},
                 "sourceBoundingFrame": {field: _compact((element.get("boundingFrame") or element)[field]) for field in ("x", "y", "w", "h")},
@@ -999,12 +1012,18 @@ def convert_html_layout(
                 continue
             asset_id = font.get("asset")
             if asset_id:
-                source, _ = _asset_source(asset_id, chapters)
+                font_context = ResourceContext(
+                    source_html_path=chapters[0].html_path, slide_id="<document>", element_id=f"font:{font_id}",
+                    asset_prefix=f"font-{font_id}", records=asset_resolutions, asset_lookup=asset_lookup,
+                )
+                source = resolve_embedded_resource(f"asset:{asset_id}", context=font_context)
                 assets[asset_id] = source
             fonts.append({key: value for key, value in font.items() if key in {"family", "asset", "weight"}})
         document["fonts"] = fonts
         if assets:
             document["assets"] = assets
+
+    resource_scan = scan_document_resources(document)
 
     _correct_contrast(slides, corrections)
     _correct_overlaps(slides, layout.slides, corrections, diagnostics)
@@ -1062,6 +1081,8 @@ def convert_html_layout(
         "overlapCorrections": sum(correction["kind"] == "overlap" for correction in corrections),
         "otherCorrections": sum(correction["kind"] not in {"overflow-frame-growth", "text-overflow", "bounds", "overlap"} for correction in corrections),
         "unresolvedWarnings": len(diagnostics), "corrections": len(corrections), "diagnostics": len(diagnostics),
+        "embeddedLocalAssets": len(asset_resolutions),
+        "unresolvedLocalResourceReferences": len(resource_scan["unresolved"]),
     }
     report = {
         "format": "bento/html-conversion-report/v1",
@@ -1073,6 +1094,8 @@ def convert_html_layout(
         "elements": decisions,
         "corrections": corrections,
         "diagnostics": diagnostics,
+        "assetResolution": asset_resolutions,
+        "resourceScan": resource_scan,
         "registryCoverage": {key: len(registry.get(key, {})) for key in ("assets", "fonts", "equations", "figures", "tables", "charts")},
         "runtimeIntegrity": None,
         "browserCheck": None,

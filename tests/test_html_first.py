@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.html_converter import convert_html_layout
 from bento_converter.html_layout import LayoutResult
@@ -143,6 +145,45 @@ class HtmlConversionTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("BENTO_BROWSER_TEST") == "1", "Set BENTO_BROWSER_TEST=1 for Chromium HTML-first integration.")
 class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
+    def test_local_resources_inside_svg_fallback_are_self_contained_and_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            Image.new("RGB", (8, 8), "#2563eb").save(root / "asset.png")
+            (root / "resource.preview.html").write_text(
+                '<!doctype html><style>body{margin:0}.slide{position:relative;width:1280px;height:720px}'
+                '.complex{position:absolute;left:100px;top:100px;width:500px;height:300px;'
+                'background-image:url("asset.png"),url(\'asset.png\')}</style>'
+                '<section class="slide" data-slide-id="resources">'
+                '<div class="complex" data-bento-id="portable" data-bento-type="complex" data-bento-export="svg">'
+                '<img src="asset.png"><svg viewBox="0 0 20 20"><image href="asset.png" width="20" height="20"/></svg>'
+                '</div></section>',
+                encoding="utf-8",
+            )
+            (root / "resource.registry.json").write_text(
+                json.dumps({"format": "bento/html-registry/v1", "chapterId": "resources"}), encoding="utf-8"
+            )
+            first = build_from_html(
+                html_dir=root, registry_dir=root, base_path=ROOT / "Bento_Slides.base.bento.html",
+                output_path=root / "first" / "presentation.bento.html", browser_check=False,
+            )
+            second = build_from_html(
+                html_dir=root, registry_dir=root, base_path=ROOT / "Bento_Slides.base.bento.html",
+                output_path=root / "second" / "presentation.bento.html", browser_check=False,
+            )
+            markup = first.document["slides"][0]["elements"][0]["markup"]
+            self.assertGreaterEqual(markup.count("data:image/png;base64,"), 4)
+            self.assertNotIn("asset.png", markup)
+            self.assertNotIn("file:", markup)
+            self.assertTrue(first.report["resourceScan"]["passed"])
+            self.assertGreaterEqual(first.report["summary"]["embeddedLocalAssets"], 4)
+            self.assertEqual(first.report["summary"]["unresolvedLocalResourceReferences"], 0)
+            self.assertTrue((first.html_path.parent / "diagnostics" / "resource-scan.json").is_file())
+            serialized_report = json.dumps(first.report, ensure_ascii=False)
+            self.assertNotIn(str(root.resolve()), serialized_report)
+            self.assertNotIn("file:", serialized_report)
+            self.assertEqual(first.document, second.document)
+            self.assertEqual(first.html_path.read_bytes(), second.html_path.read_bytes())
+
     def test_feature_matrix_builds_complete_evidence_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "output" / "presentation.bento.html"
@@ -164,6 +205,12 @@ class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
             self.assertEqual(result.report["summary"]["nativeChart"], 2)
             self.assertEqual(result.report["summary"]["nativeImage"], 1)
             self.assertEqual(result.report["summary"]["unresolvedWarnings"], 0)
+            self.assertEqual(result.report["summary"]["unresolvedLocalResourceReferences"], 0)
+            self.assertGreaterEqual(result.report["summary"]["embeddedLocalAssets"], 1)
+            self.assertEqual(result.report["summary"]["criticalElementFail"], 0)
+            self.assertGreater(result.report["summary"]["criticalElementPass"] + result.report["summary"]["criticalElementWarning"], 0)
+            self.assertTrue(result.report["resourceScan"]["passed"])
+            self.assertTrue((output.parent / "diagnostics" / "resource-scan.json").is_file())
             self.assertTrue(result.report["browserCheck"]["serialize_roundtrip"])
             self.assertEqual(result.report["browserCheck"]["rendered_slide_count"], 22)
             self.assertIsInstance(result.document["assets"]["fixture-image"], str)

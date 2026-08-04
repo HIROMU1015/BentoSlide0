@@ -132,6 +132,9 @@ EXTRACT_LAYOUT_JS = r"""
         tag,
         type: inferred,
         exportMode,
+        explicitId: Boolean(el.dataset.bentoId),
+        critical: el.dataset.bentoCritical === 'true',
+        compareCrop: el.dataset.bentoCompare === 'true',
         role: el.dataset.bentoRole || null,
         paperSource: el.dataset.paperSource || null,
         registryId: el.dataset.registryId || null,
@@ -306,9 +309,9 @@ def extract_computed_layout(
                         errors.append(issue(slide_id=slide["id"], field="computed size", actual=(slide["sourceWidth"], slide["sourceHeight"]), fix="Render every source slide at exactly 1280x720 CSS pixels."))
                     slide["chapterId"] = chapter.chapter_id
                     all_slides.append(slide)
-                    locator = page.locator(f'section.slide[data-slide-id="{slide["id"]}"]')
+                    slide_locator = page.locator(f'section.slide[data-slide-id="{slide["id"]}"]')
                     target = output / f"{len(all_slides):02d}-{slide['id']}.png"
-                    locator.screenshot(path=str(target))
+                    slide_locator.screenshot(path=str(target))
                     screenshots.append(str(target.resolve()))
                     for element in slide["elements"]:
                         compatibility = classify_native_compatibility(element)
@@ -317,17 +320,33 @@ def extract_computed_layout(
                             "reasons": list(compatibility.reasons),
                             "adjustments": list(compatibility.adjustments),
                         }
-                        capture_needed = (
-                            element["exportMode"] == "image"
-                            or compatibility.classification == "image-required"
-                            or element.get("transform", {}).get("hasSkew")
-                            or element.get("transform", {}).get("is3D")
-                        )
+                        capture_reasons = [
+                            reason for reason, active in (
+                                ("explicit-image-fallback", element["exportMode"] == "image"),
+                                ("image-required", compatibility.classification == "image-required"),
+                                ("skew-transform", element.get("transform", {}).get("hasSkew")),
+                                ("3d-transform", element.get("transform", {}).get("is3D")),
+                            ) if active
+                        ]
+                        capture_needed = bool(capture_reasons)
                         if not capture_needed:
                             continue
-                        explicit = page.locator(f'[data-bento-id="{element["id"]}"]').first
-                        if explicit.count() != 1:
-                            errors.append(issue(slide_id=slide["id"], element_id=element["id"], field="data-bento-export", actual="image", fix="Image fallback requires an explicit unique data-bento-id."))
+                        capture_reason = ", ".join(capture_reasons)
+                        if not element.get("explicitId"):
+                            errors.append(issue(
+                                slide_id=slide["id"], element_id=element["id"], field="fallback capture",
+                                actual={"captureReason": capture_reason, "matchedElementCount": 0},
+                                fix="Add exactly one explicit data-bento-id to the fallback element inside this slide.",
+                            ))
+                            continue
+                        explicit = slide_locator.locator(f'[data-bento-id="{element["id"]}"]')
+                        matched_count = explicit.count()
+                        if matched_count != 1:
+                            errors.append(issue(
+                                slide_id=slide["id"], element_id=element["id"], field="fallback capture",
+                                actual={"captureReason": capture_reason, "matchedElementCount": matched_count},
+                                fix="Use this data-bento-id exactly once inside the current slide; duplicate ids are allowed only on different slides for morph.",
+                            ))
                             continue
                         payload = explicit.screenshot(type="png")
                         image_fallbacks[f"{slide['id']}/{element['id']}"] = "data:image/png;base64," + base64.b64encode(payload).decode("ascii")

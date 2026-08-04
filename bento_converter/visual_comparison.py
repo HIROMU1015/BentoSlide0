@@ -14,6 +14,8 @@ except ImportError as exc:  # pragma: no cover - exercised by CLI dependency fai
 ANALYSIS_SIZE = (256, 144)
 HASH_SIZE = 8
 HASH_SOURCE_SIZE = 32
+CROP_PADDING = 8
+MIN_CROP_DIMENSION = 24
 
 # Calibrated against tests/fixtures/html_first: native typography/table/chart
 # rendering remains warning-level, while missing backgrounds or major blocks fail.
@@ -27,6 +29,11 @@ FAIL_THRESHOLDS = {
     "normalizedPixelDifference": 0.30,
     "colorDistributionDifference": 0.35,
     "edgeDifference": 0.25,
+}
+CROP_FAIL_THRESHOLDS = {
+    "normalizedPixelDifference": 0.45,
+    "colorDistributionDifference": 0.75,
+    "edgeDifference": 0.35,
 }
 
 
@@ -133,6 +140,29 @@ def classify_metrics(metrics: dict[str, float | int]) -> tuple[str, list[str]]:
     return ("warning", warnings) if warnings else ("pass", [])
 
 
+def classify_crop_metrics(metrics: dict[str, float | int]) -> tuple[str, list[str]]:
+    """Classify localized crops without over-penalizing renderer-specific detail."""
+    pixel = float(metrics["normalizedPixelDifference"])
+    colors = float(metrics["colorDistributionDifference"])
+    edges = float(metrics["edgeDifference"])
+    phash = int(metrics["perceptualHashDistance"])
+    fail_reasons: list[str] = []
+    if pixel >= CROP_FAIL_THRESHOLDS["normalizedPixelDifference"]:
+        fail_reasons.append("large localized pixel difference")
+    if colors >= CROP_FAIL_THRESHOLDS["colorDistributionDifference"]:
+        fail_reasons.append("large localized color-distribution difference")
+    if edges >= CROP_FAIL_THRESHOLDS["edgeDifference"]:
+        fail_reasons.append("large localized edge/structure difference")
+    if pixel >= 0.30 and (edges >= 0.16 or phash >= 32):
+        fail_reasons.append("combined localized placement/structure difference")
+    if fail_reasons:
+        return "fail", fail_reasons
+    whole_status, whole_warnings = classify_metrics(metrics)
+    return (whole_status, whole_warnings) if whole_status != "fail" else (
+        "warning", ["localized renderer difference exceeds whole-slide thresholds"]
+    )
+
+
 def compare_images(source: str | Path | Image.Image, bento: str | Path | Image.Image) -> dict[str, Any]:
     def open_image(value: str | Path | Image.Image) -> Image.Image:
         if isinstance(value, Image.Image):
@@ -159,14 +189,21 @@ def compare_crops(
     bento_frame: dict[str, float],
 ) -> dict[str, Any] | None:
     def box(frame: dict[str, float]) -> tuple[int, int, int, int] | None:
-        left = max(0, int(round(frame["x"])))
-        top = max(0, int(round(frame["y"])))
-        right = min(1280, int(round(frame["x"] + frame["w"])))
-        bottom = min(720, int(round(frame["y"] + frame["h"])))
+        center_x = float(frame["x"]) + float(frame["w"]) / 2
+        center_y = float(frame["y"]) + float(frame["h"]) / 2
+        width = max(float(frame["w"]) + CROP_PADDING * 2, MIN_CROP_DIMENSION)
+        height = max(float(frame["h"]) + CROP_PADDING * 2, MIN_CROP_DIMENSION)
+        left = max(0, int(round(center_x - width / 2)))
+        top = max(0, int(round(center_y - height / 2)))
+        right = min(1280, int(round(center_x + width / 2)))
+        bottom = min(720, int(round(center_y + height / 2)))
         return (left, top, right, bottom) if right > left and bottom > top else None
 
     source_box, bento_box = box(source_frame), box(bento_frame)
     if source_box is None or bento_box is None:
         return None
     with Image.open(source_path) as source_image, Image.open(bento_path) as bento_image:
-        return compare_images(source_image.crop(source_box), bento_image.crop(bento_box))
+        comparison = compare_images(source_image.crop(source_box), bento_image.crop(bento_box))
+        status, warnings = classify_crop_metrics(comparison)
+        comparison.update({"status": status, "warnings": warnings})
+        return comparison

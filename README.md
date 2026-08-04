@@ -36,10 +36,11 @@ output/
 └── diagnostics/
     ├── browser-check.json
     ├── computed-layout.json
-    └── merged-registry.json
+    ├── merged-registry.json
+    └── resource-scan.json
 ```
 
-`presentation.bento.html` differs from the selected base only inside `script#bento-doc`. The command fails on malformed registries, duplicate IDs, missing protected content, broken state/connector references, out-of-contract source sizes, Bento validation failures, runtime mutations, UI startup failures, serialize round-trip failures, or a fail-level source/Bento image comparison. Warning-level native rendering differences remain visible in the report.
+`presentation.bento.html` differs from the selected base only inside `script#bento-doc`. Local image, media, SVG, foreignObject, and CSS `url(...)` resources are embedded as data URIs. The command fails on unresolved local resource references and on fail-level crops for critical elements (titles/main claims/primary visuals/conclusions, equations, tables, charts, images, SVGs, or `data-bento-critical="true"`). Non-critical requested crops (`data-bento-compare="true"`) remain warnings. Other failures include malformed registries, duplicate IDs, missing protected content, broken references, invalid source sizes, runtime mutations, and serialize failures.
 
 See [the authoring contract](docs/html-first-authoring-contract.md), [conversion specification](docs/html-to-bento-conversion-spec.md), [native support matrix](docs/bento-native-feature-support.md), and [fallback policy](docs/fallback-policy.md).
 
@@ -66,6 +67,6 @@ python -m scripts.check_html_first_determinism --html-dir tests/fixtures/html_fi
 Remove-Item Env:BENTO_BROWSER_TEST
 ```
 
-The browser-gated suite covers the feature matrix under `tests/fixtures/html_first`, including chapter combination, native feature rendering, CSS compatibility classification, six transform cases, simple and complex tables, morph/state metadata, localized fallback, runtime integrity, Bento API editing, serialization, perceptual screenshot comparison, and independent-directory determinism.
+The browser-gated suite covers the feature matrix under `tests/fixtures/html_first`, including chapter combination, native feature rendering, CSS compatibility classification, six transform cases, simple and complex tables, morph/state metadata, slide-scoped localized fallback capture, local-resource self-containment, runtime integrity, Bento API editing, serialization, perceptual screenshot comparison, and independent-directory determinism.
 
-GitHub Actions uploads the complete `html-first-evidence` artifact and writes a job summary with test count, native/fallback counts, visual pass/warning/fail counts, unresolved diagnostics, serialize status, determinism status, and HTML/Bento JSON SHA-256 values.
+GitHub Actions uploads the complete `html-first-evidence` artifact and writes a job summary with test count, native/fallback counts, embedded/unresolved resource counts, visual and critical-crop counts/failure IDs, unresolved diagnostics, serialize status, determinism status, and HTML/Bento JSON SHA-256 values.

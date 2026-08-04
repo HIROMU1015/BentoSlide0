@@ -40,6 +40,7 @@ def main() -> int:
     browser = report.get("browserCheck", {}) if report else {}
     visual = report.get("visualComparison", {}) if report else {}
     failures = []
+    critical_failures = []
     for pair in visual.get("pairs", []):
         if pair.get("status") != "fail":
             continue
@@ -49,7 +50,14 @@ def main() -> int:
             if item.get("imageComparison", {}).get("status") == "fail"
         ]
         failures.append(f"{pair['slideId']} ({', '.join(element_ids) if element_ids else 'whole slide'})")
+        critical_failures.extend(
+            f"{pair['slideId']}/{item.get('elementId', 'unknown')}"
+            for item in pair.get("elementComparisons", [])
+            if item.get("critical") and item.get("imageComparison", {}).get("status") == "fail"
+        )
     unresolved = [f"{item.get('slideId')}: {item.get('elements', item.get('elementId', 'unknown'))}" for item in (report.get("diagnostics", []) if report else [])]
+    resource_scan = report.get("resourceScan", {}) if report else {}
+    unresolved_resources = resource_scan.get("unresolved", [])
     checks = {
         "Legacy byte match": legacy_passed,
         "Runtime integrity": bool(report and report.get("runtimeIntegrity")),
@@ -58,6 +66,8 @@ def main() -> int:
         "Deterministic double build": bool(determinism and determinism.get("passed")),
         "Test suite": tests_passed,
         "No unresolved diagnostics": not unresolved,
+        "No unresolved local resources": bool(resource_scan.get("passed")),
+        "No critical crop failures": int(summary.get("criticalElementFail", 0)) == 0,
     }
     hashes = determinism.get("sha256", {}) if determinism else {}
     native_total = sum(int(summary.get(field, 0)) for field in ("nativeText", "nativeShape", "nativeTable", "nativeChart", "nativeImage", "nativeSvg", "media"))
@@ -73,10 +83,13 @@ def main() -> int:
         f"- Native elements: {native_total}",
         f"- Fallbacks: SVG {summary.get('partialSvgFallback', 0)}, image {summary.get('imageFallback', 0)}, full-slide SVG {summary.get('fullSlideSvg', 0)}",
         f"- Visual slides: pass {summary.get('visualPassSlides', 0)}, warning {summary.get('visualWarningSlides', 0)}, fail {summary.get('visualFailSlides', 0)}",
+        f"- Critical crops: pass {summary.get('criticalElementPass', 0)}, warning {summary.get('criticalElementWarning', 0)}, fail {summary.get('criticalElementFail', 0)}",
+        f"- Local resources: embedded {summary.get('embeddedLocalAssets', 0)}, unresolved {summary.get('unresolvedLocalResourceReferences', len(unresolved_resources))}",
         f"- Visual difference: max {summary.get('maxVisualDifference', 'n/a')}, average {summary.get('averageVisualDifference', 'n/a')}",
         f"- HTML SHA-256: {(hashes.get('html') or ['unavailable'])[0]}",
         f"- Bento JSON SHA-256: {(hashes.get('bentoJson') or ['unavailable'])[0]}",
         f"- Visual failures: {', '.join(failures) if failures else 'none'}",
+        f"- Critical crop failures: {', '.join(critical_failures) if critical_failures else 'none'}",
         f"- Unresolved diagnostics: {'; '.join(unresolved) if unresolved else 'none'}",
         "",
         "Artifact: `html-first-evidence`",

@@ -21,6 +21,10 @@ Priority:
 
 Each decision includes a human-readable reason in `conversion-report.json`. Native failures therefore cannot disappear behind a successful build. Image/SVG fallbacks keep the original frame and stable element id, but internal pixels or SVG substructure are not fully editable through Bento's native text/shape controls.
 
+Fallback screenshots are selected inside the current slide locator. A fallback-capable element without an explicit ID, no matching node, or multiple same-slide matches is a hard validation error. Cross-slide reuse of the same ID is valid.
+
+Localized SVG/foreignObject output must be self-contained. Resolve relative paths against the source chapter, resolve `asset:` references through the registry, embed local payloads as data URIs, and preserve remote/data/fragment references. Scan structured resource fields after conversion and fail if a local path remains; do not scan prose for path-like examples.
+
 Auto-correction is conservative. Out-of-bounds frames are clamped and minor text overflow can reduce font size; source wording is immutable. Overlap correction is permitted only when layout/role/group/source order proves a safe relationship: two-column side preservation, observation-before-interpretation, equation-above-explanations, row order, stack order, or a shared layout-group axis. The converter reinspects the full slide and rolls back any change that leaves the pair overlapping or creates another overlap. Free/custom and uncertain composition remain diagnostics. A developer should update the HTML source when a diagnostic reflects an authoring defect.
 
 Slide backgrounds are handled independently from slide content. A simple gradient becomes a full-canvas native shape, a supported non-repeating image becomes a full-canvas image, and a complex background becomes a background-only localized SVG. None of these choices flatten the semantic foreground.
