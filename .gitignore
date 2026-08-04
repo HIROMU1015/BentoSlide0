@@ -7,3 +7,6 @@ browser-output/
 ci-output/
 demo.generated.bento.html
 determinism-report.json
+output/work-editor.pid
+output/work-editor-session.json
+output/work-editor*.log

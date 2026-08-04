@@ -35,7 +35,15 @@ Run the full test matrix shown below. Confirm `diagnostics/resource-scan.json` r
 
 ### 3. Work editor finalization
 
-Complete the HTML-first build and conversion verification first. Then start finalization with:
+Complete the HTML-first build and conversion verification first. On Windows, prefer the repository-root one-click launcher over asking the user to enter a command manually:
+
+```powershell
+.\start_bento_editor.cmd
+```
+
+It starts the default localhost editor in the background without `--reset-final` or `--allow-content-edit`; keep the Work browser tab open and reload it. Use `stop_bento_editor.cmd` only when the editor should stop. Read `docs/work-editor-finalization.md` for custom ports/paths, session files, and safe PID validation.
+
+Use the direct command only for non-Windows or explicitly customized/manual operation:
 
 ```powershell
 python -m scripts.run_bento_work_editor --source output/presentation.generated.bento.html --target output/presentation.final.bento.html --registry output/diagnostics/merged-registry.json --port 8765

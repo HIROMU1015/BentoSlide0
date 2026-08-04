@@ -47,7 +47,20 @@ output/
 
 ## Work editor finalization
 
-Start the localhost-only editor after conversion:
+### Windows one-click launcher
+
+After the HTML-first build has produced the default files, daily use on Windows is:
+
+1. Double-click `start_bento_editor.cmd` in Explorer.
+2. Open `http://127.0.0.1:8765/` in the ChatGPT Work browser, or reload the BentoSlide tab already left open.
+3. Edit and save locally with the Work editor toolbar.
+4. Double-click `stop_bento_editor.cmd` when the background editor should stop.
+
+The black command window does not need to remain open, and the launcher does not open Chrome, Edge, or another normal browser. It copies the URL to the Windows clipboard, never supplies `--reset-final`, and continues an existing final instead of replacing it. Keep the Work browser tab open between sessions and reload it after the next start.
+
+Use `start_bento_editor.cmd -Port 8766` when the default port is occupied. Launcher state and logs are written under `output/` as `work-editor.pid`, `work-editor-session.json`, `work-editor.log`, `work-editor.stdout.log`, and `work-editor.error.log`. See [Work editor finalization](docs/work-editor-finalization.md) for custom source/target/registry paths and safe-stop behavior.
+
+The direct localhost command remains available for non-launcher use:
 
 ```powershell
 python -m scripts.run_bento_work_editor `
