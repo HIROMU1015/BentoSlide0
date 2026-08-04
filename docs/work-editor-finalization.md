@@ -25,7 +25,7 @@ Open `http://127.0.0.1:8765/`. The server refuses non-loopback bind addresses. T
 | `POST /api/save` | Save validated `serializedHtml` when `baseRevision` is current |
 | `POST /api/revert` | Restore the most recent backup when `baseRevision` is current |
 
-`POST /api/save` extracts only `#bento-doc`; it never trusts or saves the submitted runtime. The response-only loader waits for Bento initialization, then adds the toolbar dynamically and guards `serialize()` so the temporary UI is absent from its result. HTTP 409 rejects a stale SHA-256 revision. Validation errors use HTTP 422 and include contextual `slideId`, `elementId`, and `field` issue strings.
+`POST /api/save` extracts only `#bento-doc`; it never trusts or saves the submitted runtime. The response-only loader waits for Bento initialization, then adds the toolbar dynamically and guards `serialize()` so the temporary UI is absent from its result. The guard preserves Bento's public API contract: `window.bento.serialize()` remains synchronous and returns its HTML string directly. It removes the toolbar immediately before serialization and restores it in `finally`, including when serialization throws. The Work editor never changes the runtime API's return type, and only a validated `#bento-doc` is persisted. HTTP 409 rejects a stale SHA-256 revision. Validation errors use HTTP 422 and include contextual `slideId`, `elementId`, and `field` issue strings.
 
 ## Storage guarantees
 

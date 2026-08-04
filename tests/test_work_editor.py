@@ -262,7 +262,27 @@ class WorkEditorBrowserTests(unittest.TestCase):
             from playwright.sync_api import sync_playwright
         except ImportError as exc:  # pragma: no cover
             self.skipTest(str(exc))
+
+        source_html = load_html(self.source)
+        exception_shim = """<script id="serialize-exception-test-shim">
+(() => {
+  const timer = setInterval(() => {
+    if (!window.bento || typeof window.bento.serialize !== 'function') return;
+    const original = window.bento.serialize.bind(window.bento);
+    window.bento.serialize = (...args) => {
+      if (window.__throwBentoSerializeForTest) throw new Error('serialize-test-error');
+      return original(...args);
+    };
+    clearInterval(timer);
+  }, 1);
+})();
+</script>
+"""
+        self.source.write_text(source_html.replace("</body>", exception_shim + "</body>"), encoding="utf-8")
         storage = self.storage()
+        generated_hash = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        runtime_before = runtime_fingerprint(load_html(storage.target))
+        revision_before = storage.status()["revision"]
         immediate_status = storage.status
 
         def delayed_status() -> dict:
@@ -276,8 +296,70 @@ class WorkEditorBrowserTests(unittest.TestCase):
                 executable = find_browser_executable()
                 browser = playwright.chromium.launch(headless=True, **({"executable_path": str(executable)} if executable else {}))
                 page = browser.new_page(viewport={"width": 1400, "height": 900})
+
+                page.goto(self.source.as_uri(), wait_until="load")
+                page.wait_for_function("window.bento && typeof window.bento.serialize === 'function'")
+                before_injection_contract = page.evaluate("""() => {
+                  const result = window.bento.serialize();
+                  return {
+                    isString: typeof result === 'string',
+                    isPromise: result instanceof Promise,
+                    hasThen: Boolean(result && typeof result.then === 'function')
+                  };
+                }""")
+
                 page.goto(base + "/", wait_until="load")
                 page.wait_for_function("window.bento && typeof window.bento.serialize === 'function'")
+                page.wait_for_function("document.querySelector('#work-save') && !document.querySelector('#work-save').disabled")
+                serialize_contract = page.evaluate("""() => {
+                  const host = document.getElementById('bento-work-editor-host');
+                  const parent = host.parentNode;
+                  const next = host.nextSibling;
+                  const result = window.bento.serialize();
+                  const toolbarIds = [
+                    'bento-work-editor',
+                    'bento-work-editor-host',
+                    'bento-work-editor-loader',
+                    'bento-work-editor-style'
+                  ];
+                  const buttons = ['work-save', 'work-save-validate', 'work-revert', 'work-reload'];
+                  return {
+                    isString: typeof result === 'string',
+                    isPromise: result instanceof Promise,
+                    hasThen: Boolean(result && typeof result.then === 'function'),
+                    excludedToolbarIds: toolbarIds.every(id => !result.includes(id)),
+                    containsWorkEditor: result.includes('bento-work-editor'),
+                    sameParent: host.parentNode === parent,
+                    sameNextSibling: host.nextSibling === next,
+                    connected: host.isConnected,
+                    visible: getComputedStyle(host).display !== 'none',
+                    buttonsUsable: buttons.every(id => {
+                      const button = document.getElementById(id);
+                      return Boolean(button && button.isConnected && !button.disabled);
+                    })
+                  };
+                }""")
+                exception_contract = page.evaluate("""() => {
+                  const host = document.getElementById('bento-work-editor-host');
+                  const parent = host.parentNode;
+                  const next = host.nextSibling;
+                  let error = null;
+                  window.__throwBentoSerializeForTest = true;
+                  try {
+                    window.bento.serialize();
+                  } catch (caught) {
+                    error = caught.message;
+                  } finally {
+                    window.__throwBentoSerializeForTest = false;
+                  }
+                  return {
+                    error,
+                    sameParent: host.parentNode === parent,
+                    sameNextSibling: host.nextSibling === next,
+                    connected: host.isConnected,
+                    visible: getComputedStyle(host).display !== 'none'
+                  };
+                }""")
                 before = page.evaluate("window.bento.doc.slides.flatMap(s=>s.elements).find(e=>e.type==='shape').x")
                 loaded = page.evaluate("""() => {
                   const doc = JSON.parse(JSON.stringify(window.bento.doc));
@@ -290,13 +372,51 @@ class WorkEditorBrowserTests(unittest.TestCase):
                 page.reload(wait_until="load")
                 page.wait_for_function("window.bento && typeof window.bento.serialize === 'function'")
                 page.wait_for_function("document.querySelector('#work-save') && !document.querySelector('#work-save').disabled")
+
+                page.locator("#work-save-validate").click()
+                page.wait_for_function("document.querySelector('#bento-work-editor-status').textContent.includes('保存・検証しました')")
+                with page.expect_navigation(wait_until="load"):
+                    page.locator("#work-reload").click()
+                page.wait_for_function("document.querySelector('#work-save') && !document.querySelector('#work-save').disabled")
+                with page.expect_navigation(wait_until="load"):
+                    page.locator("#work-revert").click()
+                page.wait_for_function("document.querySelector('#work-save') && !document.querySelector('#work-save').disabled")
+
                 after = page.evaluate("window.bento.doc.slides.flatMap(s=>s.elements).find(e=>e.type==='shape').x")
-                serialized = page.evaluate("window.bento.serialize()")
+                serialized = page.evaluate("""() => {
+                  const result = window.bento.serialize();
+                  if (typeof result !== 'string') throw new Error('serialize result is not a string');
+                  return result;
+                }""")
                 browser.close()
+
+            self.assertEqual(before_injection_contract, {"isString": True, "isPromise": False, "hasThen": False})
+            self.assertTrue(serialize_contract["isString"])
+            self.assertFalse(serialize_contract["isPromise"])
+            self.assertFalse(serialize_contract["hasThen"])
+            self.assertTrue(serialize_contract["excludedToolbarIds"])
+            self.assertFalse(serialize_contract["containsWorkEditor"])
+            self.assertTrue(serialize_contract["sameParent"])
+            self.assertTrue(serialize_contract["sameNextSibling"])
+            self.assertTrue(serialize_contract["connected"])
+            self.assertTrue(serialize_contract["visible"])
+            self.assertTrue(serialize_contract["buttonsUsable"])
+            self.assertEqual(exception_contract["error"], "serialize-test-error")
+            self.assertTrue(exception_contract["sameParent"])
+            self.assertTrue(exception_contract["sameNextSibling"])
+            self.assertTrue(exception_contract["connected"])
+            self.assertTrue(exception_contract["visible"])
             self.assertEqual(after, before + 2)
-            self.assertNotIn("bento-work-editor", serialized)
+            for identifier in (
+                "bento-work-editor", "bento-work-editor-host",
+                "bento-work-editor-loader", "bento-work-editor-style",
+            ):
+                self.assertNotIn(identifier, serialized)
             self.assertEqual(extract_bento_doc(serialized), extract_bento_doc(load_html(storage.target)))
             self.assertEqual(json.loads(storage.sidecar.read_text(encoding="utf-8")), extract_bento_doc(serialized))
+            self.assertNotEqual(storage.status()["revision"], revision_before)
+            self.assertEqual(runtime_fingerprint(load_html(storage.target)), runtime_before)
+            self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), generated_hash)
         finally:
             server.shutdown()
             server.server_close()

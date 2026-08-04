@@ -41,7 +41,7 @@ Complete the HTML-first build and conversion verification first. Then start fina
 python -m scripts.run_bento_work_editor --source output/presentation.generated.bento.html --target output/presentation.final.bento.html --registry output/diagnostics/merged-registry.json --port 8765
 ```
 
-Open the localhost URL in the Work browser and use the injected controls to save, validate, revert, or reload. Describe Bento canvas interaction as UI editing and the persistence step as Work editor API saving. Treat an existing final `#bento-doc` as authoritative. Never rerun HTML-first conversion into the final path or overwrite it unless the user explicitly requests `--reset-final`.
+Open the localhost URL in the Work browser and use the injected controls to save, validate, revert, or reload. Describe Bento canvas interaction as UI editing and the persistence step as Work editor API saving. Treat an existing final `#bento-doc` as authoritative. The injected guard must preserve `window.bento.serialize()` as a synchronous HTML-string API: detach temporary Work editor UI immediately before serialization, restore it in `finally`, and persist only the validated `#bento-doc`. Never change the runtime API return type for Work editor needs. Never rerun HTML-first conversion into the final path or overwrite it unless the user explicitly requests `--reset-final`.
 
 ### 4. Final validation
 

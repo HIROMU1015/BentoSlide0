@@ -45,12 +45,12 @@ TOOLBAR = r"""
     const message = text => { status.textContent = text; };
     const errorText = payload => (payload.errors || [payload.error || '\u4e0d\u660e\u306a\u30a8\u30e9\u30fc']).join('\n');
     const originalSerialize = window.bento.serialize.bind(window.bento);
-    const guardedSerialize = async (...args) => {
+    const guardedSerialize = (...args) => {
       const parent = host.parentNode;
       if (!parent) return originalSerialize(...args);
       const next = host.nextSibling;
       host.remove();
-      try { return await originalSerialize(...args); }
+      try { return originalSerialize(...args); }
       finally { parent.insertBefore(host, next); }
     };
     guardedSerialize.workEditorGuard = true;
