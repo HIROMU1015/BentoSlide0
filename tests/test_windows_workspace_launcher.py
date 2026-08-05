@@ -250,6 +250,75 @@ class WindowsWorkspaceLauncherTests(unittest.TestCase):
         stopped = self.run_cmd(repository / "stop_deck_workspace.cmd")
         self.assertEqual(stopped.returncode, 0, stopped.stdout)
 
+    def test_bento_authoring_dispatch_uses_v2_custom_artifact_paths(self) -> None:
+        repository = self.copy_repository("Bento Authoring 日本語")
+        port = self.free_port()
+        state = yaml.safe_load((repository / "deck.yaml").read_text(encoding="utf-8"))
+        generated = repository / "custom artifacts/生成/deck.generated.bento.html"
+        generated.parent.mkdir(parents=True)
+        shutil.copy2(repository / "demo.bento.html", generated)
+        generated_registry = repository / "custom artifacts/生成/deck.generated.registry.json"
+        generated_registry.write_text(json.dumps({
+            "format": "bento/html-registry/v2", "unitId": "deck", "sources": {},
+            "document": {}, "assets": {}, "fonts": {},
+            "equations": {"hamiltonian_split": {"latex": "H = H_0 + \\alpha H_1"}},
+            "figures": {}, "tables": {}, "charts": {},
+            "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+        }), encoding="utf-8")
+        state.update({
+            "schemaVersion": 2,
+            "project": {"kind": "paper_explanation", **state["project"]},
+            "sources": {"manifest": "sources/source-manifest.yaml", "authorityMode": "single"},
+            "authoring": {"mode": "modular", "entryHtml": None, "registry": None, "currentSection": None},
+            "sections": {},
+            "migration": {"fromSchemaVersion": 1, "migratedAt": "2026-08-05T00:00:00Z", "lateStageCompatibility": False},
+        })
+        state["workflow"].update(
+            stage="bento_authoring", status="in_progress", owner="work", sourceOfTruth="authoring",
+            currentChapter=None, currentSection=None,
+        )
+        state["approvals"]["bentoContent"] = {
+            "status": "pending", "documentRevision": None, "registryRevision": None,
+            "approvalDigest": None, "approvedAt": None,
+        }
+        state["handoff"].update(
+            readyForBentoAuthoring=True, readyForContentReview=False,
+        )
+        state["outputs"] = {
+            "generatedHtml": "custom artifacts/生成/deck.generated.bento.html",
+            "generatedJson": "custom artifacts/生成/deck.generated.bento.json",
+            "generatedRegistry": "custom artifacts/生成/deck.generated.registry.json",
+            "authoringHtml": "custom artifacts/編集中/deck.authoring.bento.html",
+            "authoringJson": "custom artifacts/編集中/deck.authoring.bento.json",
+            "authoringRegistry": "custom artifacts/編集中/deck.authoring.registry.json",
+            "finalHtml": "custom artifacts/最終/deck.final.bento.html",
+            "finalJson": "custom artifacts/最終/deck.final.bento.json",
+            "finalRegistry": "custom artifacts/最終/deck.final.registry.json",
+        }
+        state["preview"]["bentoPort"] = port
+        (repository / "deck.yaml").write_text(yaml.safe_dump(state, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+        started = self.run_cmd(repository / "start_deck_workspace.cmd", "-NoClipboard")
+        self.assertEqual(started.returncode, 0, started.stdout)
+        status = self.wait_status(port)
+        self.assertEqual(status["editingMode"], "authoring")
+        self.assertEqual(status["target"], "custom artifacts/編集中/deck.authoring.bento.html")
+        self.assertEqual(Path(status["repository"]), repository.resolve())
+        self.assertIn("documentRevision", status)
+        self.assertIn("registryRevision", status)
+        session = json.loads((repository / "output/work-editor-session.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(session["mode"], "authoring")
+        self.assertEqual(Path(session["sourceRegistry"]), generated_registry.resolve())
+        self.assertEqual(Path(session["targetRegistry"]), (repository / state["outputs"]["authoringRegistry"]).resolve())
+        duplicate = self.run_cmd(repository / "start_deck_workspace.cmd", "-NoClipboard")
+        self.assertEqual(duplicate.returncode, 0, duplicate.stdout)
+        self.assertEqual(
+            json.loads((repository / "output/work-editor-session.json").read_text(encoding="utf-8-sig"))["pid"],
+            session["pid"],
+        )
+        stopped = self.run_cmd(repository / "stop_deck_workspace.cmd")
+        self.assertEqual(stopped.returncode, 0, stopped.stdout)
+
     def test_stop_refuses_reused_or_mismatched_pid_and_cleans_missing_pid(self) -> None:
         repository = self.copy_repository("Bento Preview Stale")
         port = self.free_port()

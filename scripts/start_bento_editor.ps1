@@ -1,9 +1,12 @@
 ﻿[CmdletBinding()]
 param(
     [ValidateRange(1, 65535)][int]$Port = 8765,
+    [ValidateSet('authoring', 'finalization')][string]$Mode = 'finalization',
     [string]$Source = 'output\presentation.generated.bento.html',
     [string]$Target = 'output\presentation.final.bento.html',
     [string]$Registry = 'output\diagnostics\merged-registry.json',
+    [string]$SourceRegistry = '',
+    [string]$TargetRegistry = '',
     [ValidateRange(1, 300)][int]$StartupTimeoutSeconds = 20,
     [switch]$NoClipboard
 )
@@ -85,6 +88,8 @@ try {
     $sourcePath = Resolve-BentoLauncherPath -Repository $repository -Value $Source
     $targetPath = Resolve-BentoLauncherPath -Repository $repository -Value $Target
     $registryPath = Resolve-BentoLauncherPath -Repository $repository -Value $Registry
+    $sourceRegistryPath = if ([string]::IsNullOrWhiteSpace($SourceRegistry)) { $registryPath } else { Resolve-BentoLauncherPath -Repository $repository -Value $SourceRegistry }
+    $targetRegistryPath = if ([string]::IsNullOrWhiteSpace($TargetRegistry)) { $null } else { Resolve-BentoLauncherPath -Repository $repository -Value $TargetRegistry }
     $expectedStatusTarget = Get-BentoDisplayPath -Repository $repository -Value $targetPath
     $url = "http://${hostAddress}:$Port/"
 
@@ -98,6 +103,10 @@ try {
     if (-not (Test-Path -LiteralPath $registryPath -PathType Leaf)) {
         $display = Get-BentoDisplayPath -Repository $repository -Value $registryPath
         throw "Bento registryが見つかりません。`n`n必要なファイル:`n$display"
+    }
+    if ($Mode -eq 'authoring') {
+        if (-not (Test-Path -LiteralPath $sourceRegistryPath -PathType Leaf)) { throw "Generated registry was not found: $sourceRegistryPath" }
+        if ($null -eq $targetRegistryPath) { throw 'Authoring mode requires -TargetRegistry.' }
     }
 
     $lockHandle = Enter-BentoLauncherLock -Repository $repository
@@ -123,9 +132,16 @@ try {
         if (-not (Test-BentoStatusTarget -Status $status -ExpectedTarget $expectedStatusTarget)) {
             throw "port $Port では別のBento Work editorが起動しています（target: $($status.target)）。`n上書きや自動停止は行いません。別のportを指定してください: start_bento_editor.cmd -Port 8766"
         }
+        if ([string]$status.editingMode -ne $Mode) { throw "port $Port is running a different Work editor mode: $($status.editingMode)" }
         if ($null -ne $session) {
             $sameRequest = ([int]$session.port -eq $Port) -and
-                [string]::Equals([string]$session.target, $targetPath, [System.StringComparison]::OrdinalIgnoreCase)
+                [string]::Equals([string]$session.target, $targetPath, [System.StringComparison]::OrdinalIgnoreCase) -and
+                [string]::Equals([string]$session.mode, $Mode, [System.StringComparison]::OrdinalIgnoreCase)
+            if ($Mode -eq 'authoring') {
+                $sameRequest = $sameRequest -and
+                    [string]::Equals([string]$session.sourceRegistry, $sourceRegistryPath, [System.StringComparison]::OrdinalIgnoreCase) -and
+                    [string]::Equals([string]$session.targetRegistry, $targetRegistryPath, [System.StringComparison]::OrdinalIgnoreCase)
+            }
             if (-not $sameRequest) {
                 throw '既存sessionは別のportまたはtargetを使用しています。先にstop_bento_editor.cmdで停止してください。'
             }
@@ -164,12 +180,17 @@ try {
 
     $arguments = @(
         '-u', '-m', 'scripts.run_bento_work_editor',
+        '--mode', $Mode,
         '--source', $sourcePath,
         '--target', $targetPath,
         '--registry', $registryPath,
+        '--repository', $repository,
         '--host', $hostAddress,
         '--port', [string]$Port
     )
+    if ($Mode -eq 'authoring') {
+        $arguments += @('--source-registry', $sourceRegistryPath, '--target-registry', $targetRegistryPath)
+    }
     $argumentLine = ($arguments | ForEach-Object { ConvertTo-BentoProcessArgument -Argument ([string]$_) }) -join ' '
     $startedAt = [System.DateTimeOffset]::Now.ToString('o')
     $previousPythonUtf8 = $env:PYTHONUTF8
@@ -198,7 +219,8 @@ try {
         }
         $candidateStatus = Get-BentoEditorStatus -HostAddress $hostAddress -Port $Port -TimeoutSeconds 1
         if ($null -ne $candidateStatus) {
-            if (Test-BentoStatusTarget -Status $candidateStatus -ExpectedTarget $expectedStatusTarget) {
+            if ((Test-BentoStatusTarget -Status $candidateStatus -ExpectedTarget $expectedStatusTarget) -and
+                [string]$candidateStatus.editingMode -eq $Mode) {
                 $startedStatus = $candidateStatus
             }
             break
@@ -241,6 +263,9 @@ try {
         source = $sourcePath
         target = $targetPath
         registry = $registryPath
+        mode = $Mode
+        sourceRegistry = $sourceRegistryPath
+        targetRegistry = $targetRegistryPath
         host = $hostAddress
         port = $Port
         url = $url

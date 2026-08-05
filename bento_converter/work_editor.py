@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .errors import BentoConverterError, ValidationError
+from .authoring_storage import AuthoringArtifactStorage, AuthoringConflict
 from .html_document import load_html
 from .work_editor_storage import WorkEditorConflict, WorkEditorStorage
 
@@ -34,11 +35,14 @@ TOOLBAR = r"""
         <button id="work-save-validate" type="button">&#x4FDD;&#x5B58;&#x3057;&#x3066;&#x691C;&#x8A3C;</button>
         <button id="work-revert" type="button">&#x4E00;&#x3064;&#x524D;&#x306B;&#x623B;&#x3059;</button>
         <button id="work-reload" type="button">&#x72B6;&#x614B;&#x3092;&#x518D;&#x8AAD;&#x307F;&#x8FBC;&#x307F;</button>
+        <span id="bento-work-editor-mode"></span>
         <span id="bento-work-editor-status">&#x63A5;&#x7D9A;&#x4E2D;&hellip;</span>
       </div>`;
     document.body.appendChild(host);
 
     let revision = null;
+    let registryRevision = null;
+    let editingMode = 'finalization';
     const status = document.getElementById('bento-work-editor-status');
     const controls = Array.from(host.querySelectorAll('button'));
     controls.forEach(button => { button.disabled = true; });
@@ -59,7 +63,10 @@ TOOLBAR = r"""
     async function refreshStatus() {
       const response = await fetch('/api/status', {cache:'no-store'});
       const payload = await response.json();
-      revision = payload.revision;
+      editingMode = payload.editingMode || 'finalization';
+      revision = payload.documentRevision || payload.revision;
+      registryRevision = payload.registryRevision || null;
+      document.getElementById('bento-work-editor-mode').textContent = editingMode;
       message(`revision ${revision.slice(0, 19)}... / validation ${payload.validation}`);
       controls.forEach(button => { button.disabled = false; });
     }
@@ -71,28 +78,35 @@ TOOLBAR = r"""
         else message(`\u691c\u8a3c\u307e\u305f\u306f\u4fdd\u5b58\u306b\u5931\u6557\u3057\u307e\u3057\u305f\u3002\n${errorText(result)}`);
         return null;
       }
-      if (result.revision) revision = result.revision;
+      if (result.documentRevision || result.revision) revision = result.documentRevision || result.revision;
+      if (result.registryRevision) registryRevision = result.registryRevision;
       return result;
     }
     async function serialized() {
       if (!window.bento || typeof window.bento.serialize !== 'function') throw new Error('Bento UI\u304c\u307e\u3060\u8d77\u52d5\u3057\u3066\u3044\u307e\u305b\u3093\u3002');
       return window.bento.serialize();
     }
+    const savePayload = html => editingMode === 'authoring'
+      ? {baseDocumentRevision:revision,baseRegistryRevision:registryRevision,serializedHtml:html}
+      : {baseRevision:revision,serializedHtml:html};
+    const revertPayload = () => editingMode === 'authoring'
+      ? {baseDocumentRevision:revision,baseRegistryRevision:registryRevision}
+      : {baseRevision:revision};
     document.getElementById('work-save').addEventListener('click', async () => {
-      try { const result = await post('/api/save', {baseRevision:revision,serializedHtml:await serialized()}); if (result) message(`\u4fdd\u5b58\u3057\u307e\u3057\u305f\uff1arevision ${result.revision}`); }
+      try { const result = await post('/api/save', savePayload(await serialized())); if (result) message(`\u4fdd\u5b58\u3057\u307e\u3057\u305f\uff1arevision ${result.documentRevision || result.revision}`); }
       catch (error) { message(error.message); }
     });
     document.getElementById('work-save-validate').addEventListener('click', async () => {
       try {
         const html = await serialized();
-        const checked = await post('/api/validate', {baseRevision:revision,serializedHtml:html});
+        const checked = await post('/api/validate', savePayload(html));
         if (!checked) return;
-        const result = await post('/api/save', {baseRevision:revision,serializedHtml:html});
-        if (result) message(`\u4fdd\u5b58\u30fb\u691c\u8a3c\u3057\u307e\u3057\u305f\u3002revision ${result.revision}`);
+        const result = await post('/api/save', savePayload(html));
+        if (result) message(`\u4fdd\u5b58\u30fb\u691c\u8a3c\u3057\u307e\u3057\u305f\u3002revision ${result.documentRevision || result.revision}`);
       } catch (error) { message(error.message); }
     });
     document.getElementById('work-revert').addEventListener('click', async () => {
-      const result = await post('/api/revert', {baseRevision:revision});
+      const result = await post('/api/revert', revertPayload());
       if (result) location.reload();
     });
     document.getElementById('work-reload').addEventListener('click', () => location.reload());
@@ -114,7 +128,7 @@ def inject_work_toolbar(html: str) -> str:
 
 
 class WorkEditorHTTPServer(ThreadingHTTPServer):
-    storage: WorkEditorStorage
+    storage: WorkEditorStorage | AuthoringArtifactStorage
 
     def server_close(self) -> None:
         try:
@@ -124,7 +138,7 @@ class WorkEditorHTTPServer(ThreadingHTTPServer):
 
 
 def create_work_editor_server(
-    storage: WorkEditorStorage, *, host: str = "127.0.0.1", port: int = 8765,
+    storage: WorkEditorStorage | AuthoringArtifactStorage, *, host: str = "127.0.0.1", port: int = 8765,
 ) -> WorkEditorHTTPServer:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise BentoConverterError("Work editor may bind only to a loopback address.")
@@ -171,7 +185,7 @@ def create_work_editor_server(
             return value
 
         def _error(self, exc: Exception) -> None:
-            if isinstance(exc, WorkEditorConflict):
+            if isinstance(exc, (WorkEditorConflict, AuthoringConflict)):
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
             elif isinstance(exc, ValidationError):
                 self._json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc), "errors": list(exc.issues)})
@@ -202,11 +216,27 @@ def create_work_editor_server(
                     serialized_html = payload.get("serializedHtml")
                     if not isinstance(serialized_html, str):
                         raise BentoConverterError("serializedHtml must be a string returned by window.bento.serialize().")
-                    result = self.server.storage.save_serialized(
-                        serialized_html, base_revision=str(payload.get("baseRevision", "")),
-                    ) if path == "/api/save" else self.server.storage.validate_serialized(serialized_html)
+                    if getattr(self.server.storage, "editing_mode", "finalization") == "authoring":
+                        arguments = {
+                            "base_document_revision": str(payload.get("baseDocumentRevision", "")),
+                            "base_registry_revision": str(payload.get("baseRegistryRevision", "")),
+                            "registry": payload.get("registry"),
+                        }
+                        if arguments["registry"] is not None and not isinstance(arguments["registry"], dict):
+                            raise BentoConverterError("registry must be an object when provided")
+                        result = self.server.storage.save_serialized(serialized_html, **arguments) if path == "/api/save" else self.server.storage.validate_serialized(serialized_html, **arguments)
+                    else:
+                        result = self.server.storage.save_serialized(
+                            serialized_html, base_revision=str(payload.get("baseRevision", "")),
+                        ) if path == "/api/save" else self.server.storage.validate_serialized(serialized_html)
                 elif path == "/api/revert":
-                    result = self.server.storage.revert(base_revision=str(payload.get("baseRevision", "")))
+                    if getattr(self.server.storage, "editing_mode", "finalization") == "authoring":
+                        result = self.server.storage.revert(
+                            base_document_revision=str(payload.get("baseDocumentRevision", "")),
+                            base_registry_revision=str(payload.get("baseRegistryRevision", "")),
+                        )
+                    else:
+                        result = self.server.storage.revert(base_revision=str(payload.get("baseRevision", "")))
                 else:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
                     return

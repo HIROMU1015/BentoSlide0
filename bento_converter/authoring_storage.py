@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -219,12 +220,14 @@ class AuthoringArtifactStorage:
         reset_authoring: bool = False,
     ) -> None:
         self.repository = Path(repository).resolve()
+        self.editing_mode = "authoring"
         self.source = Path(source).resolve()
         self.source_registry = Path(source_registry).resolve()
         self.target = Path(target).resolve()
         self.sidecar = _sidecar_path(self.target)
         self.registry_path = Path(target_registry).resolve()
         self.report_path = self.target.parent / "authoring-save-report.json"
+        self.revisions_dir = self.target.parent / "revisions"
         self.transactions = ArtifactTransactionStore(
             self.repository, (self.target, self.sidecar, self.registry_path),
         )
@@ -280,12 +283,77 @@ class AuthoringArtifactStorage:
         return html, document, registry
 
     def status(self) -> dict[str, Any]:
+        self.transactions.recover()
         _, document, registry = self._read_current()
+        try:
+            target = self.target.relative_to(self.repository).as_posix()
+        except ValueError:
+            target = self.target.name
         return {
             "documentRevision": document_revision(document),
             "registryRevision": registry_revision(registry),
-            "validation": "pass",
+            "revision": document_revision(document), "target": target,
+            "runtimeFingerprint": "sha256:" + self._runtime,
+            "backupCount": len(self._backups()), "validation": "pass",
+            "editingMode": "authoring", "sourceOfTruth": target,
+            "repository": str(self.repository),
         }
+
+    def document_response(self) -> dict[str, Any]:
+        _, document, registry = self._read_current()
+        return {
+            "documentRevision": document_revision(document), "registryRevision": registry_revision(registry),
+            "revision": document_revision(document), "document": document, "registry": registry,
+        }
+
+    def validate_serialized(
+        self, serialized_html: str, *, base_document_revision: str,
+        base_registry_revision: str, registry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        _, current_document, current_registry = self._read_current()
+        if (
+            base_document_revision != document_revision(current_document)
+            or base_registry_revision != registry_revision(current_registry)
+        ):
+            raise AuthoringConflict("Another authoring document or registry revision has already been saved")
+        proposed = extract_bento_doc(serialized_html)
+        registry_update_required = _requires_registry_update(current_document, proposed)
+        proposed_registry = current_registry if registry is None else normalize_registry(
+            registry, unit_id=str(registry.get("unitId") or "deck"),
+        )
+        if registry_update_required and registry is None:
+            raise ValidationError(["Authoring document change requires a registry update in the same transaction"])
+        if registry_update_required and registry_revision(proposed_registry) == registry_revision(current_registry):
+            raise ValidationError(["Registry-sensitive authoring changes require a changed registry revision"])
+        validation = validate_authoring_document(proposed, current=current_document, registry=proposed_registry)
+        return {
+            "documentRevision": document_revision(current_document),
+            "registryRevision": registry_revision(current_registry),
+            "revision": document_revision(current_document), "validation": "pass", **validation,
+        }
+
+    def _backup_prefix(self) -> str:
+        name = self.target.name
+        return name[: -len(".bento.html")] if name.endswith(".bento.html") else self.target.stem
+
+    def _backups(self) -> list[Path]:
+        prefix = re.escape(self._backup_prefix())
+        pattern = re.compile(rf"^{prefix}\.rev-(\d{{6}})\.bento\.html$")
+        return sorted(path for path in self.revisions_dir.glob("*.bento.html") if pattern.match(path.name)) if self.revisions_dir.is_dir() else []
+
+    def _create_backup(self) -> Path:
+        snapshot = self.transactions.read_snapshot((self.target, self.sidecar, self.registry_path))
+        if any(snapshot[path] is None for path in (self.target, self.sidecar, self.registry_path)):
+            raise BentoConverterError("Cannot back up an incomplete authoring artifact set")
+        self.revisions_dir.mkdir(parents=True, exist_ok=True)
+        backups = self._backups()
+        next_number = max((int(re.search(r"rev-(\d{6})", path.name).group(1)) for path in backups), default=0) + 1
+        backup_stem = f"{self._backup_prefix()}.rev-{next_number:06d}"
+        html_backup = self.revisions_dir / f"{backup_stem}.bento.html"
+        html_backup.write_bytes(snapshot[self.target])  # type: ignore[arg-type]
+        (self.revisions_dir / f"{backup_stem}.bento.json").write_bytes(snapshot[self.sidecar])  # type: ignore[arg-type]
+        (self.revisions_dir / f"{backup_stem}.registry.json").write_bytes(snapshot[self.registry_path])  # type: ignore[arg-type]
+        return html_backup
 
     def save_serialized(
         self, serialized_html: str, *, base_document_revision: str,
@@ -319,6 +387,7 @@ class AuthoringArtifactStorage:
             "registry": _registry_changes(current_registry, proposed_registry),
             "resourceValidation": validation["resourceScan"], "referenceValidation": "pass", "rollback": False,
         }
+        self._create_backup()
 
         def validate_base() -> None:
             _, installed_document, installed_registry = self._read_current()
@@ -355,4 +424,60 @@ class AuthoringArtifactStorage:
             "contentApprovalInvalidated": True,
             "transactionId": transaction["transactionId"],
             "validation": "pass",
+        }
+
+    def revert(self, *, base_document_revision: str, base_registry_revision: str) -> dict[str, Any]:
+        current_html, current_document, current_registry = self._read_current()
+        if (
+            base_document_revision != document_revision(current_document)
+            or base_registry_revision != registry_revision(current_registry)
+        ):
+            raise AuthoringConflict("Another authoring document or registry revision has already been saved")
+        backups = self._backups()
+        if not backups:
+            raise BentoConverterError("No authoring revision backup is available")
+        html_backup = backups[-1]
+        backup_stem = html_backup.name[: -len(".bento.html")]
+        json_backup = html_backup.parent / f"{backup_stem}.bento.json"
+        registry_backup = html_backup.parent / f"{backup_stem}.registry.json"
+        backup_html = html_backup.read_text(encoding="utf-8-sig")
+        backup_document = json.loads(json_backup.read_text(encoding="utf-8-sig"))
+        backup_registry = json.loads(registry_backup.read_text(encoding="utf-8-sig"))
+        if extract_bento_doc(backup_html) != backup_document:
+            raise BentoConverterError("Authoring revision backup HTML and JSON differ")
+        assert_runtime_integrity(current_html, backup_html)
+        validate_authoring_document(backup_document, current=backup_document, registry=backup_registry)
+        result_document_revision = document_revision(backup_document)
+        result_registry_revision = registry_revision(backup_registry)
+        report = {
+            "operation": "authoring-revert", "baseDocumentRevision": base_document_revision,
+            "baseRegistryRevision": base_registry_revision, "resultDocumentRevision": result_document_revision,
+            "resultRegistryRevision": result_registry_revision, "rollback": False,
+        }
+
+        def validate_base() -> None:
+            _, installed_document, installed_registry = self._read_current()
+            if (
+                document_revision(installed_document) != base_document_revision
+                or registry_revision(installed_registry) != base_registry_revision
+            ):
+                raise AuthoringConflict("Authoring base revisions changed before the revert transaction began")
+
+        transaction = self.transactions.commit(
+            {
+                self.target: backup_html.encode("utf-8"),
+                self.sidecar: (serialize_bento_doc(backup_document) + "\n").encode("utf-8"),
+                self.registry_path: (json.dumps(backup_registry, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8"),
+            },
+            operation="authoring-revert", base_document_revision=base_document_revision,
+            base_registry_revision=base_registry_revision, target_document_revision=result_document_revision,
+            target_registry_revision=result_registry_revision, validate_base=validate_base,
+            report_path=self.report_path, report_payload=report,
+        )
+        for path in (html_backup, json_backup, registry_backup):
+            path.unlink(missing_ok=True)
+        return {
+            "reverted": True, "documentRevision": result_document_revision,
+            "registryRevision": result_registry_revision, "revision": result_document_revision,
+            "transactionId": transaction["transactionId"], "validation": "pass",
         }

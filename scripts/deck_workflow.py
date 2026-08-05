@@ -19,6 +19,7 @@ import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
 from bento_converter.artifact_transaction import ArtifactTransactionStore, recover_repository_transactions
+from bento_converter.authoring_storage import AuthoringArtifactStorage
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError
 from bento_converter.html_document import extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
@@ -756,10 +757,14 @@ def validate_output_bundle(
         raise WorkflowError("Generated Bento HTML #bento-doc and JSON sidecar differ")
 
     output_root = generated_html_path.parent
+    registry_output = (
+        _repo_path(root, outputs["generatedRegistry"], field="outputs.generatedRegistry")
+        if state.get("schemaVersion") == 2 else output_root / "diagnostics/merged-registry.json"
+    )
     required = [
         output_root / "conversion-report.json",
         output_root / "diagnostics/computed-layout.json",
-        output_root / "diagnostics/merged-registry.json",
+        registry_output,
         output_root / "diagnostics/resource-scan.json",
         output_root / "diagnostics/browser-check.json",
     ]
@@ -808,6 +813,25 @@ def validate_output_bundle(
         raise WorkflowError("Final Bento runtime differs from generated runtime")
     result["finalDocument"] = final_document
     return result
+
+
+def authoring_storage(root: Path, state: dict[str, Any]) -> AuthoringArtifactStorage:
+    if state.get("schemaVersion") != 2:
+        raise WorkflowError("Bento authoring storage requires deck schema v2")
+    outputs = state["outputs"]
+    if any(outputs[field] is None for field in ("authoringHtml", "authoringJson", "authoringRegistry")):
+        raise WorkflowError("Migrated late-stage decks do not have authoring artifacts")
+    storage = AuthoringArtifactStorage(
+        source=_repo_path(root, outputs["generatedHtml"], field="outputs.generatedHtml"),
+        source_registry=_repo_path(root, outputs["generatedRegistry"], field="outputs.generatedRegistry"),
+        target=_repo_path(root, outputs["authoringHtml"], field="outputs.authoringHtml"),
+        target_registry=_repo_path(root, outputs["authoringRegistry"], field="outputs.authoringRegistry"),
+        repository=root,
+    )
+    expected_sidecar = _repo_path(root, outputs["authoringJson"], field="outputs.authoringJson")
+    if storage.sidecar != expected_sidecar:
+        raise WorkflowError("Authoring storage sidecar differs from outputs.authoringJson")
+    return storage
 
 
 def _source_type(path: str) -> str:
@@ -1395,6 +1419,17 @@ def command_prepare_conversion(root: Path, state: dict[str, Any]) -> None:
 def command_mark_converted(root: Path, state: dict[str, Any]) -> None:
     _require_stage(state, "converting")
     bundle = validate_output_bundle(root, state, require_final=False)
+    if state.get("schemaVersion") == 2:
+        storage = authoring_storage(root, state)
+        storage.status()
+        state["handoff"]["readyForCodex"] = False
+        state["handoff"]["readyForBentoAuthoring"] = True
+        state["handoff"]["readyForContentReview"] = False
+        state["handoff"]["readyForFinalEditing"] = False
+        _transition(state, "bento_validation", "in_progress")
+        atomic_write_state(root, state)
+        append_work_log(root, "Validated generated output and initialized or retained Bento authoring artifacts")
+        return
     outputs = state["outputs"]
     WorkEditorStorage(
         source=_repo_path(root, outputs["generatedHtml"], field="outputs.generatedHtml"),
@@ -1411,6 +1446,22 @@ def command_mark_converted(root: Path, state: dict[str, Any]) -> None:
     _transition(state, "bento_validation", "in_progress")
     atomic_write_state(root, state)
     append_work_log(root, "Validated generated output and initialized or retained protected final output")
+
+
+def command_begin_authoring(root: Path, state: dict[str, Any]) -> None:
+    if state.get("schemaVersion") != 2:
+        raise WorkflowError("Bento authoring is available only after deck schema v2 migration")
+    _require_stage(state, "bento_validation")
+    validate_output_bundle(root, state, require_final=False)
+    storage = authoring_storage(root, state)
+    storage.status()
+    state["handoff"]["readyForCodex"] = False
+    state["handoff"]["readyForBentoAuthoring"] = True
+    state["handoff"]["readyForContentReview"] = False
+    state["handoff"]["readyForFinalEditing"] = False
+    _transition(state, "bento_authoring", "in_progress")
+    atomic_write_state(root, state)
+    append_work_log(root, "Handed validated generated Bento artifacts to Work for authoring")
 
 
 def command_begin_finalization(root: Path, state: dict[str, Any]) -> None:
@@ -1507,7 +1558,16 @@ def _validate_resume_target(root: Path, state: dict[str, Any], snapshot: dict[st
             raise WorkflowError("Cannot resume conversion because the Work-to-Codex handoff is not ready")
         return
     if stage == "bento_validation":
-        validate_output_bundle(root, state, require_final=True)
+        if state.get("schemaVersion") == 2:
+            validate_output_bundle(root, state, require_final=False)
+            authoring_storage(root, state).status()
+        else:
+            validate_output_bundle(root, state, require_final=True)
+        return
+    if stage in {"bento_authoring", "content_review"}:
+        if state.get("schemaVersion") != 2:
+            raise WorkflowError(f"Stage {stage!r} requires deck schema v2")
+        authoring_storage(root, state).status()
         return
     if stage == "bento_finalization":
         validate_output_bundle(root, state, require_final=True)
@@ -1557,6 +1617,7 @@ def parser() -> argparse.ArgumentParser:
     unlock.add_argument("--section", required=True)
     commands.add_parser("prepare-conversion")
     commands.add_parser("mark-converted")
+    commands.add_parser("begin-authoring")
     commands.add_parser("begin-finalization")
     commands.add_parser("approve-final")
     commands.add_parser("complete")
@@ -1616,6 +1677,8 @@ def run(args: argparse.Namespace) -> int:
         command_prepare_conversion(root, state)
     elif command == "mark-converted":
         command_mark_converted(root, state)
+    elif command == "begin-authoring":
+        command_begin_authoring(root, state)
     elif command == "begin-finalization":
         command_begin_finalization(root, state)
     elif command == "approve-final":

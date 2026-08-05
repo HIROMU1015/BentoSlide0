@@ -20,6 +20,7 @@ from scripts.deck_workflow import (
     command_approve_chapter,
     command_approve_final,
     command_approve_plan,
+    command_begin_authoring,
     command_begin_chapter,
     command_begin_finalization,
     command_block,
@@ -28,6 +29,7 @@ from scripts.deck_workflow import (
     command_configure_chapters,
     command_initialize,
     command_mark_converted,
+    command_migrate,
     command_prepare_conversion,
     command_resume,
     command_submit_plan,
@@ -121,7 +123,13 @@ class DeckWorkflowTests(unittest.TestCase):
         (output / "conversion-report.json").write_text(json.dumps({"summary": {"criticalElementFail": 0, "unresolvedLocalResourceReferences": 0}}), encoding="utf-8")
         diagnostics = output / "diagnostics"
         (diagnostics / "computed-layout.json").write_text("{}\n", encoding="utf-8")
-        (diagnostics / "merged-registry.json").write_text("{}\n", encoding="utf-8")
+        (diagnostics / "merged-registry.json").write_text(json.dumps({
+            "format": "bento/html-registry/v2", "unitId": "deck", "sources": {},
+            "document": {}, "assets": {}, "fonts": {},
+            "equations": {"hamiltonian_split": {"latex": "H = H_0 + \\alpha H_1"}},
+            "figures": {}, "tables": {}, "charts": {},
+            "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+        }), encoding="utf-8")
         (diagnostics / "resource-scan.json").write_text(json.dumps({"passed": True, "unresolved": []}), encoding="utf-8")
         (diagnostics / "browser-check.json").write_text(json.dumps({"serialize_roundtrip": True}), encoding="utf-8")
         generated_hash = hashlib.sha256(generated_html.read_bytes()).hexdigest()
@@ -321,6 +329,23 @@ class DeckWorkflowTests(unittest.TestCase):
         command_mark_converted(self.root, self.state())
         self.assertEqual(hashlib.sha256((self.root / "output/presentation.generated.bento.html").read_bytes()).hexdigest(), generated_hash)
         self.assertEqual(hashlib.sha256((self.root / "output/presentation.final.bento.html").read_bytes()).hexdigest(), final_hash)
+
+    def test_v2_mark_converted_initializes_authoring_then_explicitly_hands_off(self) -> None:
+        state = self.ready_for_conversion()
+        command_migrate(self.root, state, dry_run=False, report_path=None)
+        self.prepare_output_bundle(self.state(), existing_final=False)
+        command_mark_converted(self.root, self.state())
+        validated = self.state()
+        self.assertEqual(validated["workflow"]["stage"], "bento_validation")
+        self.assertTrue(validated["handoff"]["readyForBentoAuthoring"])
+        self.assertFalse((self.root / validated["outputs"]["finalHtml"]).exists())
+        for field in ("authoringHtml", "authoringJson", "authoringRegistry"):
+            self.assertTrue((self.root / validated["outputs"][field]).is_file())
+        command_begin_authoring(self.root, validated)
+        authoring = self.state()
+        self.assertEqual(authoring["workflow"]["stage"], "bento_authoring")
+        self.assertEqual(authoring["workflow"]["sourceOfTruth"], "authoring")
+        self.assertTrue(authoring["handoff"]["readyForBentoAuthoring"])
 
     def test_finalization_and_complete_require_explicit_final_approval(self) -> None:
         state = self.ready_for_conversion()

@@ -3,12 +3,16 @@ from __future__ import annotations
 import copy
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 from bento_converter.authoring_storage import AuthoringArtifactStorage, AuthoringConflict
 from bento_converter.errors import ValidationError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint
+from bento_converter.work_editor import create_work_editor_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -143,6 +147,54 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
         )
         self.assertEqual(saved["validation"], "pass")
         self.assertEqual(extract_bento_doc(load_html(self.target))["slides"], document["slides"])
+
+    def test_authoring_http_api_uses_dual_revisions_and_mode_contract(self) -> None:
+        storage = self.storage()
+        server = create_work_editor_server(storage, port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        def get(path: str):
+            with urlopen(base + path, timeout=10) as response:
+                return response.status, response.read().decode("utf-8")
+
+        def post(path: str, payload: dict):
+            request = Request(base + path, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urlopen(request, timeout=10) as response:
+                    return response.status, json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+        try:
+            code, raw = get("/api/status")
+            status = json.loads(raw)
+            self.assertEqual((code, status["editingMode"]), (200, "authoring"))
+            self.assertEqual(Path(status["repository"]), self.root)
+            self.assertEqual(status["sourceOfTruth"], "output/presentation.authoring.bento.html")
+            html = load_html(self.target)
+            document = extract_bento_doc(html)
+            self.title(document)["html"] = "API edit"
+            request = {
+                "baseDocumentRevision": status["documentRevision"],
+                "baseRegistryRevision": status["registryRevision"],
+                "serializedHtml": embed_bento_doc(html, document),
+            }
+            code, saved = post("/api/save", request)
+            self.assertEqual(code, 200)
+            self.assertTrue(saved["contentApprovalInvalidated"])
+            self.assertIn("transactionId", saved)
+            code, _ = post("/api/save", request)
+            self.assertEqual(code, 409)
+            code, reverted = post("/api/revert", {
+                "baseDocumentRevision": saved["documentRevision"],
+                "baseRegistryRevision": saved["registryRevision"],
+            })
+            self.assertEqual((code, reverted["reverted"]), (200, True))
+            self.assertIn("bento-work-editor-mode", get("/")[1])
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=5)
 
 
 if __name__ == "__main__":

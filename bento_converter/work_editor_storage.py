@@ -278,6 +278,7 @@ class WorkEditorStorage:
         self.sidecar = _sidecar_path(self.target)
         self.registry_path = Path(registry).resolve() if registry else None
         self.allow_content_edit = allow_content_edit
+        self.editing_mode = "finalization"
         self.backup_limit = max(1, backup_limit)
         self.revisions_dir = self.target.parent / "revisions"
         self.save_report_path = self.target.parent / "save-report.json"
@@ -449,6 +450,7 @@ class WorkEditorStorage:
 
     @_locked
     def status(self) -> dict[str, Any]:
+        self.transactions.recover()
         html, document = self._current()
         validation = "pass"
         try:
@@ -461,14 +463,17 @@ class WorkEditorStorage:
             display_target = self.target.name
         return {
             "target": display_target, "revision": document_revision(document),
+            "documentRevision": document_revision(document),
             "runtimeFingerprint": "sha256:" + runtime_fingerprint(html),
             "backupCount": len(self._backups()), "validation": validation,
+            "editingMode": self.editing_mode, "sourceOfTruth": display_target,
+            "repository": str(self.repository),
         }
 
     @_locked
     def document_response(self) -> dict[str, Any]:
         _, document = self._current()
-        return {"revision": document_revision(document), "document": document}
+        return {"revision": document_revision(document), "documentRevision": document_revision(document), "document": document}
 
     @_locked
     def validate_serialized(self, serialized_html: str) -> dict[str, Any]:

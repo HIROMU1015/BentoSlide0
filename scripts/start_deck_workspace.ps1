@@ -29,18 +29,44 @@ try {
             }
             exit $LASTEXITCODE
         }
+        { $_ -in @('bento_authoring', 'content_review') } {
+            $sourcePath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.generatedHtml)
+            $targetPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.authoringHtml)
+            $sourceRegistryPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.generatedRegistry)
+            $targetRegistryPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.authoringRegistry)
+            $editorArguments = @{
+                Mode = 'authoring'
+                Source = $sourcePath
+                Target = $targetPath
+                Registry = $sourceRegistryPath
+                SourceRegistry = $sourceRegistryPath
+                TargetRegistry = $targetRegistryPath
+                Port = [int]$deck.preview.bentoPort
+                NoClipboard = $NoClipboard
+            }
+            & (Join-Path $PSScriptRoot 'start_bento_editor.ps1') @editorArguments
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $url = "http://127.0.0.1:$($deck.preview.bentoPort)/"
+            & $python.Executable -m scripts.deck_workflow --root $repository set-current-url --url $url | Out-Null
+            exit $LASTEXITCODE
+        }
         'bento_finalization' {
             $sourcePath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.generatedHtml)
             $targetPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.finalHtml)
-            $registryPath = Join-Path ([System.IO.Path]::GetDirectoryName($sourcePath)) 'diagnostics\merged-registry.json'
+            if ([int]$deck.schemaVersion -eq 2) {
+                $registryPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.finalRegistry)
+            }
+            else {
+                $registryPath = Join-Path ([System.IO.Path]::GetDirectoryName($sourcePath)) 'diagnostics\merged-registry.json'
+            }
             if ($NoClipboard) {
                 & (Join-Path $PSScriptRoot 'start_bento_editor.ps1') `
-                    -Source $sourcePath -Target $targetPath -Registry $registryPath `
+                    -Mode finalization -Source $sourcePath -Target $targetPath -Registry $registryPath `
                     -Port ([int]$deck.preview.bentoPort) -NoClipboard
             }
             else {
                 & (Join-Path $PSScriptRoot 'start_bento_editor.ps1') `
-                    -Source $sourcePath -Target $targetPath -Registry $registryPath `
+                    -Mode finalization -Source $sourcePath -Target $targetPath -Registry $registryPath `
                     -Port ([int]$deck.preview.bentoPort)
             }
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
