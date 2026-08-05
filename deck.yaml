@@ -1,31 +1,55 @@
-schemaVersion: 1
+schemaVersion: 2
 project:
+  kind: paper_explanation
   title: null
   request: REQUEST.md
   primarySource: null
   supplementarySources: []
+sources:
+  manifest: sources/source-manifest.yaml
+  authorityMode: single
+authoring:
+  mode: single
+  entryHtml: deck/deck.preview.html
+  registry: deck/deck.registry.json
+  currentSection: null
 workflow:
   stage: initialized
   status: pending
   owner: work
   sourceOfTruth: sources
   currentChapter: null
+  currentSection: null
   blockingReason: null
   blockedFrom: null
 approvals:
   explanationPolicy: pending
   storyOutline: pending
   slidePlan: pending
+  bentoContent:
+    status: pending
+    documentRevision: null
+    registryRevision: null
+    approvalDigest: null
+    approvedAt: null
   finalBento: pending
+sections: {}
 chapters: {}
 handoff:
   readyForCodex: false
+  readyForBentoAuthoring: false
+  readyForContentReview: false
   readyForFinalEditing: false
 outputs:
   generatedHtml: output/presentation.generated.bento.html
   generatedJson: output/presentation.generated.bento.json
+  generatedRegistry: output/diagnostics/merged-registry.json
+  authoringHtml: output/presentation.authoring.bento.html
+  authoringJson: output/presentation.authoring.bento.json
+  authoringRegistry: output/presentation.authoring.registry.json
   finalHtml: output/presentation.final.bento.html
   finalJson: output/presentation.final.bento.json
+  finalRegistry: output/presentation.final.registry.json
 preview:
   htmlPort: 4173
   bentoPort: 8765
@@ -34,3 +58,7 @@ validation:
   finalStatus: pending
   checkedAt: null
   finalBaseline: null
+migration:
+  fromSchemaVersion: null
+  migratedAt: null
+  lateStageCompatibility: false

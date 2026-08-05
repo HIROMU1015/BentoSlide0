@@ -1,0 +1,25 @@
+{
+  "format": "bento/html-registry/v2",
+  "unitId": "deck",
+  "sources": {},
+  "document": {
+    "title": "",
+    "theme": {
+      "background": "#ffffff",
+      "color": "#14213d",
+      "accent": "#2563eb",
+      "fontFamily": "Arial"
+    }
+  },
+  "assets": {},
+  "fonts": {},
+  "equations": {},
+  "figures": {},
+  "tables": {},
+  "charts": {},
+  "protected": {
+    "slideIds": [],
+    "elementIds": [],
+    "requiredText": []
+  }
+}

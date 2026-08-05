@@ -1,26 +1,32 @@
 # BentoSlide project router
 
-At the start of every task, read `START_HERE.md` and `deck.yaml`. Treat `deck.yaml` as the sole machine-readable workflow state, then read only the stage-specific rules in `workflow/WORKFLOW.md` and the relevant files under `instructions/`.
+At the start of every task, read `START_HERE.md`, `deck.yaml`, and `python -m scripts.deck_workflow status --json`. Treat `deck.yaml` as the sole machine-readable workflow state, then read the stage-specific rules in `workflow/WORKFLOW.md` and only the relevant specifications.
 
 ## Non-negotiable rules
 
-- Infer routine filenames, chapter numbers, state transitions, logs, validation, preview commands, and conversion commands from the repository. Do not ask the user to repeat mechanical instructions.
-- Use primary sources under `sources/` as factual authority. Do not invent claims, conditions, symbols, signs, subscripts, assumptions, numbers, comparisons, or generalizations.
-- Before conversion, paired `chapters/chapter-XX.preview.html` and `.registry.json` files are authoritative for visual design and provenance.
-- After finalization begins, `output/presentation.final.bento.html` and its `#bento-doc` are authoritative. Never reconvert HTML over final edits.
-- For requested final geometry/style/theme/background/z-order changes, batch all edits through `python -m scripts.apply_bento_final_edits` and save once. Read `docs/fast-final-editing.md`; use the browser UI only when visual judgment or direct manipulation is necessary.
-- Never edit generated output manually. Never use `--reset-final` automatically. Never use `--allow-content-edit` for ordinary layout adjustment.
-- Record machine state through `python -m scripts.deck_workflow`; keep `planning/work-log.md` concise. Do not bypass plan, chapter-visual, or final approval gates.
-- When a reported blocker is resolved, run `python -m scripts.deck_workflow resume`; never ask the user to repair workflow fields manually.
-- Preserve the Bento runtime, Work editor API/revisions, synchronous `window.bento.serialize()` string contract, generated/final boundary, resource/fallback behavior, and legacy JSON-first workflow.
-- Treat the saved finalization baseline as immutable. Final validation may accept layout/style/z-order changes but must reject content, identity, data, reference, or slide-structure changes.
+- Infer routine paths, section/chapter selection, state transitions, logs, validation, preview, and conversion commands from the repository. Do not ask the user to repeat mechanical instructions.
+- Use the manifest-listed primary sources as factual authority. Do not invent claims, conditions, symbols, signs, subscripts, assumptions, numbers, comparisons, or generalizations.
+- For schema v2 `single`/`imported` authoring, `deck/deck.preview.html` and `deck/deck.registry.json` are the pre-conversion visual/provenance source of truth. Migrated `modular` decks retain paired chapter files.
+- After conversion, generated artifacts are reproducible and read-only. During `bento_authoring`, authoring HTML/JSON/registry are authoritative. After content approval and final handoff, final `#bento-doc`, frozen final registry, and immutable baselines are authoritative.
+- Never write Bento HTML/JSON/registry directly. Use the revision-checked Work editor API or the common transaction/storage layer. Never expose a partially replaced artifact set.
+- Work editor authoring may change content and structure, but in-place existing `id`/`type` changes require explicit replacement. Finalization permits only geometry/presentation style/theme/background/z-order changes.
+- Use `python -m scripts.apply_bento_final_edits` only in finalization. Never use it for content or structure. Never reconvert over final, automatically reset final, or use `--allow-content-edit` for ordinary final adjustment.
+- Preserve the Bento runtime, synchronous HTML-string `window.bento.serialize()` contract, resource/fallback rules, and legacy JSON-first behavior.
+- Update state only through `scripts.deck_workflow`. Respect plan, section/chapter visual, Bento content-revision, and final approval gates. On a resolved blocker, run `resume`; never repair YAML fields manually.
+- A content approval is valid only for the current authoring document and registry revisions. Recompute it on status and every relevant transition or mutation; stale approval is pending.
+- Server writers hold the OS-level artifact lease for their lifetime. Offline writers must acquire the same lease or use a positively identified matching localhost API; otherwise refuse.
+- Recover unfinished transaction journals before serving reads or writes. A report-only failure keeps committed artifacts and is retried; unsafe recovery changes nothing.
+- Never mutate generated/final during segment import or targeted replacement. Treat imported HTML as untrusted and preview only sanitized static output.
 
 ## Short user instructions
 
-- `この資料を作成して`: initialize source discovery, produce planning artifacts, register all planned chapters, submit the plan, and ask only for material content approval.
-- `この方針で進めて`: record plan approval, begin the first incomplete chapter, create its HTML/registry pair, start HTML preview, and move to visual review.
-- `次へ`: approve the current chapter composition, begin the next incomplete chapter, or move to conversion readiness when all chapters are approved.
-- `BentoSlideに変換して`: require conversion readiness, run the current HTML-first pipeline and all verification, retain any existing final, then hand off to Bento finalization.
-- `最終調整を開始して`: require `bento_finalization`, start the existing Work editor, adjust layout/style without content mutation by default, save, reload, and verify.
+- `この資料を作成して`: discover manifest sources, create planning artifacts, register all planned sections, submit the plan, and request only material approval.
+- `この方針で進めて`: approve the plan, author the first incomplete section in the single HTML/registry source, start HTML preview, and request visual approval.
+- `次へ`: approve the current section and select the next; when all are current and approved, become conversion-ready.
+- `BentoSlideに変換して`: validate approved section digests, convert to generated artifacts, collect all evidence, initialize Bento authoring, and start the authoring Work editor.
+- `この内容で確定`: validate the current authoring document/registry, record their revisions and canonical approval digest, then initialize final artifacts and baselines transactionally.
+- `最終調整を開始して`: require `bento_finalization`, start finalization mode, edit presentation only, save/reload, and run final technical validation.
 
-See `START_HERE.md` for the human entry point, `workflow/WORKFLOW.md` for transitions, and `instructions/00_full_project_instructions.md` for content/design rules.
+Legacy schema v1 decks must be dry-run migrated with `deck_workflow migrate`; never move a late-stage deck back to Bento authoring merely because of migration.
+
+See `START_HERE.md`, `workflow/WORKFLOW.md`, `docs/source-of-truth-policy.md`, `docs/authoring-lifecycle.md`, and `docs/artifact-transactions.md`.

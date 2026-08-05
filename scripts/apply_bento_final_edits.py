@@ -16,6 +16,7 @@ from typing import Any
 
 from bento_converter.errors import BentoConverterError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html
+from bento_converter.registry_document import load_registry, registry_revision, validate_registry
 from bento_converter.work_editor_storage import (
     PRESENTATION_EDITABLE_ELEMENT_FIELDS,
     WorkEditorStorage,
@@ -49,6 +50,7 @@ class FinalEditContext:
     baseline_path: Path | None = None
     baseline_document: dict[str, Any] | None = None
     baseline_fingerprint: str | None = None
+    reserved_paths: tuple[Path, ...] = ()
 
 
 def _utc_now() -> str:
@@ -118,6 +120,7 @@ def _validate_report_path(
         reserved.add(context.registry.resolve())
     if context.baseline_path is not None:
         reserved.add(context.baseline_path.resolve())
+    reserved.update(path.resolve() for path in context.reserved_paths)
     if report_path.resolve() in reserved:
         raise FinalEditError(f"report must not overwrite an input, Bento artifact, registry, or baseline: {report_path}")
     revisions = (context.target.parent / "revisions").resolve()
@@ -383,22 +386,63 @@ def _paths(args: argparse.Namespace) -> FinalEditContext:
             raise FinalEditError(
                 f"deck.yaml stage is {stage!r}; fast final editing requires 'bento_finalization' or 'complete'"
             )
-        source = _resolve(root, state["outputs"]["generatedHtml"], label="outputs.generatedHtml")
+        source_field = (
+            "authoringHtml"
+            if state.get("schemaVersion") == 2 and state["outputs"].get("authoringHtml")
+            else "generatedHtml"
+        )
+        source = _resolve(root, state["outputs"][source_field], label=f"outputs.{source_field}")
         target = _resolve(root, state["outputs"]["finalHtml"], label="outputs.finalHtml")
     if args.registry:
         registry: Path | None = _resolve(root, args.registry, label="registry")
     else:
-        candidate = source.parent / "diagnostics" / "merged-registry.json"
+        candidate = (
+            _resolve(root, state["outputs"]["finalRegistry"], label="outputs.finalRegistry")
+            if state is not None and state.get("schemaVersion") == 2
+            else source.parent / "diagnostics" / "merged-registry.json"
+        )
         if state is not None and not candidate.is_file():
-            raise FinalEditError(f"Required merged registry does not exist: {candidate}")
+            label = "final registry" if state.get("schemaVersion") == 2 else "merged registry"
+            raise FinalEditError(f"Required {label} does not exist: {candidate}")
         registry = candidate if candidate.is_file() else None
     if state is None:
         return FinalEditContext(source=source, target=target, registry=registry)
 
-    generated_document = extract_bento_doc(load_html(source))
-    baseline_document, baseline_fingerprint = load_final_baseline(root, state, generated_document)
+    source_document = extract_bento_doc(load_html(source))
+    baseline_document, baseline_fingerprint = load_final_baseline(root, state, source_document)
     metadata = state["validation"]["finalBaseline"]
-    baseline_path = _resolve(root, metadata["path"], label="validation.finalBaseline.path")
+    baseline_field = "documentPath" if state.get("schemaVersion") == 2 else "path"
+    baseline_path = _resolve(
+        root, metadata[baseline_field], label=f"validation.finalBaseline.{baseline_field}",
+    )
+    if state.get("schemaVersion") == 2:
+        if registry is None:
+            raise FinalEditError("Schema v2 fast final editing requires the frozen final registry")
+        registry_document = load_registry(registry)
+        validate_registry(registry_document, allow_v1=False)
+        if registry_revision(registry_document) != metadata["registryRevision"]:
+            raise FinalEditError("Final registry revision does not match the immutable baseline metadata")
+        registry_baseline = _resolve(
+            root, metadata["registryPath"], label="validation.finalBaseline.registryPath",
+        )
+        if not registry_baseline.is_file():
+            raise FinalEditError(f"Final registry baseline does not exist: {registry_baseline}")
+        baseline_registry_document = load_registry(registry_baseline)
+        validate_registry(baseline_registry_document, allow_v1=False)
+        if (
+            registry_revision(baseline_registry_document) != metadata["registryRevision"]
+            or registry_revision(baseline_registry_document) != registry_revision(registry_document)
+        ):
+            raise FinalEditError("Final registry differs from its immutable registry baseline")
+    reserved_paths = tuple(
+        _resolve(root, value, label=f"outputs.{field}")
+        for field, value in state["outputs"].items()
+        if isinstance(value, str)
+    )
+    if state.get("schemaVersion") == 2:
+        reserved_paths += (_resolve(
+            root, metadata["registryPath"], label="validation.finalBaseline.registryPath",
+        ),)
     return FinalEditContext(
         source=source,
         target=target,
@@ -406,6 +450,7 @@ def _paths(args: argparse.Namespace) -> FinalEditContext:
         baseline_path=baseline_path,
         baseline_document=baseline_document,
         baseline_fingerprint=baseline_fingerprint,
+        reserved_paths=reserved_paths,
     )
 
 
@@ -413,9 +458,9 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--patch", required=True, type=Path, help="JSON presentation-edit patch")
     result.add_argument("--root", type=Path, default=ROOT, help="Repository root")
-    result.add_argument("--source", type=Path, help="Explicit generated Bento HTML; use with --target")
+    result.add_argument("--source", type=Path, help="Explicit immutable-runtime Bento HTML; use with --target")
     result.add_argument("--target", type=Path, help="Explicit final Bento HTML; use with --source")
-    result.add_argument("--registry", type=Path, help="Explicit merged registry JSON")
+    result.add_argument("--registry", type=Path, help="Explicit registry JSON for final validation")
     result.add_argument("--dry-run", action="store_true", help="Validate the batch without saving")
     result.add_argument("--report", type=Path, help="Optional JSON result path")
     return result

@@ -1,112 +1,87 @@
 ---
 name: bento-slide-build
-description: Manage the repository-centered BentoSlide workflow and build, inspect, validate, browser-check, fast-edit, and finalize deterministic Bento Slides HTML from chapter HTML/CSS plus registry JSON, or from legacy coordinate design JSON. Use for short deck commands, deck.yaml stages, chapter preview, HTML-first conversion, presentation-only batch edits, localhost Work editor finalization, runtime integrity, native/fallback evidence, screenshots, or final slide validation in this repository.
+description: Manage the repository-centered BentoSlide workflow and build, inspect, validate, author, browser-check, fast-edit, and finalize deterministic Bento Slides from a single fixed-size HTML/registry deck, migrated modular HTML chapters, imported static HTML, or legacy coordinate JSON. Use for short deck commands, deck.yaml stages, section approval, HTML preview/conversion, Bento authoring and content approval, segment import/replace, localhost Work editor persistence, transaction recovery and writer leases, final presentation edits, runtime integrity, screenshots, or final validation in this repository.
 ---
 
 # Bento slide build
 
-Work from the repository root. Read `START_HERE.md` and `deck.yaml` first. Route the request through `workflow/WORKFLOW.md` and use `python -m scripts.deck_workflow status --json`; do not ask the user for routine filenames, chapter numbers, logs, or CLI steps. Treat chapter HTML/CSS and registry JSON together as the source of truth before conversion. Do not redesign, rewrite copy, or modify the Bento runtime. The coordinate design JSON flow is legacy compatibility only.
+Work from the repository root. Read `START_HERE.md`, `deck.yaml`, and `python -m scripts.deck_workflow status --json` first. Route through `workflow/WORKFLOW.md`; do not ask the user for routine paths, IDs, logs, ports, or CLI steps. Use the manifest-listed sources as factual authority. Do not redesign approved composition, rewrite copy, or modify the Bento runtime.
 
-## Local workflow
+## Route the workflow
 
-- For `この資料を作成して`, resolve sources, create planning artifacts, register all chapters, and submit the plan for content approval.
-- For `この方針で進めて`, record plan approval, author the first incomplete HTML/registry pair, start `start_html_preview.cmd`, and request visual approval.
-- For `次へ`, approve the current chapter through the workflow CLI and select the next automatically; become conversion-ready only when every pair is approved.
-- For `BentoSlideに変換して`, require `ready_for_conversion`, run the verified HTML-first flow below, mark conversion only after evidence exists, and begin finalization.
-- For `最終調整を開始して`, require `bento_finalization`, prefer `start_deck_workspace.cmd` or the existing Bento launcher, retain final as authoritative, and run final verification after save/reload.
+- `この資料を作成して`: discover sources, create planning artifacts, configure all sections, submit the plan, and request material approval.
+- `この方針で進めて`: approve the plan, author the first incomplete section in the single HTML/registry pair, start HTML preview, and request visual approval.
+- `次へ`: approve the current section digest and select the next; become conversion-ready only when all current digests pass.
+- `BentoSlideに変換して`: require conversion readiness, build and verify generated output, then enter `bento_authoring`; do not create final yet.
+- `この内容で確定`: enter content review, bind approval to current authoring document/registry revisions, then initialize final artifacts and both baselines transactionally.
+- `最終調整を開始して`: require `bento_finalization`, use presentation-only final editing, save/reload, and complete final validation.
 
-Use `deck.yaml` as the only machine state source. State changes must go through `scripts.deck_workflow` so schema, approvals, files, atomic writes, and handoffs are validated. Do not infer state from `planning/work-log.md` or chat history.
-When a blocker is resolved, run `python -m scripts.deck_workflow resume`; it revalidates the saved pre-block stage. Never repair stage fields manually.
+Use `scripts.deck_workflow` for every state change. Recompute revision/digest validity rather than trusting chat history. Run `resume` after resolving a blocker. For schema v1, run `migrate --dry-run` before `migrate`; migration is stage-preserving and late-stage evidence must validate before any change.
 
-## HTML-first flow
+## HTML authoring and conversion
 
-Use these four ordered stages. Do not skip from source authoring directly to final editing.
+For schema v2 `single`/`imported`, use the paths in `authoring.entryHtml` and `authoring.registry`. Each slide is a 1280 x 720 `section.slide` with stable `data-slide-id` and `data-section-id`. Read `docs/html-first-authoring-contract.md`. Treat the pair as the pre-conversion source of truth; a section approval includes DOM, registry projection, asset hashes, and global CSS/theme.
 
-### 1. HTML-first build
-
-Read `docs/html-first-authoring-contract.md`, identify matching sorted `*.preview.html` / `*.registry.json` chapters, and build the complete evidence bundle:
+Build the configured single pair:
 
 ```powershell
-python -m scripts.build_bento_from_html --html-dir chapters/ --registry-dir chapters/ --base Bento_Slides.base.bento.html --output output/presentation.generated.bento.html
+python -m scripts.build_bento_from_html --html deck/deck.preview.html --registry deck/deck.registry.json --base Bento_Slides.base.bento.html --output output/presentation.generated.bento.html
 ```
 
-Use the output path recorded in `deck.yaml`.
-
-Keep semantic elements native. Use SVG/image only for the smallest block that requires fallback. Never silently flatten a whole slide.
-
-### 2. Conversion verification
-
-Inspect `conversion-report.json`. Report every native compatibility class, fallback, embedded/unresolved local resource count, correction policy/reinspection, unresolved overlap diagnostic, protected-content check, actual screenshot metric/crop result, critical reason/status contribution, and runtime result. Treat Bento API mutations through `loadDoc()` as API edits, not simulated user typing/dragging.
-
-Verify the deterministic double build when reproducibility evidence is requested:
+Migrated modular decks instead use `--html-dir chapters/ --registry-dir chapters/`. Preserve native semantic elements and localize fallback to the smallest block. Inspect conversion report, computed layout, resource scan, browser check, screenshots, native/fallback classes, crop results, reference/protected checks, serialize round-trip, and runtime fingerprint. For reproducibility:
 
 ```powershell
-python -m scripts.check_html_first_determinism --html-dir chapters/ --registry-dir chapters/ --base Bento_Slides.base.bento.html --report output/determinism-report.json
+python -m scripts.check_html_first_determinism --html deck/deck.preview.html --registry deck/deck.registry.json --base Bento_Slides.base.bento.html --report output/determinism-report.json
 ```
 
-Run the full test matrix shown below. Confirm `diagnostics/resource-scan.json` recursively covers the generated document and passes, media posters/fragments are portable, `summary.criticalElementFail` is zero, and fallback capture remains slide-scoped.
+## Bento authoring
 
-### 3. Work editor finalization
+After `mark-converted` and `begin-authoring`, use `start_deck_workspace.cmd`. Authoring mode may change content/structure and its registry, but every save must use the Work editor API or common storage transaction with both base revisions. Never overwrite authoring HTML/JSON/registry directly. Existing ID/type changes require explicit slide replacement.
 
-Complete the HTML-first build and conversion verification first. On Windows, prefer the repository-root one-click launcher over asking the user to enter a command manually:
+The server holds the artifact-set OS writer lease. An offline tool may write only after acquiring the same lease, or through a localhost API whose repository/mode/targets match exactly. Recover unfinished journals before reads/writes. Never roll back a valid commit because only its report failed.
+
+For an added or targeted replacement slide during `bento_authoring`:
 
 ```powershell
-.\start_bento_editor.cmd
+python -m scripts.bento_segment import --html scratch/segments/add.preview.html --registry scratch/segments/add.registry.json
+python -m scripts.bento_segment replace --html scratch/segments/replacement.preview.html --registry scratch/segments/replacement.registry.json --slide-id target-slide
 ```
 
-It starts the default localhost editor in the background without `--reset-final` or `--allow-content-edit`; keep the Work browser tab open and reload it. Use `stop_bento_editor.cmd` only when the editor should stop. Read `docs/work-editor-finalization.md` for custom ports/paths, session files, and safe PID validation.
+Require browser round-trip evidence, outside-slide hash invariance, cross-slide reference validity, and shared-registry safety. Do not change generated or final. A full HTML reset is exceptional and requires `reset-authoring-from-html --confirm RESET-AUTHORING-FROM-HTML` in authoring stage.
 
-Use the direct command only for non-Windows or explicitly customized/manual operation:
+Content approval must match both current `sha256:` revisions and the canonical `bento/content-approval/v1` digest. Any authoring document/registry mutation invalidates it. Only approved current revisions may be copied to final HTML/JSON/registry plus document/registry baselines.
 
-```powershell
-python -m scripts.run_bento_work_editor --source output/presentation.generated.bento.html --target output/presentation.final.bento.html --registry output/diagnostics/merged-registry.json --port 8765
-```
+## Finalization
 
-Open the localhost URL in the Work browser and use the injected controls to save, validate, revert, or reload. Describe Bento canvas interaction as UI editing and the persistence step as Work editor API saving. Treat an existing final `#bento-doc` as authoritative. The injected guard must preserve `window.bento.serialize()` as a synchronous HTML-string API: detach temporary Work editor UI immediately before serialization, restore it in `finally`, and persist only the validated `#bento-doc`. Never change the runtime API return type for Work editor needs. Never rerun HTML-first conversion into the final path or overwrite it unless the user explicitly requests `--reset-final`.
-
-For precise geometry, style, theme, background, or z-order requests, read `docs/fast-final-editing.md`. Prefer one patch containing every requested change, dry-run it when values are uncertain, then save it once with:
+In finalization, final `#bento-doc`, frozen final registry, and immutable baselines are authoritative. Use the browser UI for judgment/direct manipulation. For exact geometry, style, theme, background, or z-order, read `docs/fast-final-editing.md`, batch all requested changes, dry-run if uncertain, then save once:
 
 ```powershell
 python -m scripts.apply_bento_final_edits --patch path/to/final-edit.json
 ```
 
-This is a Work editor storage/API edit, not simulated UI typing. Reload the existing Work browser once after saving and visually verify the affected slides. Use direct browser interaction only when the request depends on visual judgment, drag behavior, or an editor-only control. Do not use this command for text/equation content, media, data, IDs/types, slide structure, notes, behavior, or references; route such changes through the authoritative pre-final source and the required approval/reset workflow.
+Do not use fast-final editing for text/equations, data/media, IDs/types, slides, notes, behavior, or references. Do not reconvert into final, use `--reset-final`, or relax content protection for an ordinary layout request.
 
-### 4. Final validation
+The injected toolbar must preserve `window.bento.serialize()` as a synchronous HTML-string API. It is detached before serialization and restored in `finally`; toolbar/host/loader/style identifiers never persist. Describe `loadDoc()` mutation as API editing, not simulated typing/dragging.
 
-After editing, validate final HTML/JSON equality, runtime fingerprint, resource scan, protected content, immutable finalization-baseline fingerprint, revision/backup evidence, browser serialize round-trip, and the usual Bento browser check. The baseline permits geometry/style/theme/z-order edits but rejects content, IDs/types, slide structure, data, notes, behavior, and references. For CI handoff, confirm `html-first-evidence` includes `work-editor-evidence/`.
+Final validation checks HTML/JSON equality, runtime fingerprint, recursive resources, references, frozen registry, both baselines, protected fingerprint, revisions/backups, serialize round-trip, and browser evidence.
 
-## Legacy JSON-first flow
+## Static HTML import
 
-1. Identify the design JSON and `Bento_Slides.base.bento.html`.
-2. Build to a path different from the base:
+Treat general HTML as untrusted. Read `docs/html-import.md`, keep the original under `imports/`, and use:
+
+```powershell
+python -m scripts.import_html_deck --input imports/source.html --slide-selector ".slide"
+```
+
+Never execute/import scripts or fetch remote resources. Require an explicit selector when ambiguous. Preview/convert only normalized static output.
+
+## Legacy JSON-first
+
+Keep the legacy path unchanged:
 
 ```powershell
 python -m scripts.build_bento --base Bento_Slides.base.bento.html --design gpt_bento_design.json --output demo.generated.bento.html
-```
-
-3. Validate the document and prove that only `#bento-doc` differs from the base:
-
-```powershell
 python -m scripts.validate_bento demo.generated.bento.html --base Bento_Slides.base.bento.html
-python -m scripts.inspect_bento demo.generated.bento.html
 ```
 
-4. Run the tests:
-
-```powershell
-python -m unittest discover -v
-$env:BENTO_BROWSER_TEST = "1"
-python -m unittest discover -v
-Remove-Item Env:BENTO_BROWSER_TEST
-```
-
-5. When browser evidence or screenshots are required, install `requirements-browser.txt` if needed and run:
-
-```powershell
-python -m scripts.check_bento_browser demo.generated.bento.html --design gpt_bento_design.json --screenshots-dir . --screenshot-prefix demo-slide
-```
-
-Before replacing an existing official demo, compare its hash and extracted Bento document with the generated file. Replace it only after classifying every difference. Report build warnings, test results, runtime integrity, browser results, screenshot paths, and the observed `equationId` / `latexSource` save behavior. Describe clicks as UI selection, but describe text/shape/equation mutations performed through `loadDoc()` as Bento API edits, not UI edits.
-
-Read `docs/html-to-bento-conversion-spec.md`, `docs/bento-native-feature-support.md`, and `docs/fallback-policy.md` for HTML-first mapping changes. Read `docs/bento-conversion-spec.md` for the legacy path. Keep transformation logic in `bento_converter/` and `scripts/`; never duplicate it in this skill.
+For all routes, run the relevant focused tests, full `python -m unittest discover -v`, and the browser-gated suite when browser evidence is required. Keep implementation logic in `bento_converter/` and `scripts/`; do not duplicate it in this skill.

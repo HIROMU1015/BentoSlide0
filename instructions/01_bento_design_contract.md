@@ -4,10 +4,10 @@
 
 ## 1. 成果物
 
-章ごとに次を作成します。
+schema v2の標準運用では次の単一pairを作成します。
 
-- `chapters/chapter-XX.preview.html`
-- `chapters/chapter-XX.registry.json`
+- `deck/deck.preview.html`
+- `deck/deck.registry.json`
 
 HTMLは変換前の視覚デザインの正本です。
 registryは論文出典、数式、図表、削除禁止ロジックの正本です。
@@ -24,7 +24,7 @@ registryは論文出典、数式、図表、削除禁止ロジックの正本で
 
 ```html
 <main id="deck">
-  <section class="slide" data-slide-id="ch1-s1" data-layout="claim-evidence-boundary">
+  <section class="slide" data-slide-id="ch1-s1" data-section-id="introduction" data-layout="claim-evidence-boundary">
     ...
   </section>
 </main>
@@ -35,6 +35,7 @@ registryは論文出典、数式、図表、削除禁止ロジックの正本で
 必須：
 
 - `data-slide-id`
+- `data-section-id`
 
 推奨：
 
@@ -44,7 +45,7 @@ registryは論文出典、数式、図表、削除禁止ロジックの正本で
 - `data-slide-name`
 - `data-notes-id`
 
-slideIdは文書内で一意にします。
+slideIdは文書内で一意にします。同じ`data-section-id`を持つslide群が1つの視覚review単位です。
 
 ## 4. element属性
 
@@ -257,6 +258,7 @@ chartは元データを構造化して保持します。
 - chartに構造化データがある
 - 画像参照が存在する
 - link/state/morph参照が解決できる
+- section承認digestがDOM、registry projection、参照asset、global CSS/themeの現在値と一致する
 
 ## 18. Codexの裁量
 

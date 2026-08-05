@@ -31,7 +31,8 @@ class DeckMigrationTests(unittest.TestCase):
         (self.root / "workflow").mkdir()
         (self.root / "sources/private").mkdir(parents=True)
         (self.root / "output").mkdir()
-        for relative in ("deck.yaml", "workflow/deck.schema.json", "workflow/deck.v1.schema.json"):
+        shutil.copy2(ROOT / "tests/fixtures/deck_v1.yaml", self.root / "deck.yaml")
+        for relative in ("workflow/deck.schema.json", "workflow/deck.v1.schema.json"):
             shutil.copy2(ROOT / relative, self.root / relative)
         (self.root / "REQUEST.md").write_text("# Request\n", encoding="utf-8")
         (self.root / "sources/private/paper.pdf").write_bytes(b"%PDF-1.4\n")

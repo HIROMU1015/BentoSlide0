@@ -38,7 +38,16 @@ jobs:
         run: |
           python -m scripts.deck_workflow validate
           python -m scripts.deck_workflow status --json
-          python -m unittest tests.test_deck_workflow tests.test_html_preview -v
+          python -m unittest \
+            tests.test_deck_migration \
+            tests.test_section_approval \
+            tests.test_artifact_transaction \
+            tests.test_authoring_storage \
+            tests.test_deck_workflow \
+            tests.test_html_preview \
+            tests.test_segment \
+            tests.test_html_import \
+            tests.test_determinism -v
 
       - name: Build HTML-first feature matrix and evidence bundle
         run: |
@@ -138,6 +147,20 @@ jobs:
             }
             return $process.ExitCode
           }
+          $exitCode = Invoke-CmdLauncher (Join-Path $copy "start_html_preview.cmd") "-NoClipboard"
+          if ($exitCode -ne 0) { throw "start_html_preview.cmd failed: $exitCode" }
+          $previewSession = Get-Content output/html-preview-session.json -Raw -Encoding utf8 | ConvertFrom-Json
+          $previewStatus = Invoke-RestMethod -Uri ($previewSession.url + "api/status")
+          if ($previewStatus.format -ne "bento/html-preview-status/v1" -or $previewStatus.mode -ne "single") {
+            throw "Unexpected schema v2 HTML preview status"
+          }
+          $previewPage = Invoke-WebRequest -Uri $previewSession.url -UseBasicParsing
+          if ($previewPage.StatusCode -ne 200) { throw "HTML preview root did not respond" }
+          $exitCode = Invoke-CmdLauncher (Join-Path $copy "stop_html_preview.cmd")
+          if ($exitCode -ne 0) { throw "stop_html_preview.cmd failed: $exitCode" }
+          if ((Test-Path output/html-preview.pid) -or (Test-Path output/html-preview-session.json)) {
+            throw "HTML preview session files remain"
+          }
           $generatedHash = (Get-FileHash output/presentation.generated.bento.html -Algorithm SHA256).Hash
           $exitCode = Invoke-CmdLauncher (Join-Path $copy "start_bento_editor.cmd") "-NoClipboard"
           if ($exitCode -ne 0) { throw "start_bento_editor.cmd failed: $exitCode" }
@@ -168,6 +191,10 @@ jobs:
         shell: pwsh
         run: |
           $copy = Join-Path $env:RUNNER_TEMP "Bento Slide 論文スライド"
+          $previewStop = Join-Path $copy "scripts/stop_html_preview.ps1"
+          if ((Test-Path $previewStop) -and (Test-Path (Join-Path $copy "output/html-preview-session.json"))) {
+            & $previewStop
+          }
           $stop = Join-Path $copy "scripts/stop_bento_editor.ps1"
           if ((Test-Path $stop) -and (Test-Path (Join-Path $copy "output/work-editor-session.json"))) {
             & $stop

@@ -1,79 +1,117 @@
 # Local BentoSlide workflow
 
-`deck.yaml` is the sole machine-readable workflow state. Agents use `python -m scripts.deck_workflow`; users are not expected to run state commands or name files.
+`deck.yaml` is the sole machine-readable state. Agents use `python -m scripts.deck_workflow`; users do not run state commands, choose IDs, or name files.
 
 ## Stages
 
 | Stage | Owner | Source of truth | Exit condition |
 | --- | --- | --- | --- |
-| `initialized` | Work | `sources/` | primary paper resolved |
-| `planning` | Work | `planning/` | explanation, story, slide plan, and chapter list written |
-| `awaiting_plan_approval` | Work | `planning/` | user approves the material plan |
-| `html_authoring` | Work | chapter HTML + registry | current pair is structurally complete |
-| `html_review` | Work | chapter HTML + registry | user approves the major visual composition |
-| `ready_for_conversion` | Codex | approved chapters | every chapter is complete and paired |
-| `converting` | Codex | approved chapters | current HTML-first build and diagnostics exist |
-| `bento_validation` | Codex | generated Bento | generated/final pairs and diagnostics pass |
-| `bento_finalization` | Work | final Bento `#bento-doc` | user approves final layout and technical checks pass |
-| `complete` | Codex | final Bento `#bento-doc` | final verification recorded |
-| `blocked` | Work or Codex | last valid source | blocking reason reported without unsafe transition |
+| `initialized` | Work | sources | primary source resolved |
+| `planning` | Work | sources + planning | policy, story, slide plan, section list exist |
+| `awaiting_plan_approval` | Work | planning | user approves material plan |
+| `html_authoring` | Work | single HTML/registry or migrated chapters | current section/chapter complete |
+| `html_review` | Work | same HTML/registry | current visual composition approved at current digest |
+| `ready_for_conversion` | Codex | all approved HTML units | every approval digest remains current |
+| `converting` | Codex | approved HTML units | deterministic build/evidence exists |
+| `bento_validation` | Codex | generated Bento + generated registry | generated bundle passes and authoring artifacts initialize/retain safely |
+| `bento_authoring` | Work | authoring Bento HTML/JSON/registry | content/structure edits validate |
+| `content_review` | Work | authoring Bento HTML/JSON/registry | exact document and registry revisions approved |
+| `bento_finalization` | Work | final `#bento-doc`, frozen final registry, baselines | presentation-only edits and final approval pass |
+| `complete` | Codex | final artifacts and baselines | final technical verification recorded |
+| `blocked` | Work or Codex | saved pre-block source | reason resolved and `resume` revalidates it |
 
-Expected owners and sources of truth are schema/invariant checked. Approval stages are never crossed automatically.
+Expected owner/source and real artifacts are invariant checked. Approval stages are never crossed automatically.
 
-## Agent-facing state commands
+## State commands
 
 ```text
-status [--json]              inspect state
-validate                     schema and invariant validation
-discover-sources [--json]    resolve PDF candidates
-initialize                   initialized -> planning
-configure-chapters ...       register the complete planned chapter list
-submit-plan                  planning -> awaiting_plan_approval
-approve-plan                 awaiting_plan_approval -> html_authoring
-begin-chapter                select an incomplete chapter
-complete-chapter             validate pair -> html_review
-approve-chapter              record visual approval; select next or become ready
-prepare-conversion           ready_for_conversion -> converting
-mark-converted               verify generated diagnostics and safely initialize/retain final
-begin-finalization           bento_validation -> bento_finalization
-approve-final                record human approval after final technical checks
-complete                     bento_finalization -> complete
-block                        record an explicit blocker and owner
-resume                       revalidate files and restore the pre-block stage
+status [--json]                 consistent status; refresh stale content approval
+validate                        schema, path, stage, source, and artifact invariants
+migrate [--dry-run]             idempotent schema v1 -> v2 migration
+discover-sources [--json]       resolve manifest/PDF candidates
+initialize                      initialized -> planning
+configure-sections ...          register single-file planned sections
+configure-chapters ...          legacy migrated modular equivalent
+submit-plan                     planning -> awaiting_plan_approval
+approve-plan                    -> html_authoring
+begin-section                   choose the first incomplete section
+complete-section                validate source -> html_review
+approve-section                 store digest; choose next or become ready
+unlock-section                  invalidate one approved section deliberately
+prepare-conversion              ready_for_conversion -> converting
+mark-converted                  validate generated; initialize/retain authoring
+begin-authoring                 bento_validation -> bento_authoring
+begin-content-review            validate authoring -> content_review
+approve-content                 bind approval to both current revisions
+reset-authoring-from-html       explicit full reset; authoring stage only
+begin-finalization              approved content -> final artifacts/baselines
+approve-final                   final technical check + human approval
+complete                        bento_finalization -> complete
+block / resume                  preserve and revalidate the complete prior tuple
 ```
 
-Writes to `deck.yaml` use a same-directory temporary file, flush/fsync, and atomic replacement. Transitions validate real files, not only the stage string.
-The four generated/final HTML/JSON paths must be distinct. JSON sidecars are the sibling `.bento.json` paths derived from their HTML files; conversion diagnostics live under the generated HTML parent. A blocked transition records its non-empty reason and complete prior workflow tuple in `workflow.blockingReason` and `workflow.blockedFrom`. `resume` revalidates the target stage before restoring it, so users never edit YAML to recover.
+State writes are atomic. Artifact-changing state transitions use the durable multi-artifact transaction layer where required. All repository-relative paths are traversal checked, generated/authoring/final paths are distinct, and sidecar paths must match their HTML names.
 
-At the first generated-to-final handoff, the workflow stores an immutable baseline Bento JSON plus its complete revision and protected-content fingerprint. Final validation compares final against that baseline: geometry, presentation styling, theme/background, and element z-order may change; document/slide structure, IDs, types, text, equations, data, media sources, notes, behavior, and references may not. An explicit content-edit/reset workflow must deliberately replace the baseline; ordinary finalization never does.
+## Standard single-HTML route
+
+`authoring.mode: single` uses `deck/deck.preview.html` and `deck/deck.registry.json`. Each planned section is a stable grouping of slide IDs. Its approval digest includes canonical section DOM, referenced registry projection, referenced asset bytes, and global CSS/theme. A changed section/registry/asset invalidates that section; changed global CSS/theme invalidates every section. Conversion rechecks all digests.
+
+`authoring.mode: modular` is supported for migrated v1 chapter projects. It retains the chapter approval commands and files; migration alone never changes a later stage into Bento authoring.
+
+## Bento authoring and content approval
+
+`mark-converted` validates generated output and initializes or retains the three authoring artifacts. `begin-authoring` hands them to Work. Authoring mode may change content and structure, with registry changes in the same save. It treats existing ID/type changes as explicit replace operations.
+
+Every save checks both base revisions and validates HTML/JSON/registry, cross references, protected metadata, resources, and runtime before a three-artifact commit. A registry body can be omitted only when the supplied current registry revision is still current and the proposed document validates against that registry. Registry-requiring document changes without the corresponding definitions are rejected.
+
+Content approval stores current document revision, registry revision, time, and:
+
+```text
+sha256(UTF-8("bento/content-approval/v1\0" + documentRevision + "\0" + registryRevision))
+```
+
+Current revisions are recomputed on save, status, review, approval, final handoff, segment operations, offline transactions, and migrated-state validation. A mismatch makes the approval pending. Finalization refuses a stale approval.
+
+`begin-finalization` creates final HTML, JSON, final registry, baseline document, baseline registry, and updated state in one transaction. Existing mismatching final artifacts are not overwritten. Final mode freezes content, structure, IDs/types, data, references, and registry; only geometry, presentation style, theme/background, and z-order may change.
 
 ## Short-command routing
 
 ### この資料を作成して
 
-Read `REQUEST.md`, discover PDFs, resolve the primary source, create the three planning documents, register every planned chapter, submit the plan, and ask only for content-level approval. If zero or multiple PDFs prevent safe selection, ask only for the missing material decision.
+Read `REQUEST.md`, resolve the manifest/primary source, create the planning files, register all sections, submit the plan, and ask only for material approval. With zero or ambiguous primary sources, ask only for the missing material decision.
 
 ### この方針で進めて
 
-Record plan approval, begin the first incomplete chapter, create/update its paired fixed-size HTML and registry, start or refresh `http://127.0.0.1:4173/`, validate the pair, and request major visual approval.
+Record plan approval, select the first incomplete section, author/update the single HTML/registry source, start or refresh `http://127.0.0.1:4173/`, validate it, and request visual approval.
 
 ### 次へ
 
-While in `html_review`, record the current visual approval and automatically select the next incomplete chapter. When every registered chapter is approved, move to `ready_for_conversion`. Never ask for a chapter number.
+In `html_review`, record the current digest and select the next incomplete section. When all sections are approved and current, move to `ready_for_conversion`. Never ask for the section ID.
 
 ### BentoSlideに変換して
 
-Require `ready_for_conversion`, validate every pair and approval, transition to `converting`, run the existing `scripts.build_bento_from_html` command into `outputs.generatedHtml`, inspect all diagnostics/browser evidence, call `mark-converted`, and then `begin-finalization`. Final initialization uses existing `WorkEditorStorage` behavior with `reset_final=False`; an existing final is retained.
+Require `ready_for_conversion`; validate every approval digest; run the single-file HTML-first build to configured generated paths; inspect conversion, browser, screenshot, resource, runtime, and determinism evidence; call `mark-converted`, then `begin-authoring`; start the stage-aware authoring editor. Do not initialize final yet.
+
+### この内容で確定
+
+Enter `content_review`, validate and approve current authoring document/registry revisions, then call `begin-finalization`. Any intervening write invalidates approval and requires a new review. This is the only normal authoring-to-final handoff.
 
 ### 最終調整を開始して
 
-Require `bento_finalization`, start the existing Windows Bento editor launcher, and direct the user to the localhost URL. Treat final `#bento-doc` as authoritative. Default edits are geometry/presentation style only; save through the Work editor, reload, validate, obtain final approval, then complete technical verification.
+Require `bento_finalization`, start finalization mode, and adjust layout/style only. Save, reload, validate against both baselines, obtain final approval, and complete.
 
-## Handoffs
+## Segment and import routes
 
-- Work -> Codex: all plan approvals and all chapter visual approvals are recorded; `handoff.readyForCodex` is true and `prepare-conversion` succeeds.
-- Codex -> Work: generated diagnostics and browser checks pass; final HTML/JSON is initialized or retained without reset; `begin-finalization` sets `handoff.readyForFinalEditing`.
+During `bento_authoring`, `scripts.bento_segment import` adds converted slides and `replace --slide-id` replaces exactly one named slide. Both protect outside slide hashes and all cross-slide/registry references; generated/final remain unchanged. A running matching editor becomes the sole writer via localhost API. Otherwise the CLI must acquire the same OS lease.
 
-Never trigger conversion from a workspace launcher. Never rebuild into the final path. Structural regeneration after final editing requires explicit user authorization and a deliberate final reset outside normal operation.
+`scripts.import_html_deck` accepts only an original under `imports/`, never executes its scripts, blocks network, sanitizes active content, produces normalized static single HTML/registry, and updates source manifest/state transactionally. Ambiguous slide selection requires `--slide-selector`.
 
-If the stage becomes `blocked`, resolve the reported material condition and run `resume` on the user's behalf. Do not ask the user to restore stage fields manually.
+## Recovery, blocking, and migration
+
+Before normal read/write service, unfinished journals are recovered. Full new revisions finish commit; partial replacement rolls the entire set back; all-old targets finish rollback; missing recovery evidence stops without modifying artifacts. Report-only failures keep the committed artifacts and retry the report later.
+
+`block` stores the full prior workflow tuple. `resume` validates that tuple's required files before restoration. Users never edit YAML for recovery.
+
+Schema v1 migration is idempotent and stage-preserving. For `bento_finalization`/`complete`, it verifies the existing final pair, baseline, and merged registry, transactionally snapshots final/baseline registries, and leaves final/revision data untouched. Such late migrations may have null authoring paths only under `migration.lateStageCompatibility`; new v2 decks may not.
+
+Never trigger conversion from a launcher, rebuild into final, or reset protected artifacts without explicit authorization and the dedicated confirmed command.

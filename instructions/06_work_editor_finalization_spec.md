@@ -1,67 +1,61 @@
-# ChatGPT WorkによるBento最終編集仕様
+# ChatGPT WorkによるBento authoring/finalization仕様
 
-## 1. 対象と正本
+## 1. 二つの編集mode
 
-HTML-first変換は再生成可能な`output/presentation.generated.bento.html`と同名JSON sidecarを生成します。最終編集では`output/presentation.final.bento.html`内の`#bento-doc`と同期した`presentation.final.bento.json`を扱います。
+### Authoring
 
-最終編集を開始した時点から、表示・配置・styleの正本はfinalの`#bento-doc`です。chapter HTMLは設計記録として残し、通常運用では再変換してfinalへ上書きしません。generatedを手動編集しません。
+`bento_authoring`と`content_review`では、`presentation.authoring.bento.html/.json`と`presentation.authoring.registry.json`が正本です。本文、notes、slide/element、chart/table data、media、link/morph/state/connector、provenanceを変更できます。既存elementのID/type変更は通常saveではなく明示的なreplaceとして扱います。
+
+保存requestは`baseDocumentRevision`、`baseRegistryRevision`、`serializedHtml`、必要なら完全な`registry`を送ります。registryを省略しても現在revisionと相互参照を検証します。documentが新しいregistry定義を必要とする場合は同一transactionにregistryを含めない限り拒否します。
+
+### Finalization
+
+内容承認後は、`presentation.final.bento.html/.json`、凍結`presentation.final.registry.json`、document/registry baselineが正本です。変更可能なのはgeometry、presentation style、theme/background、z-orderだけです。内容、構造、ID/type、数式、data、media source、notes、behavior、references、registryは変更しません。
 
 ## 2. 起動
 
-Windowsではリポジトリ直下の既存ランチャーを使用します。
+通常は`start_deck_workspace.cmd`を使用します。stage-aware launcherは`deck.yaml`の全custom pathを渡し、authoring/content reviewではauthoring mode、finalizationではfinalization modeを起動します。通常ブラウザー、変換、`--reset-final`、`--allow-content-edit`は起動しません。
 
-```powershell
-.\start_bento_editor.cmd
-```
+既定URLは`http://127.0.0.1:8765/`です。ChatGPT Workの内蔵ブラウザーで開くか既存tabをreloadします。停止は`stop_deck_workspace.cmd`です。
 
-既定URLは`http://127.0.0.1:8765/`です。通常ブラウザーは自動起動せず、ChatGPT Workの内蔵ブラウザーで開くか既存タブを再読み込みします。停止時だけ`stop_bento_editor.cmd`を使用します。
+## 3. API契約
 
-ランチャーは`--reset-final`と`--allow-content-edit`を渡しません。finalがなければ既存Work editorがgeneratedから初期化し、finalがあれば継続使用します。
-stage-awareランチャーは`deck.yaml`のgenerated/finalパスを渡し、registryはgenerated HTMLと同じ親の`diagnostics/merged-registry.json`を使用します。
+- `GET /api/status`: repository、mode、target、両revision、validation、runtime fingerprint
+- `GET /api/document`: consistent document/registry snapshot
+- `POST /api/validate`: 保存前検証
+- `POST /api/save`: 両revision付きtransaction保存
+- `POST /api/revert`: 両revision付きartifact-set復元
 
-## 3. 現行API契約
-
-- `GET /`: final runtimeに一時ツールバーを注入した応答
-- `GET /api/status`: target、revision、validation、runtime fingerprint
-- `GET /api/document`: 最新documentとrevision
-- `POST /api/validate`: serialize結果の保存前検証
-- `POST /api/save`: revision付き保存
-- `POST /api/revert`: 検証済みrevisionへの復元
-
-古い`POST /api/document`契約を使用しません。保存は`serializedHtml`と`baseRevision`を送ります。
+stale document/registry revisionは409、schema/registry/reference/resource/runtime/protected違反は422です。authoring save responseは`documentRevision`、`registryRevision`、`contentApprovalInvalidated`、`transactionId`を含みます。
 
 ## 4. 同期serialize契約
 
-Work editor注入後も`window.bento.serialize()`は同期的にHTML文字列を返します。Promiseまたはthenableへ変更しません。一時ツールバーはserialize直前にDOMから外し、成功・例外のどちらでも`finally`で元の親と位置へ戻します。一時UIは保存結果へ混入しません。
+toolbar注入後も`window.bento.serialize()`は同期的にHTML文字列を返し、Promise/thenableへ変更しません。一時toolbarをserialize直前にDOMから外し、成功・例外の両方で`finally`により元の親と位置へ戻します。`bento-work-editor`、host、loader、styleは保存結果へ混入しません。
 
-## 5. 保存保護
+## 5. Transactionとwriter
 
-保存時は次を維持します。
+serverは起動から終了まで、repositoryとartifact setを識別するOS排他writer leaseを保持します。saveはさらに短時間transaction lockを取得します。HTML/JSON/registryと承認無効化stateをjournal付きtransactionで更新し、temporary/backupをflush/fsyncしてから置換します。read APIはconsistent snapshotだけを返します。
 
-1. SHA-256 revision競合を確認し、stale revisionは409にする
-2. Bento schema、参照、registry、protected content、resource portabilityを検証する
-3. runtime fingerprintを検証する
-4. HTMLとJSONを同じディレクトリの一時ファイルへ書き、flush/fsyncする
-5. revision backupを作成する
-6. final HTMLとsidecarをatomic replaceし、不一致時はrollbackする
-7. 永続化するHTML変更を検証済み`#bento-doc`だけに限定する
-8. final引き渡し時のbaselineに対し、内容・ID・構造・数式・データ・参照を維持する
+未完了journalはAPI提供前に復旧します。partial replacementは全体rollback、全new revisionはcommit完了、all-oldはrollback完了、安全判定不能は無変更で停止します。artifact commit後のreport-only failureでは新artifactを維持し、次回復旧でreportを再生成します。
 
-## 6. 編集範囲
+server起動中のCLIは、同じwriter leaseを取得できなければrepository/mode/targetが一致するlocalhost APIだけを使用します。安全に識別できないwriterへは送信しません。
 
-通常の最終調整はx/y/w/h、余白、文字サイズ、自動折返し、行間、色、z-order、表・chart・connector配置に限定します。本文や明示的な改行、数式、数値、条件、図表データの変更には一次資料とregistryの再確認および明示的な内容編集許可が必要です。
+## 6. 承認とhandoff
 
-UI上のドラッグや入力だけを「UI編集」と呼びます。`window.bento.loadDoc()`で文書モデルを変更した場合は「Bento API編集」と記録します。保存はどちらもWork editor APIを通します。
+内容承認はauthoring document/registryの両revisionと`bento/content-approval/v1` digestへ固定します。status、save、review、approval、final handoff、segment、offline操作時に再計算し、差があればpendingへ戻します。
+
+finalization開始時は承認済みauthoringから、final HTML/JSON/registry、document baseline、registry baseline、`deck.yaml` metadataを1 transactionで初期化します。mismatchする既存finalを暗黙に上書きしません。
 
 ## 7. 完了確認
 
-- final HTML内`#bento-doc`とfinal JSON sidecarが一致する
-- generatedは変わっていない
-- runtime fingerprintがgeneratedと一致する
-- finalの内容・構造fingerprintが保存済みbaselineと一致する
-- revisionとbackupが更新される
-- toolbarがserialize結果と保存ファイルへ混入しない
-- 保存後の再読み込みで位置・寸法・styleが維持される
-- validator、registry/protected-content、resource scan、ブラウザーround-tripが成功する
+- HTML内`#bento-doc`とJSON sidecarが一致する
+- lifecycleに対応するregistry revisionが一致する
+- runtime fingerprintが変化しない
+- generatedとauthoring/final境界が維持される
+- finalが両baselineに対するpresentation-only descendantである
+- revision、backup、transaction reportが更新される
+- toolbarがserialize結果に含まれず、直後に同じDOM位置へ復元される
+- save/validate/revert/reloadが継続して使える
+- resource/reference/browser round-tripが成功する
 
-構造的な再生成が必要な場合でも、既存finalを上書きする前にユーザーの明示承認を得ます。通常運用で`--reset-final`を使用しません。
+UI上の入力/dragだけをUI編集と呼び、`window.bento.loadDoc()`による変更はBento API編集と記録します。

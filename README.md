@@ -1,119 +1,125 @@
 # BentoSlide0
 
-Deterministic conversion tools for producing editable Bento Slides HTML. The default pipeline is HTML-first: GPT authors fixed-size HTML/CSS plus a registry JSON, Chromium resolves the computed layout, and the converter emits native Bento elements into an unchanged official Bento runtime.
+論文や既存HTMLから、編集可能なBento Slidesをローカルで制作するための自己完結型リポジトリです。標準経路は、単一の固定サイズHTMLとregistryを視覚設計の正本にし、Chromiumで計算済み座標を取得し、公式Bento runtimeを変更せずネイティブ要素へ変換します。旧coordinate design JSON経路も互換用として維持しています。
 
-The previous coordinate-design JSON pipeline remains available as a legacy compatibility path.
+## 最短の使い方
 
-## Local-first paper-to-Bento workflow
+1. このリポジトリを資料ごとに複製します。
+2. 一次資料を`sources/private/`へ置き、必要なら`REQUEST.md`を記入します。
+3. ChatGPT Workで`この資料を作成して`と伝えます。
+4. 構成確認後、`この方針で進めて`と伝えます。
+5. HTMLの見た目を確認し、`次へ`または修正内容だけを伝えます。
+6. Codexへ`BentoSlideに変換して`と伝えます。
+7. Bentoの内容確認後、`この内容で確定`と伝えます。
+8. Workで`最終調整を開始して`と伝え、レイアウト・styleのみを仕上げます。
 
-This repository can be copied or cloned as a self-contained production workspace. Normal operation does not require manually selecting ports or running individual Python modules:
+ファイル名、section番号、状態更新、ログ、port、変換コマンドはエージェントが`deck.yaml`から判断します。`deck.yaml`はschema v2の唯一の機械状態です。Windowsでは`start_deck_workspace.cmd`がstageに応じてHTML previewまたはBento Work editorを起動し、URLだけをclipboardへコピーします。通常ブラウザーは開きません。
 
-1. Clone or copy the repository for one deck.
-2. Put the source paper in `sources/private/` (or record another repository-relative path in `deck.yaml`).
-3. Optionally refine the request in `REQUEST.md`.
-4. In ChatGPT Work, say: `この資料を作成して`.
-5. Review the proposed content, then say: `この方針で進めて`.
-6. Review each chapter in the local HTML preview. Say `次へ`, or give only the visual correction, after each review.
-7. Ask Codex: `BentoSlideに変換して`.
-8. In ChatGPT Work, say: `最終調整を開始して`, then make final layout edits and save through the Work editor toolbar.
+標準の正本は次の順に切り替わります。
 
-`deck.yaml` is the machine-readable workflow state. When a local service is needed, double-click `start_deck_workspace.cmd`; it reads the stage and starts only the appropriate service: HTML preview on port 4173 while authoring/reviewing, or the existing Bento Work editor on port 8765 during finalization. Open the copied URL in the ChatGPT Work browser. `stop_deck_workspace.cmd` safely stops the recorded service. Neither launcher opens a normal browser, resets an existing final, nor enables content editing.
+```text
+sources + planning
+  -> deck/deck.preview.html + deck/deck.registry.json
+  -> output/presentation.generated.bento.* + generated registry
+  -> output/presentation.authoring.bento.* + authoring registry
+  -> 承認済みauthoring revision
+  -> output/presentation.final.bento.* + frozen final registry + baseline
+```
 
-Configured repository-relative generated/final paths are honored by the stage-aware launcher. A blocked workflow retains its previous stage and resumes through validated `deck_workflow resume`; final handoff also records an immutable content/structure baseline so final layout and style can change without allowing external content replacement.
+詳細なstage、承認、短文コマンドは[workflow/WORKFLOW.md](workflow/WORKFLOW.md)、正本ルールは[docs/source-of-truth-policy.md](docs/source-of-truth-policy.md)、保存保証は[docs/artifact-transactions.md](docs/artifact-transactions.md)を参照してください。
 
-Start with [START_HERE.md](START_HERE.md). The full state model and short-command routing are documented in [workflow/WORKFLOW.md](workflow/WORKFLOW.md); `AGENTS.md` provides the compact agent entry point.
-
-### Developer setup
+## Developer setup
 
 ```powershell
 python -m pip install -r requirements-browser.txt
 python -m playwright install chromium
 python -m scripts.deck_workflow validate
-python -m scripts.deck_workflow status
+python -m scripts.deck_workflow status --json
 ```
 
-## HTML-first build
-
-Requirements:
+旧schema v1資料は、変更内容を先に確認してから移行できます。
 
 ```powershell
-python -m pip install -r requirements-browser.txt
-python -m playwright install chromium
+python -m scripts.deck_workflow migrate --dry-run
+python -m scripts.deck_workflow migrate
 ```
 
-Build one or more lexically sorted chapters:
+後期stageの移行は既存final・sidecar・baseline・revisionを保持し、検証済みmerged registryからfinal registryとregistry baselineをtransactionで作成します。不足時は元artifactを変更せず失敗します。
+
+## HTML-first conversion
+
+schema v2の標準single-file build:
 
 ```powershell
 python -m scripts.build_bento_from_html `
-  --html-dir chapters/ `
-  --registry-dir chapters/ `
+  --html deck/deck.preview.html `
+  --registry deck/deck.registry.json `
   --base Bento_Slides.base.bento.html `
   --output output/presentation.generated.bento.html
 ```
 
-The build and finalization workflow creates:
+移行済みのmodular資料では従来の`--html-dir chapters/ --registry-dir chapters/`を使えます。生成物にはHTML/JSON、registry、conversion report、computed layout、resource scan、browser check、source/Bento screenshotsが含まれます。ローカルresourceはdata URI化され、未解決resource、参照不整合、runtime変化、critical crop失敗、serialize失敗はbuildを失敗させます。
+
+section承認はsection DOM、参照registry projection、参照asset content、global CSS/themeから決定論的digestを作ります。承認後の変更は該当section（global CSS/themeは全section）を未承認へ戻し、変換を拒否します。
+
+## Bento authoringとfinalization
+
+変換・検証後は、まず`bento_authoring`で内容と構造を編集します。Work editorのauthoring modeはBento HTML/JSON/registryの2つのrevisionを同時に検証し、3 artifactを同一transactionで保存します。内容承認はdocument revision、registry revision、および次のcanonical digestへ固定されます。
 
 ```text
-output/
-├── presentation.generated.bento.html
-├── presentation.generated.bento.json
-├── presentation.final.bento.html
-├── presentation.final.bento.json
-├── conversion-report.json
-├── screenshots/
-│   ├── source/
-│   └── bento/
-├── revisions/
-└── diagnostics/
-    ├── browser-check.json
-    ├── computed-layout.json
-    ├── merged-registry.json
-    └── resource-scan.json
+sha256(UTF-8("bento/content-approval/v1\0" + documentRevision + "\0" + registryRevision))
 ```
 
-`presentation.generated.bento.html` differs from the selected base only inside `script#bento-doc`. Local image, media/poster, chart, SVG/foreignObject, and CSS `url(...)` resources are embedded as data URIs; external SVG fragments are retained. A recursive final-document scan rejects unresolved resources. Critical crop failures, malformed registries, missing protected content, broken references, runtime mutations, and serialize failures also fail the build.
+承認後にどちらかが変わると、承認は同じstate transactionで無効化されます。`begin-finalization`は承認済みauthoringをfinal HTML/JSON/registryとdocument/registry baselineへ一括初期化します。
 
-## Work editor finalization
+`bento_finalization`ではfinalの`#bento-doc`が正本です。内容・構造・registryは凍結され、geometry、presentation style、theme/background、z-orderだけを変更できます。正確な一括変更には`scripts.apply_bento_final_edits`を使用します。HTML-first変換でfinalを上書きせず、通常運用で`--reset-final`や`--allow-content-edit`を使いません。
 
-### Direct Windows editor launcher
-
-`start_deck_workspace.cmd` is the normal stage-aware entry point. After the HTML-first build has produced the default files, the lower-level editor launcher remains available:
-
-1. Double-click `start_bento_editor.cmd` in Explorer.
-2. Open `http://127.0.0.1:8765/` in the ChatGPT Work browser, or reload the BentoSlide tab already left open.
-3. Edit and save locally with the Work editor toolbar.
-4. Double-click `stop_bento_editor.cmd` when the background editor should stop.
-
-The black command window does not need to remain open, and the launcher does not open Chrome, Edge, or another normal browser. It copies the URL to the Windows clipboard, never supplies `--reset-final`, and continues an existing final instead of replacing it. Keep the Work browser tab open between sessions and reload it after the next start.
-
-Use `start_bento_editor.cmd -Port 8766` when the default port is occupied. Launcher state and logs are written under `output/` as `work-editor.pid`, `work-editor-session.json`, `work-editor.log`, `work-editor.stdout.log`, and `work-editor.error.log`. See [Work editor finalization](docs/work-editor-finalization.md) for custom source/target/registry paths and safe-stop behavior.
-
-The direct localhost command remains available for non-launcher use:
+Work editorを直接起動する場合:
 
 ```powershell
 python -m scripts.run_bento_work_editor `
+  --mode authoring `
   --source output/presentation.generated.bento.html `
-  --target output/presentation.final.bento.html `
-  --registry output/diagnostics/merged-registry.json `
+  --target output/presentation.authoring.bento.html `
+  --source-registry output/diagnostics/merged-registry.json `
+  --target-registry output/presentation.authoring.registry.json `
+  --repository . `
   --port 8765
 ```
 
-Open `http://127.0.0.1:8765/` in the ChatGPT Work browser. On first start, `final` is copied from `generated`; an existing final is never overwritten unless `--reset-final` is supplied. The injected toolbar saves `window.bento.serialize()` through a revision-checked API. Only `#bento-doc` is persisted, the runtime stays byte-identical, `presentation.final.bento.json` is synchronized, and prior revisions are retained under `output/revisions/`. Content edits are rejected by default; use `--allow-content-edit` only when explicitly intended.
+stage-aware launcherの利用を推奨します。詳細は[docs/work-editor-finalization.md](docs/work-editor-finalization.md)と[docs/authoring-lifecycle.md](docs/authoring-lifecycle.md)にあります。`window.bento.serialize()`はtoolbar注入後も同期的にHTML文字列を返し、一時UIは保存結果へ入りません。
 
-See [the authoring contract](docs/html-first-authoring-contract.md), [conversion specification](docs/html-to-bento-conversion-spec.md), [Work editor finalization](docs/work-editor-finalization.md), [source-of-truth policy](docs/source-of-truth-policy.md), [native support matrix](docs/bento-native-feature-support.md), and [fallback policy](docs/fallback-policy.md).
+## Segment追加・置換と既存HTML import
 
-## Legacy JSON-first build
-
-The old deterministic entry point is intentionally preserved:
+`bento_authoring`では、`scratch/segments/`のHTML/registryペアを変換して追加、または明示したslide IDだけを置換できます。
 
 ```powershell
-python -m scripts.build_bento `
-  --base Bento_Slides.base.bento.html `
-  --design gpt_bento_design.json `
-  --output demo.generated.bento.html
+python -m scripts.bento_segment import --html scratch/segments/add.preview.html --registry scratch/segments/add.registry.json
+python -m scripts.bento_segment replace --html scratch/segments/replacement.preview.html --registry scratch/segments/replacement.registry.json --slide-id target-slide
 ```
 
-Its contract remains documented in [bento-conversion-spec.md](docs/bento-conversion-spec.md).
+対象外slide hash、cross-slide reference、shared registry、resource、browser round-tripを検証し、generated/finalは変更しません。server起動中は一致するlocalhost APIだけをwriterとして使い、識別できなければ拒否します。
+
+一般HTMLは`imports/`へ原本を隔離してから静的に正規化します。
+
+```powershell
+python -m scripts.import_html_deck --input imports/source.html --slide-selector ".slide"
+```
+
+scriptは実行・移入せず、networkを遮断し、event handlerと`javascript:` URLを除去し、remote resourceや危険な埋め込みをreportします。selectorを安全に決められない場合は明示指定が必要です。詳しくは[docs/html-import.md](docs/html-import.md)を参照してください。
+
+## Crash safety and concurrency
+
+複数artifactの更新は、OS排他writer lease、短時間transaction lock、fsync済みtemporary/backup、永続journalを使います。起動・status・操作前に未完了journalを復旧し、部分置換は全体rollback、全targetがnew revisionならcommit完了処理を行います。安全判定できない場合はartifactを変更せず停止します。report生成だけの失敗では正常artifactをrollbackせず、`report_failed`を次回復旧します。
+
+## Legacy JSON-first
+
+```powershell
+python -m scripts.build_bento --base Bento_Slides.base.bento.html --design gpt_bento_design.json --output demo.generated.bento.html
+python -m scripts.validate_bento demo.generated.bento.html --base Bento_Slides.base.bento.html
+```
+
+旧仕様は[docs/bento-conversion-spec.md](docs/bento-conversion-spec.md)にあります。
 
 ## Verification
 
@@ -121,10 +127,7 @@ Its contract remains documented in [bento-conversion-spec.md](docs/bento-convers
 python -m unittest discover -v
 $env:BENTO_BROWSER_TEST = "1"
 python -m unittest discover -v
-python -m scripts.check_html_first_determinism --html-dir tests/fixtures/html_first --registry-dir tests/fixtures/html_first --base Bento_Slides.base.bento.html --report determinism-report.json
 Remove-Item Env:BENTO_BROWSER_TEST
 ```
 
-The suite also validates the workflow state machine, atomic `deck.yaml` updates, source discovery, stage-aware output gates, loopback-only HTML preview, traversal rejection, and Windows launcher identity checks. The browser-gated suite covers the feature matrix and the localhost Work editor, including browser serialize/save/reload, revision conflict rejection, runtime preservation, media poster embedding, external SVG fragments, recursive resource scanning, chapter combination, native rendering, localized fallback, visual comparison, and determinism.
-
-GitHub Actions uploads the complete `html-first-evidence` artifact and writes a job summary with test count, native/fallback and visual results, Work editor save/conflict/runtime checks, poster/fragment/recursive-scan counts, unresolved resources, serialize and determinism status, and HTML/Bento JSON SHA-256 values.
+GitHub ActionsはLinuxでlegacy/HTML-first/Work editor/full browser suiteを、Windowsでlauncher testsと空白・日本語path smokeを実行し、`html-first-evidence`を保存します。

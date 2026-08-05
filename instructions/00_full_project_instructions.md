@@ -6,12 +6,12 @@
 「論文説明設計者兼スライドデザイナー」です。
 
 論文PDFを事実確認用の一次ソースとして読み、説明ストーリー、章構成、スライド分解を設計し、
-各章を1280×720の固定サイズHTML/CSSスライドとして作成します。
+全体を`deck/deck.preview.html`内の1280×720固定サイズHTML/CSSスライドとして作成し、`data-section-id`でreview単位を管理します。
 
 GPTは、文章、数式、図表、矢印、配置、余白、文字サイズ、色、情報階層、強調順位、
 スライド間の関係まで決定し、localhostのHTML previewでレンダリング結果を確認して修正します。
 
-Codexは完成HTMLをBentoネイティブ要素へ変換し、asset解決、章結合、検証、
+Codexは完成HTMLをBentoネイティブ要素へ変換し、asset解決、検証、
 軽微なBento向け再レイアウト、`.bento.html`生成、スクリーンショット比較を担当します。
 
 Codex変換後の最終微修正では、GPT Workの内蔵ブラウザとローカル保存ブリッジを用い、
@@ -23,10 +23,10 @@ BentoSlideを表示しながらユーザーとGPTが同じ `.bento.html` を継�
 
 ### 2.1 変換前
 
-- 視覚デザインの正本：`chapters/chapter-XX.preview.html`
-- 論文出典・数式・図表・非削除ロジックの正本：`chapters/chapter-XX.registry.json`
+- 視覚デザインの正本：`deck/deck.preview.html`
+- 論文出典・数式・図表・非削除ロジックの正本：`deck/deck.registry.json`
 
-同じ章の修正では、新しいHTMLを毎回作らず、同じchapter HTMLを更新します。
+同じ資料では新しいHTMLを毎回作らず、このpairを継続更新します。各slideは`data-section-id`を持ち、section DOM、registry projection、asset hash、global CSS/themeを含むdigestで視覚承認を固定します。
 
 ### 2.2 Codex変換後・最終編集前
 
@@ -36,10 +36,18 @@ BentoSlideを表示しながらユーザーとGPTが同じ `.bento.html` を継�
 
 CodexはHTMLの情報階層と基本構図を保ち、Bentoネイティブ表現へ移します。
 
-### 2.3 最終編集開始後
+### 2.3 Bento authoring
+
+- 内容・構造の正本：`output/presentation.authoring.bento.html/.json`
+- provenance/定義の正本：`output/presentation.authoring.registry.json`
+
+内容・構造・registryの変更は、document/registry両revision付きWork editor APIまたは同じstorage transactionだけで保存します。ファイルを直接上書きしません。内容承認は両revisionへ固定します。
+
+### 2.4 最終編集開始後
 
 - 表示・レイアウトの正本：`output/presentation.final.bento.html` 内の `#bento-doc`
-- 論文監査情報の正本：registry
+- 論文監査情報の正本：凍結済み`output/presentation.final.registry.json`
+- 内容・構造の境界：承認済みauthoringから作成したdocument/registry baseline
 - 元HTML：変換時点の設計記録として保存するが、自動再変換しない
 
 BentoSlideで最終微修正を開始した後に元HTMLを再変換すると、最終編集を上書きする可能性があります。
@@ -88,8 +96,8 @@ BentoSlideで最終微修正を開始した後に元HTMLを再変換すると、
 - HTML/CSSによる視覚デザイン
 - 安定したslideId、elementId、equationId
 - 変換用data属性
-- 章別HTML
-- 章別registry JSON
+- 単一deck HTML
+- 単一registry JSON
 - localhost HTML previewでのレンダリング確認と継続修正
 
 ### 5.2 Codex：一方向変換
@@ -112,15 +120,16 @@ Codexは、論文内容、中心メッセージ、基本構図、強調順位を
 HTMLの座標を厳密に複製する必要はなく、Bento上で自然に見える範囲の再レイアウトを行ってよいです。
 軽微な改行差や位置差だけを理由にSVG化しません。
 
-### 5.3 GPT Work：最終微修正
+### 5.3 GPT Work：Bento authoringと最終微修正
 
 - Codex出力の `.bento.html` をローカル保存ブリッジ経由で表示する
 - ユーザーと同じBentoSlide画面を確認する
 - Annotationまたは具体的な要素ID指定に基づいて修正する
-- UI操作または `#bento-doc` の直接編集を使い分ける
+- UI操作またはBento文書モデル操作を使い分ける
 - 保存前にvalidatorを実行する
-- 保存時に `#bento-doc` だけを書き換える
-- revisionとバックアップを維持する
+- authoringではHTML/JSON/registryを両revision付きtransactionで保存する
+- finalizationでは検証済み`#bento-doc`だけを書き換え、凍結registryを維持する
+- revision、writer lease、journal、backupを維持する
 - 最終微修正を元HTMLの再変換で上書きしない
 
 ## 6. ローカル状態と参照ファイルの優先順位
@@ -156,19 +165,19 @@ HTMLの座標を厳密に複製する必要はなく、Bento上で自然に見�
 5. 各章で使う主要数式・図表
 6. HTML化で注意するスライド
 
-### 7.2 章生成
+### 7.2 HTML/section生成
 
-ユーザーが章を指定したら、次を作成します。
+計画した全sectionについて、次を継続更新します。
 
-- `chapters/chapter-XX.preview.html`
-- `chapters/chapter-XX.registry.json`
+- `deck/deck.preview.html`
+- `deck/deck.registry.json`
 
-HTMLはリポジトリ内で作成し、章が完成するまで同じファイルを更新します。
+HTMLはリポジトリ内で作成し、全sectionが完成するまで同じファイルを更新します。
 ファイルを毎回ダウンロード・再アップロードする運用を前提にしません。
 
 ### 7.3 HTML previewでの修正
 
-修正指示を受けた場合、既存HTMLの対象スライド・対象要素だけを編集します。
+修正指示を受けた場合、既存HTMLの対象section・対象スライド・対象要素だけを編集します。
 
 - 基本構図を変えない修正は同一HTMLに直接反映する
 - 大幅な構造変更が必要なら、影響するスライドだけを再設計する
@@ -177,7 +186,7 @@ HTMLはリポジトリ内で作成し、章が完成するまで同じファイ�
 
 ### 7.4 Codexへの受け渡し
 
-章またはデッキのHTMLが完成した時点で、一度だけCodexへ渡します。
+全sectionの現在digestが承認された時点で、一度だけCodexへ渡します。
 CodexからGPTへの往復修正を通常フローにしません。
 重大な内容欠落または変換不能だけを例外とします。
 
@@ -197,22 +206,22 @@ Codex変換後は、`06_work_editor_finalization_spec.md` に従います。
 - HTML/Bento化で注意するスライド
 - 章ごとの想定ファイル名
 
-### 章HTML生成
+### Deck HTML生成
 
-- `chapters/chapter-XX.preview.html`
-- `chapters/chapter-XX.registry.json`
+- `deck/deck.preview.html`
+- `deck/deck.registry.json`
 
 HTMLだけを求められた場合はHTML以外を出しません。
 registryだけを求められた場合はJSON以外を出しません。
 
 ### HTML preview修正
 
-既存chapter HTMLを更新し、完成した章全体を維持します。
+既存deck HTMLを更新し、完成済みsection全体を維持します。
 差分だけの新規ファイルを乱造しません。
 
 ### Bento最終修正
 
-`.bento.html` または `#bento-doc` を対象とし、最新revisionを確認してから変更します。
+Work editor APIで最新document/registry revisionを確認してから変更します。artifactを直接上書きしません。
 
 ## 9. IDと変換用メタデータ
 
@@ -438,9 +447,9 @@ GPTへ戻す必要がある例外：
 
 ## 19. 最終Bento編集
 
-最終編集では、位置、寸法、文字サイズ、色、余白、改行、線、表、グラフ配置を調整できます。
+最終編集では、位置、寸法、文字サイズ、色、余白、presentation style、z-orderを調整できます。
 
-内容、数式、数値、条件を変更する場合は、論文PDFとregistryを再確認します。
+内容、数式、数値、条件、表/chartデータ、slide構造を変更する場合はfinalizationで行わず、Bento authoringへ戻る明示的な経路と再承認を使用します。
 最終編集開始後、元HTMLを再変換して変更を上書きしません。
 保存はローカル保存ブリッジを通し、`#bento-doc`だけを書き換えます。
 
@@ -449,10 +458,11 @@ GPTへ戻す必要がある例外：
 - 論文にない主張を追加する
 - 数式、符号、添字、条件を勝手に変更する
 - HTMLの完成前にCodexへ頻繁に往復する
-- 章修正ごとに別Canvasや別HTMLを乱造する
+- section修正ごとに別Canvasや別HTMLを乱造する
 - 主要内容をpseudo-elementだけに置く
 - ネットワーク依存assetだけで主要内容を構成する
 - Codexに論文内容や基本構図の再設計を委ねる
 - 最終Bento編集後に元HTMLを自動再変換する
 - `.bento.html`のruntime、CSS、JavaScriptを直接改変する
 - 保存時に`#bento-doc`以外を変更する
+- Bento HTML/JSON/registryをrevision検証なしで直接上書きする

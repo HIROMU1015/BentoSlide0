@@ -18,6 +18,7 @@ from bento_converter.html_document import (
     runtime_fingerprint,
     serialize_bento_doc,
 )
+from bento_converter.registry_document import registry_revision
 from bento_converter.work_editor_storage import document_revision, protected_content_fingerprint
 from scripts.apply_bento_final_edits import (
     PATCH_FORMAT,
@@ -65,26 +66,37 @@ class FastFinalEditTests(unittest.TestCase):
         shutil.copy2(ROOT / "workflow/deck.v1.schema.json", workflow / "deck.v1.schema.json")
 
         source = artifacts / "custom.generated.bento.html"
+        authoring = artifacts / "custom.authoring.bento.html"
         target = artifacts / "custom.final.bento.html"
         source_json = artifacts / "custom.generated.bento.json"
+        authoring_json = artifacts / "custom.authoring.bento.json"
         target_json = artifacts / "custom.final.bento.json"
         baseline = revisions / "custom.final.baseline.bento.json"
+        registry_baseline = revisions / "custom.final.baseline.registry.json"
         source.write_text(self.before_html, encoding="utf-8")
+        authoring.write_text(self.before_html, encoding="utf-8")
         target.write_text(self.before_html, encoding="utf-8")
         serialized = serialize_bento_doc(self.before) + "\n"
         source_json.write_text(serialized, encoding="utf-8")
+        authoring_json.write_text(serialized, encoding="utf-8")
         target_json.write_text(serialized, encoding="utf-8")
         baseline.write_text(serialized, encoding="utf-8")
         registry_path = diagnostics / "merged-registry.json"
+        authoring_registry = artifacts / "custom.authoring.registry.json"
+        final_registry = artifacts / "custom.final.registry.json"
+        registry_document = {
+            "format": "bento/html-registry/v2", "unitId": "deck", "sources": {},
+            "assets": {}, "fonts": {}, "equations": {}, "figures": {}, "charts": {}, "tables": {},
+            "protected": {
+                "slideIds": [self.slide["id"]],
+                "elementIds": ["slide-1-title"],
+                "requiredText": ["GPTが座標まで設計する"],
+            },
+        }
         if registry:
-            registry_path.write_text(json.dumps({
-                "protected": {
-                    "slideIds": [self.slide["id"]],
-                    "elementIds": ["slide-1-title"],
-                    "requiredText": ["GPTが座標まで設計する"],
-                },
-                "equations": {}, "figures": {}, "charts": {}, "tables": {},
-            }, ensure_ascii=False), encoding="utf-8")
+            registry_payload = json.dumps(registry_document, ensure_ascii=False)
+            for path in (registry_path, authoring_registry, final_registry, registry_baseline):
+                path.write_text(registry_payload, encoding="utf-8")
 
         state = yaml.safe_load((ROOT / "deck.yaml").read_text(encoding="utf-8"))
         owner_source = {
@@ -100,12 +112,19 @@ class FastFinalEditTests(unittest.TestCase):
         state["outputs"] = {
             "generatedHtml": "artifacts/custom.generated.bento.html",
             "generatedJson": "artifacts/custom.generated.bento.json",
+            "generatedRegistry": "artifacts/diagnostics/merged-registry.json",
+            "authoringHtml": "artifacts/custom.authoring.bento.html",
+            "authoringJson": "artifacts/custom.authoring.bento.json",
+            "authoringRegistry": "artifacts/custom.authoring.registry.json",
             "finalHtml": "artifacts/custom.final.bento.html",
             "finalJson": "artifacts/custom.final.bento.json",
+            "finalRegistry": "artifacts/custom.final.registry.json",
         }
         state["validation"]["finalBaseline"] = {
-            "path": "artifacts/revisions/custom.final.baseline.bento.json",
+            "documentPath": "artifacts/revisions/custom.final.baseline.bento.json",
             "documentRevision": document_revision(self.before),
+            "registryPath": "artifacts/revisions/custom.final.baseline.registry.json",
+            "registryRevision": registry_revision(registry_document),
             "protectedContentFingerprint": protected_content_fingerprint(self.before),
         }
         atomic_write_state(self.root, state)
@@ -118,7 +137,8 @@ class FastFinalEditTests(unittest.TestCase):
         }])), encoding="utf-8")
         return {
             "source": source, "target": target, "targetJson": target_json,
-            "registry": registry_path, "baseline": baseline, "patch": patch_path,
+            "registry": final_registry, "baseline": baseline,
+            "registryBaseline": registry_baseline, "patch": patch_path,
         }
 
     def run_standard_cli(self, patch: Path, *extra: str) -> tuple[int, str]:
@@ -247,6 +267,39 @@ class FastFinalEditTests(unittest.TestCase):
         self.assertEqual(json.loads(context["targetJson"].read_text(encoding="utf-8")), edited)
         self.assertTrue(json.loads(report.read_text(encoding="utf-8"))["protectedContentFingerprintUnchanged"])
 
+    def test_legacy_v1_standard_paths_remain_supported(self) -> None:
+        context = self.standard_context()
+        state = yaml.safe_load((ROOT / "tests/fixtures/deck_v1.yaml").read_text(encoding="utf-8"))
+        state["workflow"].update(
+            stage="bento_finalization", status="in_progress", owner="work", sourceOfTruth="final",
+        )
+        state["handoff"]["readyForFinalEditing"] = True
+        state["outputs"] = {
+            "generatedHtml": "artifacts/custom.generated.bento.html",
+            "generatedJson": "artifacts/custom.generated.bento.json",
+            "finalHtml": "artifacts/custom.final.bento.html",
+            "finalJson": "artifacts/custom.final.bento.json",
+        }
+        state["validation"]["finalBaseline"] = {
+            "path": "artifacts/revisions/custom.final.baseline.bento.json",
+            "documentRevision": document_revision(self.before),
+            "protectedContentFingerprint": protected_content_fingerprint(self.before),
+        }
+        atomic_write_state(self.root, state)
+        exit_code, error = self.run_standard_cli(context["patch"])
+        self.assertEqual((exit_code, error), (0, ""))
+
+    def test_schema_v2_rejects_final_registry_drift_from_baseline(self) -> None:
+        context = self.standard_context()
+        before = context["target"].read_bytes()
+        registry = json.loads(context["registry"].read_text(encoding="utf-8"))
+        registry["document"] = {"title": "tampered"}
+        context["registry"].write_text(json.dumps(registry), encoding="utf-8")
+        exit_code, error = self.run_standard_cli(context["patch"])
+        self.assertEqual(exit_code, 2)
+        self.assertIn("Final registry revision", error)
+        self.assertEqual(context["target"].read_bytes(), before)
+
     def test_standard_path_rejects_non_finalization_stage(self) -> None:
         context = self.standard_context(stage="bento_validation")
         before = context["target"].read_bytes()
@@ -260,7 +313,7 @@ class FastFinalEditTests(unittest.TestCase):
         before = context["target"].read_bytes()
         exit_code, error = self.run_standard_cli(context["patch"])
         self.assertEqual(exit_code, 2)
-        self.assertIn("Required merged registry does not exist", error)
+        self.assertIn("Required final registry does not exist", error)
         self.assertEqual(context["target"].read_bytes(), before)
 
     def test_standard_path_rejects_final_that_violates_immutable_baseline(self) -> None:
@@ -285,11 +338,16 @@ class FastFinalEditTests(unittest.TestCase):
         before = context["target"].read_bytes()
         collisions = (
             "artifacts/custom.generated.bento.html",
+            "artifacts/custom.authoring.bento.html",
             "artifacts/custom.final.bento.html",
             "artifacts/custom.generated.bento.json",
+            "artifacts/custom.authoring.bento.json",
             "artifacts/custom.final.bento.json",
             "artifacts/diagnostics/merged-registry.json",
+            "artifacts/custom.authoring.registry.json",
+            "artifacts/custom.final.registry.json",
             "artifacts/revisions/custom.final.baseline.bento.json",
+            "artifacts/revisions/custom.final.baseline.registry.json",
             "artifacts/revisions/new-report.json",
             "final-edit.json",
             "deck.yaml",

@@ -26,7 +26,7 @@ class HtmlPreviewTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         (self.root / "workflow").mkdir()
         (self.root / "chapters/assets").mkdir(parents=True)
-        shutil.copy2(ROOT / "deck.yaml", self.root / "deck.yaml")
+        shutil.copy2(ROOT / "tests/fixtures/deck_v1.yaml", self.root / "deck.yaml")
         shutil.copy2(ROOT / "workflow/deck.schema.json", self.root / "workflow/deck.schema.json")
         shutil.copy2(ROOT / "workflow/deck.v1.schema.json", self.root / "workflow/deck.v1.schema.json")
         (self.root / "REQUEST.md").write_text("# Request\n", encoding="utf-8")

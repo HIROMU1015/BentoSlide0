@@ -44,8 +44,9 @@ class WindowsWorkspaceLauncherTests(unittest.TestCase):
         repository.mkdir(parents=True)
         for directory in ("bento_converter", "scripts", "workflow"):
             shutil.copytree(ROOT / directory, repository / directory, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(ROOT / "tests/fixtures/deck_v1.yaml", repository / "deck.yaml")
         for filename in (
-            "deck.yaml", "REQUEST.md", "demo.bento.html", "start_html_preview.cmd", "stop_html_preview.cmd",
+            "REQUEST.md", "demo.bento.html", "start_html_preview.cmd", "stop_html_preview.cmd",
             "start_deck_workspace.cmd", "stop_deck_workspace.cmd", "start_bento_editor.cmd", "stop_bento_editor.cmd",
         ):
             shutil.copy2(ROOT / filename, repository / filename)

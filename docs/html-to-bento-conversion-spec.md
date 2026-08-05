@@ -3,8 +3,8 @@
 ## Deterministic stages
 
 ```text
-sorted chapter HTML + registry JSON
-→ contract and cross-chapter validation
+single deck HTML + registry JSON (or migrated sorted modular pairs)
+→ contract, section-digest, and cross-unit validation
 → Chromium load/font completion
 → geometry/DOMMatrix/table-structure + getComputedStyle extraction
 → normalize frames to 1280×720
@@ -25,7 +25,9 @@ The Bento runtime, styles, and scripts outside `script#bento-doc[type="applicati
 
 The standalone `.bento.json` must equal the embedded document. The final browser check loads that embedded document, verifies all slide and element frames, exercises Bento API edits for available text/shape/equation types, calls `serialize()`, and restores the original before screenshots.
 
-The converter writes a regenerable `presentation.generated.bento.html`. Finalization uses the localhost Work editor, which creates `presentation.final.bento.html` only when absent and thereafter treats its embedded document as authoritative. At the initial handoff, the repository workflow stores an immutable generated document as the final content/structure baseline; completion permits presentation-only differences while rejecting external content, identity, data, reference, or slide-structure replacement. Browser responses temporarily inject save controls, but persisted HTML is rebuilt from the current final runtime plus the validated serialized `#bento-doc` only. The Work editor preserves the Bento runtime API contract: `window.bento.serialize()` remains a synchronous HTML-string API after injection. Its temporary UI is detached immediately before serialization and restored in `finally`; the wrapper does not change the return value to a Promise. Normalized document SHA-256 revisions, backups, same-directory temporary files, `os.replace()`, rollback, runtime fingerprints, and synchronized JSON sidecars protect saves.
+The converter writes regenerable generated HTML/JSON plus `generatedRegistry`. `bento_authoring` initializes a separate authoring HTML/JSON/registry set; all content/structure edits use both base revisions and the common journal transaction. Content approval binds the exact authoring document and registry revisions. Finalization transactionally creates final HTML/JSON/frozen registry plus immutable document and registry baselines from those approved authoring revisions—not from mutable generated output. Completion permits presentation-only differences while rejecting content, identity, data, reference, registry, or slide-structure replacement.
+
+Browser responses temporarily inject controls, but persisted HTML is rebuilt from the current protected runtime plus validated `#bento-doc` only. `window.bento.serialize()` remains a synchronous HTML-string API: temporary UI is detached immediately before serialization and restored in `finally`, including exceptions. OS writer leases, transaction locks, durable journals, revision backups, same-directory fsynced temporary files, recovery, runtime fingerprints, and synchronized sidecars protect saves. A post-commit report failure retains valid artifacts for report retry.
 
 ## Layout and correction policy
 
@@ -41,9 +43,9 @@ Extraction records `offsetWidth/Height`, `clientWidth/Height`, the complete DOM 
 
 Each HTML cell records `rowSpan`, `colSpan`, row/column index, relative rectangle, content, and computed cell style. A native table is allowed only for a rectangular grid with one header row at most, no spans, no nested table, and no image/chart/complex content. Colspan, rowspan, multilevel headers, and image-bearing cells therefore become localized SVG blocks; the ordinary table fixture stays native.
 
-## References and chapter merge
+## References and source-unit merge
 
-The pipeline rejects duplicate slide ids, duplicate per-slide element ids, conflicting registry ids, unsupported layouts/export modes, missing protected items, missing equation/asset sources, broken `stateOf` targets, and connector endpoints that do not exist on the same slide. Morph relationships are carried through stable IDs/`morphId`; visual pairing is inspected in the output report.
+The pipeline rejects duplicate slide ids, duplicate per-slide element ids, conflicting registry ids, unsupported layouts/export modes, missing protected items, missing equation/asset sources, broken `stateOf` targets, and connector endpoints that do not exist on the same slide. Single-file slides also require a stable `data-section-id`; conversion revalidates approval digests over DOM, referenced registry projection/assets, and global CSS/theme. Morph relationships are carried through stable IDs/`morphId`; visual pairing is inspected in the output report.
 
 ## Portable resources
 
@@ -61,4 +63,4 @@ Critical crop failures escalate the owning slide to `fail`, even when the whole-
 
 ## Determinism evidence
 
-`scripts.check_html_first_determinism` builds into two independent temporary directories. Raw Bento HTML and JSON must be byte-identical. Conversion reports and computed layouts are normalized only for browser labels and build-root paths, canonically serialized, and compared. The report includes SHA-256 for both copies of all four outputs. The legacy JSON-first byte comparison remains a separate CI gate.
+`scripts.check_html_first_determinism` accepts either `--html/--registry` or the migrated modular `--html-dir/--registry-dir` pair and builds into two independent temporary directories. Raw Bento HTML and JSON must be byte-identical. Conversion reports and computed layouts are normalized only for browser labels and build-root paths, canonically serialized, and compared. The report includes SHA-256 for both copies of all four outputs. The legacy JSON-first byte comparison remains a separate CI gate.

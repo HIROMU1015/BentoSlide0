@@ -1,19 +1,17 @@
 # Source-of-truth policy
 
-The authoritative representation changes by workflow stage. `deck.yaml` is always the sole machine-readable source for stage, approvals, chapter status, selected source, output paths, ports, and the current localhost URL. Markdown planning files are human-readable artifacts; they must not become a second state store.
+`deck.yaml` is always the only machine-readable workflow state. Planning Markdown is human evidence, not a second state store. Artifact authority changes by stage:
 
-1. During intake and planning, the source selected in `deck.yaml` plus the approved files under `planning/` are authoritative for the requested explanation.
-2. During HTML authoring and review, sorted `chapters/chapter-NN.preview.html` plus matching registry JSON is authoritative. A chapter may advance only after its visual review is recorded in `deck.yaml`.
-3. Immediately after conversion, `output/presentation.generated.bento.html` is a reproducible derived artifact.
-4. Once final editing starts, `output/presentation.final.bento.html` and specifically its `#bento-doc` is authoritative for visible content, placement, and style. Its `.bento.json` sidecar is a synchronized editing aid, not an independently writable source.
+1. `initialized` through plan approval: manifest-listed sources plus approved planning.
+2. HTML authoring/review: single `deck/deck.preview.html` plus `deck/deck.registry.json`; migrated modular projects use registered chapter pairs.
+3. Conversion/validation: generated Bento HTML/JSON and generated registry are reproducible outputs and are never hand-edited.
+4. Bento authoring/content review: authoring HTML/JSON/registry are the only editable content/structure set. HTML and generated registries remain unchanged.
+5. Finalization/complete: final `#bento-doc`, frozen final registry, and immutable document/registry baselines are authoritative.
 
-Never rerun HTML-first conversion into the final path. Rebuild generated independently, then explicitly decide whether to reset final. GPT/Work automation must use the same save API or `WorkEditorStorage` rather than editing the JSON sidecar alone. Generated remains unchanged during final edits.
+All Bento persistence goes through revision-aware API/storage transactions. Editing a JSON sidecar or registry alone is unsupported. Generated, authoring, and final artifacts use distinct paths. Segment operations change only authoring; final presentation edits change only final document fields allowed by the baseline.
 
-Default final saves permit geometry and presentation styling while protecting existing content, element/slide identity, equation and figure metadata, links, state/morph/connector references, registry-protected IDs, and required text. `--allow-content-edit` relaxes ordinary content comparison but does not disable Bento schema, references, registry-protected items, resource portability, revision conflicts, or runtime integrity.
+Content approval binds the exact authoring document and registry revisions. Any drift makes it pending before status, save, review, approval, finalization, segment, offline, or migration operations continue. Finalization snapshots only freshly approved authoring content—not mutable generated output.
 
-Stage changes must go through `python -m scripts.deck_workflow ...`; direct YAML rewrites are unsupported. Each transition validates its inputs and atomically replaces `deck.yaml`, so a failed check leaves the previous state intact.
-Generated/final HTML and JSON paths must all be distinct. A `blocked` state keeps its owner and reason in `deck.yaml`, not only in the human-readable work log.
+Never convert into final. Rebuilding generated does not reset authoring/final or replace baselines. `--reset-final`, `--allow-content-edit`, and full HTML-to-authoring reset are explicit exceptional operations, never default routing.
 
-`block` also stores the complete preceding workflow tuple. After the cause is resolved, `resume` revalidates the relevant source, plan, chapter pair, conversion bundle, or final bundle before restoring that tuple. Manual stage repair is unsupported.
-
-When final is first initialized or safely retained, generated is saved as an immutable content/structure baseline under the final revisions directory. Final remains authoritative for allowed presentation edits, but completion compares it with that baseline and rejects external content or structure replacement. Rebuilding generated later does not silently replace this baseline.
+State changes use `scripts.deck_workflow`; multi-artifact state changes use the durable journal transaction. A blocked state preserves the full prior tuple for validated `resume`. Schema migration is idempotent and preserves late-stage final authority; it stops without modifying artifacts if required registry/baseline evidence is absent.

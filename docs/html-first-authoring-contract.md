@@ -2,19 +2,21 @@
 
 ## Sources of truth
 
-Each chapter is represented by two files:
+New schema v2 decks use one pair:
 
-- `chapters/chapter-NN.preview.html`: visual hierarchy, composition, text presentation, and fixed layout.
-- `chapters/chapter-NN.registry.json`: original LaTeX, paper/figure/table/chart provenance, assets, document metadata, and protected content that must not disappear.
+- `deck/deck.preview.html`: all fixed-size slides, grouped by stable `data-section-id`.
+- `deck/deck.registry.json`: original LaTeX, source/provenance, assets, document metadata, and protected content.
 
-Files are combined in lexical HTML filename order. For `chapters/chapter-01.preview.html`, the required registry name is `chapters/chapter-01.registry.json`. Registry ids are global across chapters; conflicting duplicate definitions fail the build.
+Migrated `authoring.mode: modular` decks retain lexically sorted `chapters/chapter-NN.preview.html` / `.registry.json` pairs. Registry IDs are global; conflicting definitions fail the build. HTML and its registry are inseparable evidence in either mode.
+
+Every single-file slide must include `data-section-id`. Section approval covers canonical slide DOM, referenced registry definitions/source provenance, referenced local asset content, and global CSS/theme. A changed local dependency invalidates the affected section; changed global CSS/theme invalidates all sections. Conversion requires current approval digests.
 
 ## HTML contract
 
 Every slide must be exactly 1280 × 720 computed CSS pixels and use:
 
 ```html
-<section class="slide" data-slide-id="method-overview" data-layout="two-column">
+<section class="slide" data-slide-id="method-overview" data-section-id="method" data-layout="two-column">
   <h1 data-bento-id="method-title">Method</h1>
   <div data-bento-id="loss" data-bento-type="equation" data-equation-id="loss-eq">
     L = data + regularizer
@@ -71,18 +73,21 @@ Charts require pure JSON in a descendant script:
 
 ```json
 {
-  "format": "bento/html-registry/v1",
-  "chapterId": "chapter-01",
+  "format": "bento/html-registry/v2",
+  "unitId": "deck",
+  "sources": {
+    "paper": {"path":"sources/private/paper.pdf","type":"application/pdf","role":"primary"}
+  },
   "document": {
     "title": "Paper title",
     "modified": "2026-08-02T00:00:00Z",
     "theme": {"background":"#fff","color":"#111","accent":"#2563eb","fontFamily":"Arial"}
   },
   "assets": {
-    "figure-1": {"path":"assets/figure-1.png","mimeType":"image/png","paperSource":"Fig. 1"}
+    "figure-1": {"path":"assets/figure-1.png","mimeType":"image/png","provenance":{"sourceId":"paper","locator":"Fig. 1"}}
   },
   "equations": {
-    "loss-eq": {"latex":"\\mathcal L=...","paperSource":"Eq. (3)"}
+    "loss-eq": {"latex":"\\mathcal L=...","provenance":{"sourceId":"paper","locator":"Eq. (3)"}}
   },
   "figures": {}, "tables": {}, "charts": {},
   "protected": {
@@ -91,7 +96,9 @@ Charts require pure JSON in a descendant script:
 }
 ```
 
-Unknown registry format versions fail explicitly. `protected` is a deletion guard: conversion never rewrites prose and fails if named slides, elements, or literal required text are missing.
+Unknown registry formats fail explicitly. v1 remains accepted only for migrated/legacy sources and is normalized into the v2 lifecycle form. `protected` is a deletion guard: conversion never rewrites prose and fails if named slides, elements, or literal required text are missing. `sources/source-manifest.yaml` and registry `sources` use repository-relative paths; provenance references stable source IDs.
+
+Generated, authoring, and final registry files are separate lifecycle snapshots. HTML authoring never rewrites generated/authoring/final registries; Bento authoring changes only authoring registry in the same transaction as its document; finalization freezes a copied final registry and baseline.
 
 ## Authoring prohibitions
 

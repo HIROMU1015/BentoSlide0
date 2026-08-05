@@ -89,7 +89,8 @@ class HtmlImportCliTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         for directory in ("workflow", "sources/private", "output", "imports"):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
-        for relative in ("deck.yaml", "workflow/deck.schema.json", "workflow/deck.v1.schema.json"):
+        shutil.copy2(ROOT / "tests/fixtures/deck_v1.yaml", self.root / "deck.yaml")
+        for relative in ("workflow/deck.schema.json", "workflow/deck.v1.schema.json"):
             shutil.copy2(ROOT / relative, self.root / relative)
         (self.root / "REQUEST.md").write_text("# Request\n", encoding="utf-8")
         command_migrate(self.root, load_state(self.root), dry_run=False, report_path=None)

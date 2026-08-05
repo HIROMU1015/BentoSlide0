@@ -55,8 +55,9 @@ class DeckWorkflowTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         for directory in ("workflow", "sources/private", "planning", "chapters", "output/diagnostics"):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "tests/fixtures/deck_v1.yaml", self.root / "deck.yaml")
         for relative in (
-            "deck.yaml", "REQUEST.md", "workflow/deck.schema.json", "workflow/deck.v1.schema.json",
+            "REQUEST.md", "workflow/deck.schema.json", "workflow/deck.v1.schema.json",
             "planning/explanation-policy.md", "planning/story-outline.md", "planning/slide-plan.md",
             "planning/decisions.md", "planning/work-log.md",
         ):

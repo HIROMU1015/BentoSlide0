@@ -1,12 +1,12 @@
-# Work editor finalization
+# Work editor authoring and finalization
 
-The Work editor serves an existing Bento runtime on `127.0.0.1` and persists final Bento document edits without modifying that runtime.
+The Work editor serves an existing Bento runtime on `127.0.0.1`. Its explicit `authoring` policy persists a document and writable registry; its `finalization` policy preserves the frozen registry and permits presentation-only document edits. Neither mode modifies the runtime.
 
 ## Start
 
 ### Windows one-click operation
 
-For the full local workflow, double-click `start_deck_workspace.cmd`. It reads `deck.yaml`: authoring/review stages start the local HTML preview, and `bento_finalization` starts this Work editor with the configured generated/final paths and the diagnostics registry beside generated. Use `stop_deck_workspace.cmd` to stop the recorded workspace service safely.
+For the full local workflow, double-click `start_deck_workspace.cmd`. It reads `deck.yaml`: HTML stages start the local preview, `bento_authoring`/`content_review` start authoring mode with configured generated/authoring/registry paths, and `bento_finalization` starts finalization mode with configured authoring/final/final-registry paths. Use `stop_deck_workspace.cmd` to stop the recorded workspace service safely.
 
 The lower-level editor-only launcher remains available. From Explorer, double-click `start_bento_editor.cmd`. It resolves the repository from its own location, starts the editor as a hidden independent process, copies `http://127.0.0.1:8765/` to the clipboard, and then closes. Keep the ChatGPT Work browser tab open and reload it on later sessions. It never opens a normal browser or controls ChatGPT Work.
 
@@ -30,19 +30,34 @@ The start launcher first validates `/api/status`. The same target and port is re
 
 State is stored in `output/work-editor.pid` and `output/work-editor-session.json` using format `bento/work-editor-session/v1`. The session records PID, launcher/start timestamps, repository, absolute source/target/registry paths, loopback host, port, and URL. `output/work-editor.log` records launcher metadata and captured startup output; raw stdout and stderr remain in `output/work-editor.stdout.log` and `output/work-editor.error.log`. One `.previous.log` generation is retained.
 
-The launcher never passes `--reset-final` or `--allow-content-edit`, never runs conversion, and never regenerates the registry. Therefore an existing final remains authoritative, while a missing final is created by the unchanged Work editor behavior.
+The launcher never passes `--reset-final` or `--allow-content-edit` and never runs conversion. It derives every source, target, and registry path from `deck.yaml`; an existing protected artifact is retained.
 
-### Direct command
+### Direct authoring command
 
 ```powershell
 python -m scripts.run_bento_work_editor `
+  --mode authoring `
   --source output/presentation.generated.bento.html `
-  --target output/presentation.final.bento.html `
-  --registry output/diagnostics/merged-registry.json `
+  --target output/presentation.authoring.bento.html `
+  --source-registry output/diagnostics/merged-registry.json `
+  --target-registry output/presentation.authoring.registry.json `
+  --repository . `
   --port 8765
 ```
 
-Open `http://127.0.0.1:8765/`. The server refuses non-loopback bind addresses. The first start copies generated to final; later starts retain final. Use `--reset-final` for an intentional replacement. Use `--allow-content-edit` only when changing textual/media content is explicitly authorized.
+### Direct finalization command
+
+```powershell
+python -m scripts.run_bento_work_editor `
+  --mode finalization `
+  --source output/presentation.authoring.bento.html `
+  --target output/presentation.final.bento.html `
+  --registry output/presentation.final.registry.json `
+  --repository . `
+  --port 8765
+```
+
+Open `http://127.0.0.1:8765/`. The server refuses non-loopback bind addresses. Prefer the workflow transition for initialization: it creates authoring/final artifact sets and state atomically. Compatibility flags remain available only for deliberate exceptional recovery.
 
 ## Fast deterministic edits
 
@@ -53,23 +68,27 @@ python -m scripts.apply_bento_final_edits --patch path/to/final-edit.json --dry-
 python -m scripts.apply_bento_final_edits --patch path/to/final-edit.json
 ```
 
-The command uses the same `WorkEditorStorage` validation, revision check, backup, runtime-integrity check, HTML/JSON synchronization, and protected-content boundary as the localhost editor. It requires an existing final and, with default paths, a `deck.yaml` stage of `bento_finalization` or `complete`, the merged registry, and a verified immutable finalization baseline. It checks the current and proposed final against that baseline before saving. It never initializes or resets final from generated. After saving, reload the existing Work browser once and inspect the affected slide. See `docs/fast-final-editing.md` for the patch format, routing rules, examples, and report-path protections.
+The command uses the same `WorkEditorStorage` validation, revision check, backup, runtime-integrity check, HTML/JSON synchronization, and protected-content boundary as the localhost editor. It requires an existing final and, with schema v2 default paths, a `deck.yaml` stage of `bento_finalization` or `complete`, the frozen final registry, and verified immutable document/registry baselines. It checks the current and proposed final against those records before saving. It never initializes or resets final from generated/authoring. After saving, reload the existing Work browser once and inspect the affected slide. See `docs/fast-final-editing.md` for the patch format, routing rules, examples, and report-path protections.
 
 ## API
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /` | Serve final with a temporary save toolbar |
-| `GET /api/status` | Return revision, runtime fingerprint, backup count and validation state |
-| `GET /api/document` | Return current final JSON and revision |
+| `GET /api/status` | Recover first; return repository, mode, targets, document/registry revisions, runtime, backup and validation state |
+| `GET /api/document` | Return one consistent document/registry snapshot and both revisions |
 | `POST /api/validate` | Validate a `serializedHtml` document without saving |
-| `POST /api/save` | Save validated `serializedHtml` when `baseRevision` is current |
-| `POST /api/revert` | Restore the most recent backup when `baseRevision` is current |
+| `POST /api/save` | Save when `baseDocumentRevision` and `baseRegistryRevision` are current; authoring may include `registry` |
+| `POST /api/revert` | Restore the most recent complete artifact-set backup against both revisions |
 
-`POST /api/save` extracts only `#bento-doc`; it never trusts or saves the submitted runtime. The response-only loader waits for Bento initialization, then adds the toolbar dynamically and guards `serialize()` so the temporary UI is absent from its result. The guard preserves Bento's public API contract: `window.bento.serialize()` remains synchronous and returns its HTML string directly. It removes the toolbar immediately before serialization and restores it in `finally`, including when serialization throws. The Work editor never changes the runtime API's return type, and only a validated `#bento-doc` is persisted. HTTP 409 rejects a stale SHA-256 revision. Validation errors use HTTP 422 and include contextual `slideId`, `elementId`, and `field` issue strings.
+`POST /api/save` extracts only `#bento-doc`; it never trusts or saves the submitted runtime. Authoring responses contain `documentRevision`, `registryRevision`, `contentApprovalInvalidated`, and `transactionId`. Registry omission retains the current registry only after its revision and all document references validate. HTTP 409 rejects either stale SHA-256 revision; HTTP 422 reports contextual validation issues.
+
+The response-only loader waits for Bento initialization, adds the toolbar dynamically, and guards `serialize()` so temporary UI is absent. The guard preserves Bento's public contract: `window.bento.serialize()` remains synchronous and returns its HTML string directly. It detaches the toolbar immediately before serialization and restores the exact DOM parent/position in `finally`, including when serialization throws. Save/validate/revert/reload remain usable afterward.
 
 ## Storage guarantees
 
-Before replacement, the server validates Bento schema/references, registry and protected content, recursive resource scan, and current runtime fingerprint. It writes HTML and JSON temporary files in the target directory, flushes them, replaces the pair, verifies their equality, and rolls back both on failure. The pre-save pair is copied to `revisions/presentation.final.rev-NNNNNN.bento.{html,json}`; the default retention limit is ten. The toolbar exists only in the HTTP response and never in final HTML.
+Before serving requests, the server recovers unfinished journals and acquires the OS-level writer lease for its repository/artifact identity. Authoring commits HTML, JSON, registry, approval-invalidating `deck.yaml` state, backups, and evidence through the common journal transaction. Finalization commits the protected HTML/JSON pair with the frozen registry as validation input. Reads use a consistent snapshot and never see partial replacement. A second writer for the same set is refused; an unrelated deck does not conflict.
+
+The default revision retention limit is ten. Toolbar/loader/style/host identifiers exist only in the HTTP response and never in persisted HTML. Operation-report failure after validation retains committed artifacts in `report_failed` and is repaired by the next recovery rather than rolling them back.
 
 The repository workflow additionally records a finalization baseline in the target revisions directory. Completion accepts geometry, presentation styling, theme/background, and z-order differences from that baseline, while rejecting content, slide/element identity or structure, equations, chart/table/media data, notes, behavior, and references. This catches a final file replaced outside the Work editor without making mutable generated output authoritative after finalization begins.
