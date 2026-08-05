@@ -116,12 +116,20 @@ def inject_work_toolbar(html: str) -> str:
 class WorkEditorHTTPServer(ThreadingHTTPServer):
     storage: WorkEditorStorage
 
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            self.storage.release_writer_lease()
+
 
 def create_work_editor_server(
     storage: WorkEditorStorage, *, host: str = "127.0.0.1", port: int = 8765,
 ) -> WorkEditorHTTPServer:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise BentoConverterError("Work editor may bind only to a loopback address.")
+
+    storage.acquire_writer_lease()
 
     class Handler(BaseHTTPRequestHandler):
         server: WorkEditorHTTPServer
@@ -206,6 +214,10 @@ def create_work_editor_server(
             except Exception as exc:
                 self._error(exc)
 
-    server = WorkEditorHTTPServer((host, port), Handler)
-    server.storage = storage
-    return server
+    try:
+        server = WorkEditorHTTPServer((host, port), Handler)
+        server.storage = storage
+        return server
+    except BaseException:
+        storage.release_writer_lease()
+        raise

@@ -12,6 +12,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from bento_converter.errors import BentoConverterError, ValidationError
+from bento_converter.artifact_transaction import ArtifactLeaseConflict
 from bento_converter.browser_check import find_browser_executable
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint
 from bento_converter.work_editor import create_work_editor_server
@@ -254,6 +255,19 @@ class WorkEditorTests(unittest.TestCase):
     def test_non_loopback_bind_is_rejected(self) -> None:
         with self.assertRaises(BentoConverterError):
             create_work_editor_server(self.storage(), host="0.0.0.0", port=0)
+
+    def test_server_holds_writer_lease_until_close(self) -> None:
+        first = self.storage()
+        server = create_work_editor_server(first, port=0)
+        try:
+            self.assertTrue(first.writer_lease_acquired)
+            with self.assertRaises(ArtifactLeaseConflict):
+                self.storage()
+        finally:
+            server.server_close()
+        self.assertFalse(first.writer_lease_acquired)
+        second_server = create_work_editor_server(self.storage(), port=0)
+        second_server.server_close()
 
 
 @unittest.skipUnless(os.environ.get("BENTO_BROWSER_TEST") == "1", "Set BENTO_BROWSER_TEST=1 for Work editor browser round-trip.")

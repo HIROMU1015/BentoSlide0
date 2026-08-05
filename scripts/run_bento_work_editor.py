@@ -28,6 +28,7 @@ def run(args: argparse.Namespace) -> int:
     storage = WorkEditorStorage(
         source=args.source, target=args.target, registry=args.registry, reset_final=args.reset_final,
         allow_content_edit=args.allow_content_edit, backup_limit=args.backup_limit,
+        hold_writer_lease=True,
     )
     server = create_work_editor_server(storage, host=args.host, port=args.port)
     host, port = server.server_address[:2]

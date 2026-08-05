@@ -18,6 +18,7 @@ from typing import Any, Iterable
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
+from bento_converter.artifact_transaction import ArtifactTransactionStore, recover_repository_transactions
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError
 from bento_converter.html_document import extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
@@ -861,7 +862,7 @@ def _migrated_stage_source(stage: str) -> str:
 
 
 def _migration_registry_snapshot(
-    root: Path, state: dict[str, Any], source_manifest: dict[str, Any], *, write: bool,
+    root: Path, state: dict[str, Any], source_manifest: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
     stage = state["workflow"]["stage"]
     previous_stage = state["workflow"].get("blockedFrom", {}).get("stage") if stage == "blocked" else None
@@ -880,18 +881,6 @@ def _migration_registry_snapshot(
         validate_registry(normalized, allow_v1=False)
     except BentoConverterError as exc:
         raise WorkflowError(f"Late-stage merged registry validation failed: {exc}") from exc
-    if write:
-        final_html = _repo_path(root, state["outputs"]["finalHtml"], field="outputs.finalHtml")
-        final_registry = final_html.with_name(
-            final_html.name[: -len(".bento.html")] + ".registry.json"
-            if final_html.name.endswith(".bento.html") else final_html.stem + ".registry.json"
-        )
-        baseline_registry = _final_registry_baseline_path(root, {
-            "outputs": {"finalHtml": final_html.relative_to(root).as_posix()}
-        })
-        payload = (json.dumps(normalized, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
-        _atomic_write_bytes(final_registry, payload)
-        _atomic_write_bytes(baseline_registry, payload)
     return normalized, registry_revision(normalized)
 
 
@@ -946,7 +935,7 @@ def migrate_v1_state(
         if existing_manifest != manifest:
             raise WorkflowError("Existing sources/source-manifest.yaml differs from the v1 migration result")
     _validate_v1_late_artifacts(root, state)
-    registry, registry_revision_value = _migration_registry_snapshot(root, state, manifest, write=False)
+    _registry, registry_revision_value = _migration_registry_snapshot(root, state, manifest)
     now = utc_now()
     stage = state["workflow"]["stage"]
     blocked_from = copy.deepcopy(state["workflow"].get("blockedFrom"))
@@ -1063,7 +1052,17 @@ def migrate_v1_state(
 def command_migrate(
     root: Path, state: dict[str, Any], *, dry_run: bool, report_path: Path | None,
 ) -> None:
-    migrated, report, manifest = migrate_v1_state(root, state, dry_run=dry_run)
+    try:
+        migrated, report, manifest = migrate_v1_state(root, state, dry_run=dry_run)
+    except WorkflowError as exc:
+        failure_report = {
+            "format": "bento/deck-migration-report/v1", "changed": False,
+            "fromSchemaVersion": state.get("schemaVersion"), "toSchemaVersion": 2,
+            "dryRun": dry_run, "status": "failed", "reasons": [str(exc)],
+        }
+        if not dry_run:
+            _atomic_write_json(report_path or (root / "output/migration-report.json"), failure_report)
+        raise
     if dry_run or not report["changed"]:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return
@@ -1071,15 +1070,58 @@ def command_migrate(
     backup = root / "deck.v1.backup.yaml"
     if backup.exists() and backup.read_bytes() != original_state:
         raise WorkflowError(f"Migration backup already exists with different content: {backup}")
-    _atomic_write_bytes(backup, original_state)
-    _migration_registry_snapshot(root, state, manifest, write=True)
     manifest_path = _repo_path(root, migrated["sources"]["manifest"], field="sources.manifest")
     manifest_payload = yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False).encode("utf-8")
-    if not manifest_path.exists():
-        _atomic_write_bytes(manifest_path, manifest_payload)
-    atomic_write_state(root, migrated)
     destination = report_path or (root / "output/migration-report.json")
-    _atomic_write_json(destination, report)
+    payloads: dict[Path, bytes] = {
+        root / STATE_RELATIVE: yaml.safe_dump(migrated, allow_unicode=True, sort_keys=False).encode("utf-8"),
+    }
+    if not backup.exists():
+        payloads[backup] = original_state
+    if not manifest_path.exists():
+        payloads[manifest_path] = manifest_payload
+    normalized_registry, _ = _migration_registry_snapshot(root, state, manifest)
+    if normalized_registry is not None:
+        registry_payload = (
+            json.dumps(normalized_registry, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        final_registry = _repo_path(root, migrated["outputs"]["finalRegistry"], field="outputs.finalRegistry")
+        payloads[final_registry] = registry_payload
+        baseline = migrated["validation"]["finalBaseline"]
+        if baseline is not None:
+            baseline_registry = _repo_path(root, baseline["registryPath"], field="validation.finalBaseline.registryPath")
+            payloads[baseline_registry] = registry_payload
+    transaction = ArtifactTransactionStore(root, payloads)
+
+    def validate_migration_commit() -> None:
+        installed_state = yaml.safe_load((root / STATE_RELATIVE).read_text(encoding="utf-8-sig"))
+        if not isinstance(installed_state, dict):
+            raise WorkflowError("Migrated deck.yaml root is not a mapping")
+        validate_state(root, installed_state)
+        if normalized_registry is not None:
+            installed_final_registry = load_registry(
+                _repo_path(root, installed_state["outputs"]["finalRegistry"], field="outputs.finalRegistry")
+            )
+            if installed_final_registry != normalized_registry:
+                raise WorkflowError("Migrated final registry snapshot differs from the validated registry")
+            baseline_metadata = installed_state["validation"]["finalBaseline"]
+            if baseline_metadata is not None:
+                installed_baseline_registry = load_registry(
+                    _repo_path(root, baseline_metadata["registryPath"], field="validation.finalBaseline.registryPath")
+                )
+                if installed_baseline_registry != normalized_registry:
+                    raise WorkflowError("Migrated registry baseline differs from the validated registry")
+                if registry_revision(installed_baseline_registry) != baseline_metadata["registryRevision"]:
+                    raise WorkflowError("Migrated registry baseline revision differs from deck.yaml")
+
+    transaction.commit(
+        payloads,
+        operation="schema-v1-to-v2-migration",
+        target_registry_revision=report.get("registryRevision"),
+        report_path=destination,
+        report_payload=report,
+        validate_committed=validate_migration_commit,
+    )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
@@ -1532,6 +1574,7 @@ def parser() -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace) -> int:
     root = repository_root(args.root)
+    recover_repository_transactions(root)
     state = load_state(root)
     command = args.command
     if command == "status":
@@ -1602,7 +1645,7 @@ def run(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     try:
         return run(parser().parse_args(argv))
-    except (WorkflowError, OSError, ValueError) as exc:
+    except (WorkflowError, BentoConverterError, OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 

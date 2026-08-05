@@ -125,6 +125,16 @@ class DeckMigrationTests(unittest.TestCase):
             json.loads((self.root / baseline["registryPath"]).read_text(encoding="utf-8")),
             final_registry,
         )
+        journals = list((self.root / "output/.bento-transactions/archive").rglob("*.json"))
+        self.assertEqual(len(journals), 1)
+        journal = json.loads(journals[0].read_text(encoding="utf-8"))
+        self.assertEqual(journal["operation"], "schema-v1-to-v2-migration")
+        targets = {Path(item["target"]).resolve() for item in journal["artifacts"]}
+        self.assertIn((self.root / "deck.yaml").resolve(), targets)
+        self.assertIn((self.root / state["outputs"]["finalRegistry"]).resolve(), targets)
+        self.assertIn((self.root / baseline["registryPath"]).resolve(), targets)
+        self.assertNotIn((self.root / state["outputs"]["finalHtml"]).resolve(), targets)
+        self.assertNotIn((self.root / baseline["documentPath"]).resolve(), targets)
 
     def test_late_stage_missing_registry_leaves_original_state_unchanged(self) -> None:
         self.prepare_late_stage(registry=False)
@@ -133,6 +143,9 @@ class DeckMigrationTests(unittest.TestCase):
             command_migrate(self.root, load_state(self.root), dry_run=False, report_path=None)
         self.assertEqual((self.root / "deck.yaml").read_bytes(), before)
         self.assertFalse((self.root / "deck.v1.backup.yaml").exists())
+        report = json.loads((self.root / "output/migration-report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("requires merged registry", report["reasons"][0])
 
     def test_v2_rejects_path_aliases_bad_sidecars_and_manifest_escape(self) -> None:
         migrated, _, manifest = migrate_v1_state(self.root, load_state(self.root), dry_run=True)

@@ -8,13 +8,13 @@ import json
 import os
 import re
 import shutil
-import tempfile
 import threading
 from functools import wraps
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from .artifact_transaction import ArtifactTransactionStore, file_revision
 from .bento_validator import validate_bento_doc
 from .errors import BentoConverterError, ValidationError, issue
 from .html_document import assert_runtime_integrity, embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
@@ -271,6 +271,7 @@ class WorkEditorStorage:
     def __init__(
         self, *, source: str | Path, target: str | Path, registry: str | Path | None = None,
         reset_final: bool = False, allow_content_edit: bool = False, backup_limit: int = 10,
+        repository: str | Path | None = None, hold_writer_lease: bool = False,
     ) -> None:
         self.source = Path(source).resolve()
         self.target = Path(target).resolve()
@@ -285,6 +286,24 @@ class WorkEditorStorage:
             raise BentoConverterError("Work editor source and target must be different files.")
         if not self.source.is_file():
             raise BentoConverterError(f"Generated source does not exist: {self.source}")
+        self.repository = Path(repository).resolve() if repository else self._infer_repository()
+        transaction_artifacts = [self.target, self.sidecar]
+        if self.registry_path is not None:
+            transaction_artifacts.append(self.registry_path)
+        self.transactions = ArtifactTransactionStore(self.repository, transaction_artifacts)
+        lease_acquired_here = False
+        if hold_writer_lease:
+            self.transactions.acquire_writer_lease()
+            lease_acquired_here = True
+        try:
+            self._initialize(reset_final=reset_final)
+        except BaseException:
+            if lease_acquired_here:
+                self.transactions.release_writer_lease()
+            raise
+
+    def _initialize(self, *, reset_final: bool) -> None:
+        self.transactions.recover()
         self.registry = self._load_registry()
         self.target.parent.mkdir(parents=True, exist_ok=True)
         source_html = load_html(self.source)
@@ -303,6 +322,26 @@ class WorkEditorStorage:
         self._runtime = runtime_fingerprint(target_html)
         self._sync_sidecar(target_document)
 
+    def _infer_repository(self) -> Path:
+        for parent in (self.target.parent, *self.target.parents):
+            if (parent / "deck.yaml").is_file():
+                return parent
+        values = [str(self.source), str(self.target)]
+        if self.registry_path is not None:
+            values.append(str(self.registry_path))
+        return Path(os.path.commonpath(values)).resolve()
+
+    @property
+    def writer_lease_acquired(self) -> bool:
+        return self.transactions.writer_lease.acquired
+
+    def acquire_writer_lease(self) -> None:
+        if not self.writer_lease_acquired:
+            self.transactions.acquire_writer_lease()
+
+    def release_writer_lease(self) -> None:
+        self.transactions.release_writer_lease()
+
     def _load_registry(self) -> dict[str, Any]:
         if self.registry_path is None:
             return {"protected": {}, "equations": {}, "figures": {}, "charts": {}, "tables": {}}
@@ -314,66 +353,54 @@ class WorkEditorStorage:
             raise BentoConverterError("Work editor registry root must be an object.")
         return value
 
-    @staticmethod
-    def _write_temp(destination: Path, payload: bytes) -> Path:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        handle = tempfile.NamedTemporaryFile(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent, delete=False)
-        path = Path(handle.name)
-        try:
-            with handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-        except Exception:
-            path.unlink(missing_ok=True)
-            raise
-        return path
-
-    @staticmethod
-    def _fsync_directory(directory: Path) -> None:
-        if os.name == "nt":
-            return
-        descriptor = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-
-    def _install_pair(self, html: str, document: dict[str, Any]) -> None:
+    def _install_pair(
+        self, html: str, document: dict[str, Any], *, operation: str = "final-install",
+        report: dict[str, Any] | None = None, base_document_revision: str | None = None,
+    ) -> dict[str, Any]:
         html_payload = html.encode("utf-8")
         json_payload = (serialize_bento_doc(document) + "\n").encode("utf-8")
-        html_temp = self._write_temp(self.target, html_payload)
-        json_temp = self._write_temp(self.sidecar, json_payload)
-        old_html = self.target.read_bytes() if self.target.is_file() else None
-        old_json = self.sidecar.read_bytes() if self.sidecar.is_file() else None
-        try:
-            os.replace(json_temp, self.sidecar)
-            os.replace(html_temp, self.target)
-            self._fsync_directory(self.target.parent)
-            installed_html = load_html(self.target)
-            if extract_bento_doc(installed_html) != json.loads(self.sidecar.read_text(encoding="utf-8")):
-                raise BentoConverterError("Final HTML and JSON sidecar differ after atomic replacement.")
-        except Exception:
-            html_temp.unlink(missing_ok=True)
-            json_temp.unlink(missing_ok=True)
-            if old_html is not None:
-                rollback = self._write_temp(self.target, old_html)
-                os.replace(rollback, self.target)
-            elif self.target.exists():
-                self.target.unlink()
-            if old_json is not None:
-                rollback = self._write_temp(self.sidecar, old_json)
-                os.replace(rollback, self.sidecar)
-            elif self.sidecar.exists():
-                self.sidecar.unlink()
-            raise
+        expected = {self.target: file_revision(self.target), self.sidecar: file_revision(self.sidecar)}
+
+        def validate_base() -> None:
+            if any(file_revision(path) != revision for path, revision in expected.items()):
+                raise WorkEditorConflict("Artifact files changed before the transaction lock was acquired")
+            if base_document_revision is not None:
+                current_document = extract_bento_doc(self.target.read_text(encoding="utf-8-sig"))
+                if document_revision(current_document) != base_document_revision:
+                    raise WorkEditorConflict("Another edit was saved before the artifact transaction began")
+
+        def validate_committed() -> None:
+            installed_html = self.target.read_bytes().decode("utf-8-sig")
+            installed_document = extract_bento_doc(installed_html)
+            installed_sidecar = json.loads(self.sidecar.read_text(encoding="utf-8-sig"))
+            if installed_document != installed_sidecar or installed_document != document:
+                raise BentoConverterError("Final HTML and JSON sidecar differ after transactional replacement.")
+
+        return self.transactions.commit(
+            {self.target: html_payload, self.sidecar: json_payload},
+            operation=operation,
+            base_document_revision=base_document_revision,
+            target_document_revision=document_revision(document),
+            validate_base=validate_base,
+            validate_committed=validate_committed,
+            report_path=self.save_report_path if report is not None else None,
+            report_payload=report,
+        )
 
     def _sync_sidecar(self, document: dict[str, Any]) -> None:
         expected = (serialize_bento_doc(document) + "\n").encode("utf-8")
         if self.sidecar.is_file() and self.sidecar.read_bytes() == expected:
             return
-        temporary = self._write_temp(self.sidecar, expected)
-        os.replace(temporary, self.sidecar)
+        old_revision = file_revision(self.sidecar)
+
+        def validate_base() -> None:
+            if file_revision(self.sidecar) != old_revision:
+                raise WorkEditorConflict("Final JSON sidecar changed before synchronization")
+
+        self.transactions.commit(
+            {self.sidecar: expected}, operation="final-sidecar-sync",
+            target_document_revision=document_revision(document), validate_base=validate_base,
+        )
 
     def _backup_prefix(self) -> str:
         name = self.target.name
@@ -403,10 +430,22 @@ class WorkEditorStorage:
         return html_backup
 
     def _current(self) -> tuple[str, dict[str, Any]]:
-        html = load_html(self.target)
+        snapshot = self.transactions.read_snapshot((self.target, self.sidecar))
+        html_payload = snapshot[self.target]
+        sidecar_payload = snapshot[self.sidecar]
+        if html_payload is None or sidecar_payload is None:
+            raise BentoConverterError("Final HTML and JSON sidecar must both exist")
+        try:
+            html = html_payload.decode("utf-8-sig")
+            sidecar_document = json.loads(sidecar_payload.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BentoConverterError(f"Cannot read a consistent final artifact snapshot: {exc}") from exc
         if runtime_fingerprint(html) != self._runtime:
             raise BentoConverterError("Final runtime fingerprint changed outside #bento-doc; refusing to continue.")
-        return html, extract_bento_doc(html)
+        document = extract_bento_doc(html)
+        if document != sidecar_document:
+            raise BentoConverterError("Final HTML #bento-doc and JSON sidecar differ")
+        return html, document
 
     @_locked
     def status(self) -> dict[str, Any]:
@@ -453,15 +492,18 @@ class WorkEditorStorage:
         updated_html = embed_bento_doc(current_html, proposed)
         assert_runtime_integrity(current_html, updated_html)
         self._create_backup()
-        self._install_pair(updated_html, proposed)
-        saved_html = load_html(self.target)
-        assert_runtime_integrity(current_html, saved_html)
         result = {
             "saved": True, "revision": document_revision(proposed),
-            "runtimeFingerprint": "sha256:" + runtime_fingerprint(saved_html),
+            "runtimeFingerprint": "sha256:" + runtime_fingerprint(updated_html),
             "backupCount": len(self._backups()), "validation": "pass", **validation,
         }
-        self._write_save_report({"operation": "save", **result})
+        transaction = self._install_pair(
+            updated_html, proposed, operation="final-save", report={"operation": "save", **result},
+            base_document_revision=current_revision,
+        )
+        saved_html = load_html(self.target)
+        assert_runtime_integrity(current_html, saved_html)
+        result["transactionId"] = transaction["transactionId"]
         return result
 
     @_locked
@@ -477,18 +519,18 @@ class WorkEditorStorage:
         assert_runtime_integrity(current_html, backup_html)
         document = extract_bento_doc(backup_html)
         validate_editor_document(document, current=document, registry=self.registry, allow_content_edit=self.allow_content_edit)
-        self._install_pair(embed_bento_doc(current_html, document), document)
+        reverted_html = embed_bento_doc(current_html, document)
+        report = {
+            "operation": "revert", "reverted": True, "revision": document_revision(document),
+            "runtimeFingerprint": "sha256:" + runtime_fingerprint(reverted_html),
+            "backupCount": len(backups) - 1, "validation": "pass",
+        }
+        transaction = self._install_pair(
+            reverted_html, document, operation="final-revert", report=report,
+            base_document_revision=base_revision,
+        )
         backup.unlink(missing_ok=True)
         backup.with_suffix(".json").unlink(missing_ok=True)
-        result = {
-            "reverted": True, "revision": document_revision(document),
-            "runtimeFingerprint": "sha256:" + runtime_fingerprint(load_html(self.target)),
-            "backupCount": len(self._backups()), "validation": "pass",
-        }
-        self._write_save_report({"operation": "revert", **result})
+        result = {**report, "transactionId": transaction["transactionId"]}
+        result.pop("operation")
         return result
-
-    def _write_save_report(self, report: dict[str, Any]) -> None:
-        payload = (json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
-        temporary = self._write_temp(self.save_report_path, payload)
-        os.replace(temporary, self.save_report_path)
