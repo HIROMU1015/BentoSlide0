@@ -8,6 +8,7 @@ At the start of every task, read `START_HERE.md` and `deck.yaml`. Treat `deck.ya
 - Use primary sources under `sources/` as factual authority. Do not invent claims, conditions, symbols, signs, subscripts, assumptions, numbers, comparisons, or generalizations.
 - Before conversion, paired `chapters/chapter-XX.preview.html` and `.registry.json` files are authoritative for visual design and provenance.
 - After finalization begins, `output/presentation.final.bento.html` and its `#bento-doc` are authoritative. Never reconvert HTML over final edits.
+- For requested final geometry/style/theme/background/z-order changes, batch all edits through `python -m scripts.apply_bento_final_edits` and save once. Read `docs/fast-final-editing.md`; use the browser UI only when visual judgment or direct manipulation is necessary.
 - Never edit generated output manually. Never use `--reset-final` automatically. Never use `--allow-content-edit` for ordinary layout adjustment.
 - Record machine state through `python -m scripts.deck_workflow`; keep `planning/work-log.md` concise. Do not bypass plan, chapter-visual, or final approval gates.
 - When a reported blocker is resolved, run `python -m scripts.deck_workflow resume`; never ask the user to repair workflow fields manually.

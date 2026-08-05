@@ -466,6 +466,14 @@ def _baseline_document(
     return document, fingerprint
 
 
+def load_final_baseline(
+    root: Path, state: dict[str, Any], generated_document: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Load and verify the immutable finalization baseline recorded in deck.yaml."""
+
+    return _baseline_document(root, state, generated_document, allow_missing=False)
+
+
 def validate_output_bundle(
     root: Path,
     state: dict[str, Any],

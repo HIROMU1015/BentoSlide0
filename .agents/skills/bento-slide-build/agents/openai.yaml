@@ -1,4 +1,4 @@
 interface:
   display_name: "Bento Slide Build"
-  short_description: "Manage and build local HTML-first Bento deck workflows"
-  default_prompt: "Use $bento-slide-build to inspect deck.yaml, advance the local workflow safely, build or finalize the Bento deck, and verify the required evidence."
+  short_description: "Manage, build, and safely fast-edit Bento decks"
+  default_prompt: "Use $bento-slide-build to inspect deck.yaml, advance the workflow safely, batch final presentation edits, and verify the Bento deck."

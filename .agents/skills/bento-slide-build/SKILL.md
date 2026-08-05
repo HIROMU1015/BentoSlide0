@@ -1,6 +1,6 @@
 ---
 name: bento-slide-build
-description: Manage the repository-centered BentoSlide workflow and build, inspect, validate, browser-check, and finalize deterministic Bento Slides HTML from chapter HTML/CSS plus registry JSON, or from legacy coordinate design JSON. Use for short deck commands, deck.yaml stages, chapter preview, HTML-first conversion, localhost Work editor finalization, runtime integrity, native/fallback evidence, screenshots, or final slide validation in this repository.
+description: Manage the repository-centered BentoSlide workflow and build, inspect, validate, browser-check, fast-edit, and finalize deterministic Bento Slides HTML from chapter HTML/CSS plus registry JSON, or from legacy coordinate design JSON. Use for short deck commands, deck.yaml stages, chapter preview, HTML-first conversion, presentation-only batch edits, localhost Work editor finalization, runtime integrity, native/fallback evidence, screenshots, or final slide validation in this repository.
 ---
 
 # Bento slide build
@@ -63,6 +63,14 @@ python -m scripts.run_bento_work_editor --source output/presentation.generated.b
 ```
 
 Open the localhost URL in the Work browser and use the injected controls to save, validate, revert, or reload. Describe Bento canvas interaction as UI editing and the persistence step as Work editor API saving. Treat an existing final `#bento-doc` as authoritative. The injected guard must preserve `window.bento.serialize()` as a synchronous HTML-string API: detach temporary Work editor UI immediately before serialization, restore it in `finally`, and persist only the validated `#bento-doc`. Never change the runtime API return type for Work editor needs. Never rerun HTML-first conversion into the final path or overwrite it unless the user explicitly requests `--reset-final`.
+
+For precise geometry, style, theme, background, or z-order requests, read `docs/fast-final-editing.md`. Prefer one patch containing every requested change, dry-run it when values are uncertain, then save it once with:
+
+```powershell
+python -m scripts.apply_bento_final_edits --patch path/to/final-edit.json
+```
+
+This is a Work editor storage/API edit, not simulated UI typing. Reload the existing Work browser once after saving and visually verify the affected slides. Use direct browser interaction only when the request depends on visual judgment, drag behavior, or an editor-only control. Do not use this command for text/equation content, media, data, IDs/types, slide structure, notes, behavior, or references; route such changes through the authoritative pre-final source and the required approval/reset workflow.
 
 ### 4. Final validation
 

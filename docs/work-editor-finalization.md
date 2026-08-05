@@ -44,6 +44,17 @@ python -m scripts.run_bento_work_editor `
 
 Open `http://127.0.0.1:8765/`. The server refuses non-loopback bind addresses. The first start copies generated to final; later starts retain final. Use `--reset-final` for an intentional replacement. Use `--allow-content-edit` only when changing textual/media content is explicitly authorized.
 
+## Fast deterministic edits
+
+For exact geometry, style, theme, slide background, or z-order changes, use one validated batch instead of typing values into the browser one field at a time:
+
+```powershell
+python -m scripts.apply_bento_final_edits --patch path/to/final-edit.json --dry-run
+python -m scripts.apply_bento_final_edits --patch path/to/final-edit.json
+```
+
+The command uses the same `WorkEditorStorage` validation, revision check, backup, runtime-integrity check, HTML/JSON synchronization, and protected-content boundary as the localhost editor. It requires an existing final and, with default paths, a `deck.yaml` stage of `bento_finalization` or `complete`, the merged registry, and a verified immutable finalization baseline. It checks the current and proposed final against that baseline before saving. It never initializes or resets final from generated. After saving, reload the existing Work browser once and inspect the affected slide. See `docs/fast-final-editing.md` for the patch format, routing rules, examples, and report-path protections.
+
 ## API
 
 | Endpoint | Purpose |
