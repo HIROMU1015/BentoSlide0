@@ -12,9 +12,10 @@ from urllib.request import Request, urlopen
 import yaml
 
 from bento_converter.authoring_storage import AuthoringArtifactStorage, AuthoringConflict
-from bento_converter.errors import ValidationError
+from bento_converter.errors import BentoConverterError, ValidationError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint
 from bento_converter.work_editor import create_work_editor_server
+from bento_converter.work_editor_client import discover_work_editor
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -215,6 +216,15 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
                 return exc.code, json.loads(exc.read().decode("utf-8"))
 
         try:
+            session_path = self.root / "output/work-editor-session.json"
+            session_path.write_text(json.dumps({
+                "format": "bento/work-editor-session/v1", "host": "127.0.0.1",
+                "port": server.server_address[1],
+            }), encoding="utf-8")
+            discovered = discover_work_editor(self.root, mode="authoring", target=self.target)
+            self.assertEqual(discovered.status["editingMode"], "authoring")
+            with self.assertRaisesRegex(BentoConverterError, "does not match"):
+                discover_work_editor(self.root, mode="authoring", target=self.root / "output/other.bento.html")
             code, raw = get("/api/status")
             status = json.loads(raw)
             self.assertEqual((code, status["editingMode"]), (200, "authoring"))
@@ -227,11 +237,18 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
                 "baseDocumentRevision": status["documentRevision"],
                 "baseRegistryRevision": status["registryRevision"],
                 "serializedHtml": embed_bento_doc(html, document),
+                "replaceSlideIds": ["demo-slide-1"],
+                "operation": "segment-replace",
+                "operationReport": {"targetSlideId": "demo-slide-1"},
+                "reportPath": "output/segment-reports/api-operation.json",
             }
             code, saved = post("/api/save", request)
             self.assertEqual(code, 200)
             self.assertTrue(saved["contentApprovalInvalidated"])
             self.assertIn("transactionId", saved)
+            api_report = json.loads((self.root / "output/segment-reports/api-operation.json").read_text(encoding="utf-8"))
+            self.assertEqual(api_report["operation"], "segment-replace")
+            self.assertEqual(api_report["details"]["targetSlideId"], "demo-slide-1")
             code, _ = post("/api/save", request)
             self.assertEqual(code, 409)
             code, reverted = post("/api/revert", {

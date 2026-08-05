@@ -224,7 +224,27 @@ def create_work_editor_server(
                         }
                         if arguments["registry"] is not None and not isinstance(arguments["registry"], dict):
                             raise BentoConverterError("registry must be an object when provided")
-                        result = self.server.storage.save_serialized(serialized_html, **arguments) if path == "/api/save" else self.server.storage.validate_serialized(serialized_html, **arguments)
+                        replace_slide_ids = payload.get("replaceSlideIds", [])
+                        if not isinstance(replace_slide_ids, list) or not all(isinstance(value, str) and value for value in replace_slide_ids):
+                            raise BentoConverterError("replaceSlideIds must be an array of non-empty strings")
+                        arguments["replace_slide_ids"] = set(replace_slide_ids)
+                        if path == "/api/save":
+                            operation = payload.get("operation", "authoring-save")
+                            if operation not in {"authoring-save", "segment-import", "segment-replace"}:
+                                raise BentoConverterError("Unsupported authoring save operation")
+                            report_details = payload.get("operationReport")
+                            if report_details is not None and not isinstance(report_details, dict):
+                                raise BentoConverterError("operationReport must be an object")
+                            report_path = payload.get("reportPath")
+                            if report_path is not None and not isinstance(report_path, str):
+                                raise BentoConverterError("reportPath must be a repository-relative string")
+                            result = self.server.storage.save_serialized(
+                                serialized_html, **arguments, operation=operation,
+                                report_details=report_details,
+                                report_path=(self.server.storage.repository / report_path) if report_path else None,
+                            )
+                        else:
+                            result = self.server.storage.validate_serialized(serialized_html, **arguments)
                     else:
                         result = self.server.storage.save_serialized(
                             serialized_html, base_revision=str(payload.get("baseRevision", "")),

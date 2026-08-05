@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import yaml
@@ -33,6 +34,7 @@ from scripts.deck_workflow import (
     command_mark_converted,
     command_migrate,
     command_prepare_conversion,
+    command_reset_authoring_from_html,
     command_resume,
     command_submit_plan,
     authoring_storage,
@@ -41,6 +43,7 @@ from scripts.deck_workflow import (
     validate_chapters,
     validate_state,
 )
+from scripts.bento_segment import run as run_segment
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -397,6 +400,80 @@ class DeckWorkflowTests(unittest.TestCase):
         ]
         final_journal = next(item for item in journals if item["operation"] == "authoring-to-final-initialize")
         self.assertEqual(len(final_journal["artifacts"]), 6)
+
+    def test_explicit_full_reset_rebuilds_authoring_but_never_final(self) -> None:
+        state = self.ready_for_conversion()
+        command_migrate(self.root, state, dry_run=False, report_path=None)
+        self.prepare_output_bundle(self.state(), existing_final=False)
+        command_mark_converted(self.root, self.state())
+        command_begin_authoring(self.root, self.state())
+        state = self.state()
+        chapter_html = self.root / "chapters/chapter-01.preview.html"
+        chapter_html.write_text(
+            chapter_html.read_text(encoding="utf-8").replace(
+                '<section class="slide" data-slide-id="chapter-01-slide">',
+                '<section class="slide" data-slide-id="chapter-01-slide" style="width:1280px;height:720px">',
+            ),
+            encoding="utf-8",
+        )
+        final_html = self.root / state["outputs"]["finalHtml"]
+        final_html.write_bytes(b"do-not-touch-final")
+        with self.assertRaisesRegex(WorkflowError, "requires --confirm"):
+            command_reset_authoring_from_html(
+                self.root, state, confirmation="no",
+                browser_executable=None, browser_check=False,
+            )
+        command_reset_authoring_from_html(
+            self.root, self.state(), confirmation="RESET-AUTHORING-FROM-HTML",
+            browser_executable=None, browser_check=False,
+        )
+        reset = self.state()
+        authoring_document = extract_bento_doc(load_html(self.root / reset["outputs"]["authoringHtml"]))
+        self.assertEqual([slide["id"] for slide in authoring_document["slides"]], ["chapter-01-slide"])
+        self.assertEqual(final_html.read_bytes(), b"do-not-touch-final")
+        self.assertEqual(reset["workflow"]["stage"], "bento_authoring")
+        self.assertEqual(reset["approvals"]["bentoContent"]["status"], "pending")
+        self.assertTrue(list((self.root / "output/revisions").glob("*.bento.html")))
+        report = json.loads((self.root / "output/reset-authoring-report.json").read_text(encoding="utf-8"))
+        self.assertFalse(report["finalArtifactsChanged"])
+
+    def test_segment_cli_imports_new_slide_without_changing_generated_or_final(self) -> None:
+        state = self.ready_for_conversion()
+        command_migrate(self.root, state, dry_run=False, report_path=None)
+        self.prepare_output_bundle(self.state(), existing_final=False)
+        command_mark_converted(self.root, self.state())
+        command_begin_authoring(self.root, self.state())
+        state = self.state()
+        generated = self.root / state["outputs"]["generatedHtml"]
+        generated_before = generated.read_bytes()
+        segment_dir = self.root / "scratch/segments"
+        segment_dir.mkdir(parents=True)
+        segment_html = segment_dir / "追加.preview.html"
+        segment_html.write_text(
+            '<!doctype html><html><body style="margin:0"><section class="slide" data-slide-id="added-slide" '
+            'style="width:1280px;height:720px"><h1 data-bento-id="added-title">Added</h1>'
+            '</section></body></html>', encoding="utf-8",
+        )
+        segment_registry = segment_dir / "追加.registry.json"
+        segment_registry.write_text(json.dumps({
+            "format": "bento/html-registry/v2", "unitId": "added", "sources": {},
+            "document": {}, "assets": {}, "fonts": {}, "equations": {}, "figures": {},
+            "tables": {}, "charts": {},
+            "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+        }), encoding="utf-8")
+        result = run_segment(SimpleNamespace(
+            root=self.root, command="import", html=segment_html, registry=segment_registry,
+            browser_executable=None, skip_browser_check=True,
+        ))
+        self.assertEqual(result, 0)
+        updated = self.state()
+        authoring = extract_bento_doc(load_html(self.root / updated["outputs"]["authoringHtml"]))
+        self.assertIn("added-slide", [slide["id"] for slide in authoring["slides"]])
+        self.assertEqual(generated.read_bytes(), generated_before)
+        self.assertFalse((self.root / updated["outputs"]["finalHtml"]).exists())
+        reports = list((self.root / "output/segment-reports").glob("*/operation-report.json"))
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(json.loads(reports[0].read_text(encoding="utf-8"))["operation"], "segment-import")
 
     def test_finalization_and_complete_require_explicit_final_approval(self) -> None:
         state = self.ready_for_conversion()

@@ -123,7 +123,10 @@ def _requires_registry_update(current: dict[str, Any], proposed: dict[str, Any])
     return any(before[key] != after[key] for key in ("equations", "charts", "tables", "media", "protectedMetadata"))
 
 
-def validate_authoring_document(document: dict[str, Any], *, current: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any]:
+def validate_authoring_document(
+    document: dict[str, Any], *, current: dict[str, Any], registry: dict[str, Any],
+    explicit_replace_slide_ids: set[str] | None = None,
+) -> dict[str, Any]:
     schema = validate_bento_doc(document)
     validate_registry(registry, allow_v1=False)
     errors: list[str] = []
@@ -159,7 +162,10 @@ def validate_authoring_document(document: dict[str, Any], *, current: dict[str, 
 
     current_slides = {slide.get("id"): slide for slide in current.get("slides", []) if isinstance(slide, dict)}
     proposed_slides = {slide.get("id"): slide for slide in document.get("slides", []) if isinstance(slide, dict)}
+    explicit_replace_slide_ids = explicit_replace_slide_ids or set()
     for slide_id in current_slides.keys() & proposed_slides.keys():
+        if slide_id in explicit_replace_slide_ids:
+            continue
         before_elements = current_slides[slide_id].get("elements", [])
         after_elements = proposed_slides[slide_id].get("elements", [])
         before_ids = {item.get("id") for item in before_elements if isinstance(item, dict)}
@@ -371,10 +377,11 @@ class AuthoringArtifactStorage:
         }
 
     def document_response(self) -> dict[str, Any]:
-        _, document, registry = self._read_current()
+        html, document, registry = self._read_current()
         return {
             "documentRevision": document_revision(document), "registryRevision": registry_revision(registry),
             "revision": document_revision(document), "document": document, "registry": registry,
+            "serializedHtml": html,
         }
 
     def artifact_snapshot(self) -> tuple[str, dict[str, Any], dict[str, Any]]:
@@ -385,6 +392,7 @@ class AuthoringArtifactStorage:
     def validate_serialized(
         self, serialized_html: str, *, base_document_revision: str,
         base_registry_revision: str, registry: dict[str, Any] | None = None,
+        replace_slide_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         _, current_document, current_registry = self._read_current()
         if (
@@ -401,7 +409,10 @@ class AuthoringArtifactStorage:
             raise ValidationError(["Authoring document change requires a registry update in the same transaction"])
         if registry_update_required and registry_revision(proposed_registry) == registry_revision(current_registry):
             raise ValidationError(["Registry-sensitive authoring changes require a changed registry revision"])
-        validation = validate_authoring_document(proposed, current=current_document, registry=proposed_registry)
+        validation = validate_authoring_document(
+            proposed, current=current_document, registry=proposed_registry,
+            explicit_replace_slide_ids=replace_slide_ids,
+        )
         return {
             "documentRevision": document_revision(current_document),
             "registryRevision": registry_revision(current_registry),
@@ -431,9 +442,17 @@ class AuthoringArtifactStorage:
         (self.revisions_dir / f"{backup_stem}.registry.json").write_bytes(snapshot[self.registry_path])  # type: ignore[arg-type]
         return html_backup
 
+    def create_revision_backup(self) -> Path:
+        """Persist one recoverable HTML/JSON/registry authoring revision set."""
+
+        return self._create_backup()
+
     def save_serialized(
         self, serialized_html: str, *, base_document_revision: str,
         base_registry_revision: str, registry: dict[str, Any] | None = None,
+        replace_slide_ids: set[str] | None = None,
+        operation: str = "authoring-save", report_details: dict[str, Any] | None = None,
+        report_path: str | Path | None = None,
     ) -> dict[str, Any]:
         current_html, current_document, current_registry = self._read_current()
         current_document_revision = document_revision(current_document)
@@ -450,7 +469,10 @@ class AuthoringArtifactStorage:
             proposed_registry = normalize_registry(registry, unit_id=str(registry.get("unitId") or "deck"))
             if registry_update_required and registry_revision(proposed_registry) == current_registry_revision:
                 raise ValidationError(["Registry-sensitive authoring changes require a changed registry revision"])
-        validation = validate_authoring_document(proposed_document, current=current_document, registry=proposed_registry)
+        validation = validate_authoring_document(
+            proposed_document, current=current_document, registry=proposed_registry,
+            explicit_replace_slide_ids=replace_slide_ids,
+        )
         updated_html = embed_bento_doc(current_html, proposed_document)
         assert_runtime_integrity(current_html, updated_html)
         proposed_document_revision = document_revision(proposed_document)
@@ -459,13 +481,15 @@ class AuthoringArtifactStorage:
             proposed_document_revision, proposed_registry_revision,
         )
         report = {
-            "operation": "authoring-save", "baseDocumentRevision": current_document_revision,
+            "operation": operation, "baseDocumentRevision": current_document_revision,
             "baseRegistryRevision": current_registry_revision, "resultDocumentRevision": proposed_document_revision,
             "resultRegistryRevision": proposed_registry_revision,
             "slides": _changed_ids(current_document, proposed_document),
             "registry": _registry_changes(current_registry, proposed_registry),
             "resourceValidation": validation["resourceScan"], "referenceValidation": "pass", "rollback": False,
         }
+        if report_details:
+            report["details"] = report_details
         self._create_backup()
 
         def validate_base() -> None:
@@ -489,7 +513,10 @@ class AuthoringArtifactStorage:
             # representation here so post-commit validation is transitive and
             # independent of any parser normalization.
             assert_runtime_integrity(updated_html, installed_html)
-            validate_authoring_document(installed_document, current=current_document, registry=installed_registry)
+            validate_authoring_document(
+                installed_document, current=current_document, registry=installed_registry,
+                explicit_replace_slide_ids=replace_slide_ids,
+            )
             if state_payload is not None:
                 _, installed_state = self._load_workflow_state()
                 if installed_state["approvals"]["bentoContent"]["status"] != "pending":
@@ -504,11 +531,12 @@ class AuthoringArtifactStorage:
             payloads[self.state_path] = state_payload
         transaction = self.transactions.commit(
             payloads,
-            operation="authoring-save",
+            operation=operation,
             base_document_revision=current_document_revision, base_registry_revision=current_registry_revision,
             target_document_revision=proposed_document_revision, target_registry_revision=proposed_registry_revision,
             validate_base=validate_base, validate_committed=validate_commit,
-            report_path=self.report_path, report_payload=report,
+            report_path=Path(report_path).resolve() if report_path is not None else self.report_path,
+            report_payload=report,
         )
         return {
             "documentRevision": proposed_document_revision,

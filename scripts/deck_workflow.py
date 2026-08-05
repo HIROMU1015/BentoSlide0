@@ -19,7 +19,7 @@ import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
 from bento_converter.artifact_transaction import ArtifactTransactionStore, recover_repository_transactions
-from bento_converter.authoring_storage import AuthoringArtifactStorage
+from bento_converter.authoring_storage import AuthoringArtifactStorage, validate_authoring_document
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError
 from bento_converter.html_document import extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
@@ -1521,6 +1521,140 @@ def command_begin_content_review(root: Path, state: dict[str, Any]) -> None:
     append_work_log(root, "Validated authoring artifacts and requested Bento content approval")
 
 
+def command_reset_authoring_from_html(
+    root: Path, state: dict[str, Any], *, confirmation: str,
+    browser_executable: Path | None, browser_check: bool,
+) -> None:
+    if confirmation != "RESET-AUTHORING-FROM-HTML":
+        raise WorkflowError(
+            "Full authoring reset requires --confirm RESET-AUTHORING-FROM-HTML"
+        )
+    if state.get("schemaVersion") != 2:
+        raise WorkflowError("Full authoring reset requires deck schema v2")
+    _require_stage(state, "bento_authoring")
+    from bento_converter.html_pipeline import build_from_html
+
+    outputs = state["outputs"]
+    storage = authoring_storage(root, state)
+    storage.acquire_writer_lease()
+    final_paths = [
+        _repo_path(root, outputs[field], field=f"outputs.{field}")
+        for field in ("finalHtml", "finalJson", "finalRegistry") if outputs.get(field) is not None
+    ]
+    baseline = state["validation"].get("finalBaseline")
+    if isinstance(baseline, dict):
+        final_paths.extend([
+            _repo_path(root, baseline["documentPath"], field="validation.finalBaseline.documentPath"),
+            _repo_path(root, baseline["registryPath"], field="validation.finalBaseline.registryPath"),
+        ])
+    final_before = {path: path.read_bytes() if path.is_file() else None for path in final_paths}
+    try:
+        storage.create_revision_backup()
+        with tempfile.TemporaryDirectory(prefix=".authoring-reset-", dir=root / "output") as temporary:
+            build_root = Path(temporary)
+            build_arguments: dict[str, Any] = {
+                "base_path": storage.target,
+                "output_path": build_root / "presentation.generated.bento.html",
+                "browser_executable": browser_executable,
+                "browser_check": browser_check,
+            }
+            if state["authoring"]["mode"] == "modular":
+                build_arguments.update(html_dir=root / "chapters", registry_dir=root / "chapters")
+            else:
+                build_arguments.update(
+                    html_path=_repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml"),
+                    registry_path=_repo_path(root, state["authoring"]["registry"], field="authoring.registry"),
+                )
+            built = build_from_html(**build_arguments)
+            built_html = built.html_path.read_bytes()
+            built_document = built.document
+            built_json = (serialize_bento_doc(built_document) + "\n").encode("utf-8")
+            built_registry_path = build_root / "diagnostics/merged-registry.json"
+            built_registry = normalize_registry(
+                _read_json(built_registry_path, label="reset generated registry"), unit_id="deck",
+            )
+            validate_authoring_document(built_document, current=built_document, registry=built_registry)
+            built_registry_payload = (
+                json.dumps(built_registry, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+            ).encode("utf-8")
+            generated_html = _repo_path(root, outputs["generatedHtml"], field="outputs.generatedHtml")
+            generated_json = _repo_path(root, outputs["generatedJson"], field="outputs.generatedJson")
+            generated_registry = _repo_path(root, outputs["generatedRegistry"], field="outputs.generatedRegistry")
+            authoring_html = _repo_path(root, outputs["authoringHtml"], field="outputs.authoringHtml")
+            authoring_json = _repo_path(root, outputs["authoringJson"], field="outputs.authoringJson")
+            authoring_registry = _repo_path(root, outputs["authoringRegistry"], field="outputs.authoringRegistry")
+            generated_root = generated_html.parent
+            diagnostic_sources = {
+                generated_root / "conversion-report.json": build_root / "conversion-report.json",
+                generated_root / "diagnostics/computed-layout.json": build_root / "diagnostics/computed-layout.json",
+                generated_root / "diagnostics/resource-scan.json": build_root / "diagnostics/resource-scan.json",
+            }
+            browser_source = build_root / "diagnostics/browser-check.json"
+            payloads: dict[Path, bytes] = {
+                generated_html: built_html, generated_json: built_json,
+                generated_registry: built_registry_payload,
+                authoring_html: built_html, authoring_json: built_json,
+                authoring_registry: built_registry_payload,
+            }
+            for destination, source in diagnostic_sources.items():
+                payloads[destination] = source.read_bytes()
+            payloads[generated_root / "diagnostics/browser-check.json"] = (
+                browser_source.read_bytes() if browser_source.is_file()
+                else b'{"skipped":true,"serialize_roundtrip":false}\n'
+            )
+            next_state = copy.deepcopy(state)
+            next_state["approvals"]["bentoContent"] = _pending_content_approval()
+            next_state["handoff"]["readyForBentoAuthoring"] = True
+            next_state["handoff"]["readyForContentReview"] = False
+            state_path = root / STATE_RELATIVE
+            state_base = state_path.read_bytes()
+            payloads[state_path] = yaml.safe_dump(
+                next_state, allow_unicode=True, sort_keys=False,
+            ).encode("utf-8")
+            transaction = ArtifactTransactionStore(root, payloads)
+
+            def validate_base() -> None:
+                if state_path.read_bytes() != state_base:
+                    raise WorkflowError("deck.yaml changed before full authoring reset")
+
+            def validate_committed() -> None:
+                installed_generated = extract_bento_doc(load_html(generated_html))
+                installed_authoring = extract_bento_doc(load_html(authoring_html))
+                if installed_generated != built_document or installed_authoring != built_document:
+                    raise WorkflowError("Reset generated/authoring documents differ from the prepared conversion")
+                if _load_sidecar(generated_json) != built_document or _load_sidecar(authoring_json) != built_document:
+                    raise WorkflowError("Reset Bento JSON sidecars differ from their HTML documents")
+                installed_registry = _read_json(authoring_registry, label="reset authoring registry")
+                if registry_revision(installed_registry) != registry_revision(built_registry):
+                    raise WorkflowError("Reset authoring registry differs from generated registry")
+                validate_authoring_document(installed_authoring, current=installed_authoring, registry=installed_registry)
+                validate_state(root, yaml.safe_load(state_path.read_text(encoding="utf-8-sig")))
+
+            transaction.commit(
+                payloads,
+                operation="reset-authoring-from-html",
+                target_document_revision=document_revision(built_document),
+                target_registry_revision=registry_revision(built_registry),
+                validate_base=validate_base, validate_committed=validate_committed,
+                report_path=generated_root / "reset-authoring-report.json",
+                report_payload={
+                    "operation": "reset-authoring-from-html",
+                    "documentRevision": document_revision(built_document),
+                    "registryRevision": registry_revision(built_registry),
+                    "backup": "created", "browserCheck": "pass" if browser_check else "skipped",
+                    "finalArtifactsChanged": False,
+                },
+            )
+            state.clear()
+            state.update(next_state)
+        final_after = {path: path.read_bytes() if path.is_file() else None for path in final_paths}
+        if final_after != final_before:
+            raise WorkflowError("Full authoring reset changed final artifacts")
+        append_work_log(root, "Explicitly reset generated and authoring Bento from the HTML source")
+    finally:
+        storage.release_writer_lease()
+
+
 def command_approve_content(root: Path, state: dict[str, Any]) -> None:
     if state.get("schemaVersion") != 2:
         raise WorkflowError("Bento content approval requires deck schema v2")
@@ -1805,6 +1939,10 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("begin-authoring")
     commands.add_parser("begin-content-review")
     commands.add_parser("approve-content")
+    reset_authoring = commands.add_parser("reset-authoring-from-html")
+    reset_authoring.add_argument("--confirm", required=True)
+    reset_authoring.add_argument("--browser-executable", type=Path)
+    reset_authoring.add_argument("--skip-browser-check", action="store_true")
     commands.add_parser("begin-finalization")
     commands.add_parser("approve-final")
     commands.add_parser("complete")
@@ -1870,6 +2008,12 @@ def run(args: argparse.Namespace) -> int:
         command_begin_content_review(root, state)
     elif command == "approve-content":
         command_approve_content(root, state)
+    elif command == "reset-authoring-from-html":
+        command_reset_authoring_from_html(
+            root, state, confirmation=args.confirm,
+            browser_executable=args.browser_executable,
+            browser_check=not args.skip_browser_check,
+        )
     elif command == "begin-finalization":
         command_begin_finalization(root, state)
     elif command == "approve-final":
