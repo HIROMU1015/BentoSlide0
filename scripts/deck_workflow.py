@@ -718,9 +718,10 @@ def _baseline_document(
         if not allow_missing:
             raise WorkflowError("Final content baseline has not been initialized")
         return generated_document, protected_content_fingerprint(generated_document)
-    path = _repo_path(root, metadata["path"], field="validation.finalBaseline.path")
+    path_field = "documentPath" if state.get("schemaVersion") == 2 else "path"
+    path = _repo_path(root, metadata[path_field], field=f"validation.finalBaseline.{path_field}")
     if not path.is_file():
-        raise WorkflowError(f"Final content baseline does not exist: {metadata['path']}")
+        raise WorkflowError(f"Final content baseline does not exist: {metadata[path_field]}")
     document = _load_sidecar(path)
     if document_revision(document) != metadata["documentRevision"]:
         raise WorkflowError("Final content baseline document revision does not match deck.yaml")
@@ -800,10 +801,35 @@ def validate_output_bundle(
     final_document = extract_bento_doc(final_html)
     if final_document != _load_sidecar(final_json_path):
         raise WorkflowError("Final Bento HTML #bento-doc and JSON sidecar differ")
-    registry = _read_json(required[2], label="merged registry")
+    if state.get("schemaVersion") == 2:
+        final_registry_value = outputs.get("finalRegistry")
+        if not isinstance(final_registry_value, str):
+            raise WorkflowError("Final registry path is unavailable")
+        final_registry_path = _repo_path(root, final_registry_value, field="outputs.finalRegistry")
+        if not final_registry_path.is_file():
+            raise WorkflowError("Final Bento registry must exist")
+        registry = _read_json(final_registry_path, label="final registry")
+        validate_registry(registry, allow_v1=False)
+    else:
+        registry = _read_json(required[2], label="merged registry")
     baseline_document, baseline_fingerprint = _baseline_document(
         root, state, generated_document, allow_missing=allow_missing_baseline,
     )
+    if state.get("schemaVersion") == 2:
+        baseline = state["validation"].get("finalBaseline")
+        if not isinstance(baseline, dict):
+            raise WorkflowError("Final registry baseline has not been initialized")
+        baseline_registry_path = _repo_path(
+            root, baseline["registryPath"], field="validation.finalBaseline.registryPath",
+        )
+        if not baseline_registry_path.is_file():
+            raise WorkflowError("Final registry baseline does not exist")
+        baseline_registry = _read_json(baseline_registry_path, label="final registry baseline")
+        validate_registry(baseline_registry, allow_v1=False)
+        if registry_revision(baseline_registry) != baseline["registryRevision"]:
+            raise WorkflowError("Final registry baseline revision does not match deck.yaml")
+        if registry != baseline_registry:
+            raise WorkflowError("Final registry changed after content approval")
     validate_editor_document(final_document, current=baseline_document, registry=registry, allow_content_edit=False)
     if protected_content_fingerprint(final_document) != baseline_fingerprint:
         raise WorkflowError(
@@ -826,7 +852,7 @@ def authoring_storage(root: Path, state: dict[str, Any]) -> AuthoringArtifactSto
         source_registry=_repo_path(root, outputs["generatedRegistry"], field="outputs.generatedRegistry"),
         target=_repo_path(root, outputs["authoringHtml"], field="outputs.authoringHtml"),
         target_registry=_repo_path(root, outputs["authoringRegistry"], field="outputs.authoringRegistry"),
-        repository=root,
+        repository=root, state_path=root / STATE_RELATIVE,
     )
     expected_sidecar = _repo_path(root, outputs["authoringJson"], field="outputs.authoringJson")
     if storage.sidecar != expected_sidecar:
@@ -1464,7 +1490,166 @@ def command_begin_authoring(root: Path, state: dict[str, Any]) -> None:
     append_work_log(root, "Handed validated generated Bento artifacts to Work for authoring")
 
 
+def _pending_content_approval() -> dict[str, Any]:
+    return {
+        "status": "pending", "documentRevision": None, "registryRevision": None,
+        "approvalDigest": None, "approvedAt": None,
+    }
+
+
+def _current_authoring_status(root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    status = authoring_storage(root, state).status()
+    approval = state["approvals"]["bentoContent"]
+    if approval["status"] == "approved" and (
+        approval["documentRevision"] != status["documentRevision"]
+        or approval["registryRevision"] != status["registryRevision"]
+    ):
+        state["approvals"]["bentoContent"] = _pending_content_approval()
+    return status
+
+
+def command_begin_content_review(root: Path, state: dict[str, Any]) -> None:
+    if state.get("schemaVersion") != 2:
+        raise WorkflowError("Bento content review requires deck schema v2")
+    _require_stage(state, "bento_authoring")
+    _current_authoring_status(root, state)
+    state["handoff"]["readyForBentoAuthoring"] = False
+    state["handoff"]["readyForContentReview"] = True
+    state["handoff"]["readyForFinalEditing"] = False
+    _transition(state, "content_review", "awaiting_approval")
+    atomic_write_state(root, state)
+    append_work_log(root, "Validated authoring artifacts and requested Bento content approval")
+
+
+def command_approve_content(root: Path, state: dict[str, Any]) -> None:
+    if state.get("schemaVersion") != 2:
+        raise WorkflowError("Bento content approval requires deck schema v2")
+    _require_stage(state, "content_review")
+    status = _current_authoring_status(root, state)
+    document_revision_value = status["documentRevision"]
+    registry_revision_value = status["registryRevision"]
+    state["approvals"]["bentoContent"] = {
+        "status": "approved",
+        "documentRevision": document_revision_value,
+        "registryRevision": registry_revision_value,
+        "approvalDigest": content_approval_digest(document_revision_value, registry_revision_value),
+        "approvedAt": utc_now(),
+    }
+    state["handoff"]["readyForContentReview"] = True
+    state["workflow"]["status"] = "ready"
+    atomic_write_state(root, state)
+    append_work_log(root, "Approved Bento authoring content at fixed document and registry revisions")
+
+
+def _initialize_v2_finalization(root: Path, state: dict[str, Any]) -> None:
+    storage = authoring_storage(root, state)
+    storage.acquire_writer_lease()
+    try:
+        authoring_html, authoring_document, authoring_registry = storage.artifact_snapshot()
+        document_revision_value = document_revision(authoring_document)
+        registry_revision_value = registry_revision(authoring_registry)
+        approval = state["approvals"]["bentoContent"]
+        if (
+            approval["status"] != "approved"
+            or approval["documentRevision"] != document_revision_value
+            or approval["registryRevision"] != registry_revision_value
+            or approval["approvalDigest"] != content_approval_digest(document_revision_value, registry_revision_value)
+        ):
+            raise WorkflowError("Current authoring document and registry revisions do not have fresh content approval")
+        storage.validate_serialized(
+            authoring_html,
+            base_document_revision=document_revision_value,
+            base_registry_revision=registry_revision_value,
+            registry=authoring_registry,
+        )
+        outputs = state["outputs"]
+        final_html = _repo_path(root, outputs["finalHtml"], field="outputs.finalHtml")
+        final_json = _repo_path(root, outputs["finalJson"], field="outputs.finalJson")
+        final_registry = _repo_path(root, outputs["finalRegistry"], field="outputs.finalRegistry")
+        baseline_document = _final_baseline_path(root, state)
+        baseline_registry = _final_registry_baseline_path(root, state)
+        intended_document_payload = (serialize_bento_doc(authoring_document) + "\n").encode("utf-8")
+        intended_registry_payload = (
+            json.dumps(authoring_registry, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        payloads = {
+            final_html: authoring_html.encode("utf-8"),
+            final_json: intended_document_payload,
+            final_registry: intended_registry_payload,
+            baseline_document: intended_document_payload,
+            baseline_registry: intended_registry_payload,
+        }
+        existing = [path.is_file() for path in payloads]
+        if any(existing) and not all(existing):
+            raise WorkflowError("Final initialization artifacts are incomplete; recover or remove the incomplete set explicitly")
+        if all(existing):
+            mismatched = [path for path, payload in payloads.items() if path.read_bytes() != payload]
+            if mismatched:
+                raise WorkflowError("Existing final artifacts differ from approved authoring content and will not be overwritten")
+
+        next_state = copy.deepcopy(state)
+        next_state["validation"]["finalBaseline"] = {
+            "documentPath": baseline_document.relative_to(root).as_posix(),
+            "documentRevision": document_revision_value,
+            "registryPath": baseline_registry.relative_to(root).as_posix(),
+            "registryRevision": registry_revision_value,
+            "protectedContentFingerprint": protected_content_fingerprint(authoring_document),
+        }
+        next_state["handoff"]["readyForBentoAuthoring"] = False
+        next_state["handoff"]["readyForContentReview"] = False
+        next_state["handoff"]["readyForFinalEditing"] = True
+        _transition(next_state, "bento_finalization", "in_progress")
+        state_payload = yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8")
+        state_path = root / STATE_RELATIVE
+        base_state_payload = state_path.read_bytes()
+        transaction_payloads = {**payloads, state_path: state_payload}
+        transaction = ArtifactTransactionStore(root, transaction_payloads)
+
+        def validate_base() -> None:
+            _, current_document, current_registry = storage.artifact_snapshot()
+            if (
+                document_revision(current_document) != document_revision_value
+                or registry_revision(current_registry) != registry_revision_value
+            ):
+                raise WorkflowError("Authoring revisions changed before final initialization")
+            if state_path.read_bytes() != base_state_payload:
+                raise WorkflowError("deck.yaml changed before final initialization")
+
+        def validate_committed() -> None:
+            installed_state = yaml.safe_load(state_path.read_text(encoding="utf-8-sig"))
+            validate_state(root, installed_state)
+            validate_output_bundle(root, installed_state, require_final=True)
+
+        transaction.commit(
+            transaction_payloads,
+            operation="authoring-to-final-initialize",
+            base_document_revision=document_revision_value,
+            base_registry_revision=registry_revision_value,
+            target_document_revision=document_revision_value,
+            target_registry_revision=registry_revision_value,
+            validate_base=validate_base,
+            validate_committed=validate_committed,
+            report_path=final_html.parent / "finalization-initialization-report.json",
+            report_payload={
+                "operation": "authoring-to-final-initialize",
+                "documentRevision": document_revision_value,
+                "registryRevision": registry_revision_value,
+                "approvalDigest": approval["approvalDigest"],
+                "validation": "pass",
+            },
+        )
+        state.clear()
+        state.update(next_state)
+    finally:
+        storage.release_writer_lease()
+
+
 def command_begin_finalization(root: Path, state: dict[str, Any]) -> None:
+    if state.get("schemaVersion") == 2:
+        _require_stage(state, "content_review")
+        _initialize_v2_finalization(root, state)
+        append_work_log(root, "Initialized frozen final artifacts from approved Bento authoring content")
+        return
     _require_stage(state, "bento_validation")
     validate_output_bundle(root, state, require_final=True)
     state["handoff"]["readyForCodex"] = False
@@ -1618,6 +1803,8 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("prepare-conversion")
     commands.add_parser("mark-converted")
     commands.add_parser("begin-authoring")
+    commands.add_parser("begin-content-review")
+    commands.add_parser("approve-content")
     commands.add_parser("begin-finalization")
     commands.add_parser("approve-final")
     commands.add_parser("complete")
@@ -1679,6 +1866,10 @@ def run(args: argparse.Namespace) -> int:
         command_mark_converted(root, state)
     elif command == "begin-authoring":
         command_begin_authoring(root, state)
+    elif command == "begin-content-review":
+        command_begin_content_review(root, state)
+    elif command == "approve-content":
+        command_approve_content(root, state)
     elif command == "begin-finalization":
         command_begin_finalization(root, state)
     elif command == "approve-final":

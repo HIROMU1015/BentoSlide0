@@ -51,7 +51,12 @@ try {
             exit $LASTEXITCODE
         }
         'bento_finalization' {
-            $sourcePath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.generatedHtml)
+            if ([int]$deck.schemaVersion -eq 2 -and $null -ne $deck.outputs.authoringHtml) {
+                $sourcePath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.authoringHtml)
+            }
+            else {
+                $sourcePath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.generatedHtml)
+            }
             $targetPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.finalHtml)
             if ([int]$deck.schemaVersion -eq 2) {
                 $registryPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.finalRegistry)

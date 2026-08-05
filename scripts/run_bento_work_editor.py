@@ -38,6 +38,7 @@ def run(args: argparse.Namespace) -> int:
         storage = AuthoringArtifactStorage(
             source=args.source, source_registry=args.source_registry, target=args.target,
             target_registry=args.target_registry, repository=args.repository,
+            state_path=(args.repository / "deck.yaml") if (args.repository / "deck.yaml").is_file() else None,
         )
         storage.acquire_writer_lease()
     else:

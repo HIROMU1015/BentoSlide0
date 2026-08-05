@@ -18,10 +18,12 @@ from scripts.deck_workflow import (
     WorkflowError,
     atomic_write_state,
     command_approve_chapter,
+    command_approve_content,
     command_approve_final,
     command_approve_plan,
     command_begin_authoring,
     command_begin_chapter,
+    command_begin_content_review,
     command_begin_finalization,
     command_block,
     command_complete,
@@ -33,6 +35,7 @@ from scripts.deck_workflow import (
     command_prepare_conversion,
     command_resume,
     command_submit_plan,
+    authoring_storage,
     discover_source_candidates,
     load_state,
     validate_chapters,
@@ -346,6 +349,54 @@ class DeckWorkflowTests(unittest.TestCase):
         self.assertEqual(authoring["workflow"]["stage"], "bento_authoring")
         self.assertEqual(authoring["workflow"]["sourceOfTruth"], "authoring")
         self.assertTrue(authoring["handoff"]["readyForBentoAuthoring"])
+
+    def test_v2_content_approval_invalidation_and_final_transaction(self) -> None:
+        state = self.ready_for_conversion()
+        command_migrate(self.root, state, dry_run=False, report_path=None)
+        self.prepare_output_bundle(self.state(), existing_final=False)
+        command_mark_converted(self.root, self.state())
+        command_begin_authoring(self.root, self.state())
+        command_begin_content_review(self.root, self.state())
+        command_approve_content(self.root, self.state())
+        approved = self.state()["approvals"]["bentoContent"]
+        self.assertEqual(approved["status"], "approved")
+        self.assertRegex(approved["approvalDigest"], r"^sha256:[0-9a-f]{64}$")
+
+        storage = authoring_storage(self.root, self.state())
+        status = storage.status()
+        html = load_html(storage.target)
+        document = extract_bento_doc(html)
+        next(element for slide in document["slides"] for element in slide["elements"] if element["id"] == "slide-1-title")["html"] = "Approved content changed"
+        storage.save_serialized(
+            embed_bento_doc(html, document),
+            base_document_revision=status["documentRevision"],
+            base_registry_revision=status["registryRevision"],
+        )
+        invalidated = self.state()
+        self.assertEqual(invalidated["approvals"]["bentoContent"]["status"], "pending")
+        with self.assertRaisesRegex(WorkflowError, "fresh content approval"):
+            command_begin_finalization(self.root, invalidated)
+
+        command_approve_content(self.root, self.state())
+        command_begin_finalization(self.root, self.state())
+        finalized = self.state()
+        self.assertEqual(finalized["workflow"]["stage"], "bento_finalization")
+        self.assertTrue(finalized["handoff"]["readyForFinalEditing"])
+        baseline = finalized["validation"]["finalBaseline"]
+        for field in ("finalHtml", "finalJson", "finalRegistry"):
+            self.assertTrue((self.root / finalized["outputs"][field]).is_file())
+        self.assertTrue((self.root / baseline["documentPath"]).is_file())
+        self.assertTrue((self.root / baseline["registryPath"]).is_file())
+        self.assertEqual(
+            json.loads((self.root / finalized["outputs"]["finalRegistry"]).read_text(encoding="utf-8")),
+            json.loads((self.root / baseline["registryPath"]).read_text(encoding="utf-8")),
+        )
+        journals = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (self.root / "output/.bento-transactions/archive").rglob("*.json")
+        ]
+        final_journal = next(item for item in journals if item["operation"] == "authoring-to-final-initialize")
+        self.assertEqual(len(final_journal["artifacts"]), 6)
 
     def test_finalization_and_complete_require_explicit_final_approval(self) -> None:
         state = self.ready_for_conversion()

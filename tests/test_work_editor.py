@@ -303,11 +303,13 @@ class WorkEditorBrowserTests(unittest.TestCase):
 (() => {
   const timer = setInterval(() => {
     if (!window.bento || typeof window.bento.serialize !== 'function') return;
-    const original = window.bento.serialize.bind(window.bento);
-    window.bento.serialize = (...args) => {
+    const current = window.bento.serialize;
+    const exceptionWrapper = (...args) => {
       if (window.__throwBentoSerializeForTest) throw new Error('serialize-test-error');
-      return original(...args);
+      return current.apply(window.bento, args);
     };
+    exceptionWrapper.workEditorGuard = current.workEditorGuard === true;
+    window.bento.serialize = exceptionWrapper;
     clearInterval(timer);
   }, 1);
 })();

@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+import yaml
+
 from bento_converter.authoring_storage import AuthoringArtifactStorage, AuthoringConflict
 from bento_converter.errors import ValidationError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint
@@ -147,6 +149,51 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
         )
         self.assertEqual(saved["validation"], "pass")
         self.assertEqual(extract_bento_doc(load_html(self.target))["slides"], document["slides"])
+
+    def test_save_invalidates_approved_deck_state_in_the_same_transaction(self) -> None:
+        initial = self.storage()
+        status = initial.status()
+        state_path = self.root / "deck.yaml"
+        state_path.write_text(yaml.safe_dump({
+            "schemaVersion": 2,
+            "outputs": {
+                "authoringHtml": "output/presentation.authoring.bento.html",
+                "authoringJson": "output/presentation.authoring.bento.json",
+                "authoringRegistry": "output/presentation.authoring.registry.json",
+            },
+            "approvals": {"bentoContent": {
+                "status": "approved", "documentRevision": status["documentRevision"],
+                "registryRevision": status["registryRevision"], "approvalDigest": "sha256:" + "1" * 64,
+                "approvedAt": "2026-08-05T00:00:00Z",
+            }},
+        }, sort_keys=False), encoding="utf-8")
+        storage = AuthoringArtifactStorage(
+            source=self.generated, source_registry=self.generated_registry,
+            target=self.target, target_registry=self.target_registry, repository=self.root,
+            state_path=state_path,
+        )
+        self.assertEqual(storage.status()["contentApprovalStatus"], "approved")
+        html = load_html(self.target)
+        document = extract_bento_doc(html)
+        self.title(document)["html"] = "Invalidate approved content"
+        saved = storage.save_serialized(
+            embed_bento_doc(html, document),
+            base_document_revision=status["documentRevision"],
+            base_registry_revision=status["registryRevision"],
+        )
+        self.assertTrue(saved["contentApprovalInvalidated"])
+        updated = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(updated["approvals"]["bentoContent"], {
+            "status": "pending", "documentRevision": None, "registryRevision": None,
+            "approvalDigest": None, "approvedAt": None,
+        })
+        journals = sorted((self.root / "output/.bento-transactions/archive").rglob("*.json"))
+        authoring_save = next(
+            json.loads(path.read_text(encoding="utf-8")) for path in journals
+            if json.loads(path.read_text(encoding="utf-8"))["operation"] == "authoring-save"
+        )
+        targets = {Path(item["target"]).resolve() for item in authoring_save["artifacts"]}
+        self.assertIn(state_path.resolve(), targets)
 
     def test_authoring_http_api_uses_dual_revisions_and_mode_contract(self) -> None:
         storage = self.storage()

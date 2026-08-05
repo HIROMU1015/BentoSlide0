@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+import copy
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .artifact_transaction import ArtifactTransactionStore
 from .bento_validator import validate_bento_doc
@@ -217,7 +220,7 @@ class AuthoringArtifactStorage:
     def __init__(
         self, *, source: str | Path, source_registry: str | Path,
         target: str | Path, target_registry: str | Path, repository: str | Path,
-        reset_authoring: bool = False,
+        reset_authoring: bool = False, state_path: str | Path | None = None,
     ) -> None:
         self.repository = Path(repository).resolve()
         self.editing_mode = "authoring"
@@ -228,8 +231,16 @@ class AuthoringArtifactStorage:
         self.registry_path = Path(target_registry).resolve()
         self.report_path = self.target.parent / "authoring-save-report.json"
         self.revisions_dir = self.target.parent / "revisions"
+        self.state_path = Path(state_path).resolve() if state_path is not None else None
+        if self.state_path is not None:
+            try:
+                self.state_path.relative_to(self.repository)
+            except ValueError as exc:
+                raise BentoConverterError("Authoring workflow state escapes the repository") from exc
+            self._load_workflow_state()
         self.transactions = ArtifactTransactionStore(
-            self.repository, (self.target, self.sidecar, self.registry_path),
+            self.repository,
+            (self.target, self.sidecar, self.registry_path, *(() if self.state_path is None else (self.state_path,))),
         )
         self.transactions.recover()
         if not self.source.is_file() or not self.source_registry.is_file():
@@ -260,6 +271,60 @@ class AuthoringArtifactStorage:
         self._runtime = runtime_fingerprint(load_html(self.target))
         self._read_current()
 
+    def _load_workflow_state(self) -> tuple[bytes, dict[str, Any]]:
+        if self.state_path is None:
+            raise BentoConverterError("Authoring storage has no workflow state")
+        try:
+            raw = self.state_path.read_bytes()
+            state = yaml.safe_load(raw.decode("utf-8-sig"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise BentoConverterError(f"Cannot read authoring workflow state: {exc}") from exc
+        if not isinstance(state, dict) or state.get("schemaVersion") != 2:
+            raise BentoConverterError("Authoring workflow state must use deck schema v2")
+        outputs = state.get("outputs")
+        if not isinstance(outputs, dict):
+            raise BentoConverterError("Authoring workflow state has no outputs mapping")
+        expected = {
+            "authoringHtml": self.target,
+            "authoringJson": self.sidecar,
+            "authoringRegistry": self.registry_path,
+        }
+        for field, actual in expected.items():
+            value = outputs.get(field)
+            if not isinstance(value, str) or (self.repository / value).resolve() != actual:
+                raise BentoConverterError(f"Workflow {field} does not match the authoring storage target")
+        return raw, state
+
+    @staticmethod
+    def _approval_is_current(state: dict[str, Any], document_revision_value: str, registry_revision_value: str) -> bool:
+        approval = state.get("approvals", {}).get("bentoContent", {})
+        return (
+            isinstance(approval, dict)
+            and approval.get("status") == "approved"
+            and approval.get("documentRevision") == document_revision_value
+            and approval.get("registryRevision") == registry_revision_value
+        )
+
+    def _state_invalidation_payload(
+        self, document_revision_value: str, registry_revision_value: str,
+    ) -> tuple[bytes | None, bytes | None, str | None]:
+        if self.state_path is None:
+            return None, None, None
+        raw, state = self._load_workflow_state()
+        approval = state["approvals"]["bentoContent"]
+        effective = "approved" if self._approval_is_current(
+            state, document_revision_value, registry_revision_value,
+        ) else "pending"
+        if approval.get("status") != "approved" or effective == "approved":
+            return None, raw, effective
+        updated = copy.deepcopy(state)
+        updated["approvals"]["bentoContent"] = {
+            "status": "pending", "documentRevision": None, "registryRevision": None,
+            "approvalDigest": None, "approvedAt": None,
+        }
+        payload = yaml.safe_dump(updated, allow_unicode=True, sort_keys=False).encode("utf-8")
+        return payload, raw, "pending"
+
     def acquire_writer_lease(self) -> None:
         if not self.transactions.writer_lease.acquired:
             self.transactions.acquire_writer_lease()
@@ -285,18 +350,24 @@ class AuthoringArtifactStorage:
     def status(self) -> dict[str, Any]:
         self.transactions.recover()
         _, document, registry = self._read_current()
+        document_revision_value = document_revision(document)
+        registry_revision_value = registry_revision(registry)
+        _, _, approval_status = self._state_invalidation_payload(
+            document_revision_value, registry_revision_value,
+        )
         try:
             target = self.target.relative_to(self.repository).as_posix()
         except ValueError:
             target = self.target.name
         return {
-            "documentRevision": document_revision(document),
-            "registryRevision": registry_revision(registry),
-            "revision": document_revision(document), "target": target,
+            "documentRevision": document_revision_value,
+            "registryRevision": registry_revision_value,
+            "revision": document_revision_value, "target": target,
             "runtimeFingerprint": "sha256:" + self._runtime,
             "backupCount": len(self._backups()), "validation": "pass",
             "editingMode": "authoring", "sourceOfTruth": target,
             "repository": str(self.repository),
+            "contentApprovalStatus": approval_status,
         }
 
     def document_response(self) -> dict[str, Any]:
@@ -305,6 +376,11 @@ class AuthoringArtifactStorage:
             "documentRevision": document_revision(document), "registryRevision": registry_revision(registry),
             "revision": document_revision(document), "document": document, "registry": registry,
         }
+
+    def artifact_snapshot(self) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        """Return one transaction-lock-consistent authoring HTML/document/registry snapshot."""
+
+        return self._read_current()
 
     def validate_serialized(
         self, serialized_html: str, *, base_document_revision: str,
@@ -379,6 +455,9 @@ class AuthoringArtifactStorage:
         assert_runtime_integrity(current_html, updated_html)
         proposed_document_revision = document_revision(proposed_document)
         proposed_registry_revision = registry_revision(proposed_registry)
+        state_payload, state_base, _ = self._state_invalidation_payload(
+            proposed_document_revision, proposed_registry_revision,
+        )
         report = {
             "operation": "authoring-save", "baseDocumentRevision": current_document_revision,
             "baseRegistryRevision": current_registry_revision, "resultDocumentRevision": proposed_document_revision,
@@ -393,9 +472,11 @@ class AuthoringArtifactStorage:
             _, installed_document, installed_registry = self._read_current()
             if document_revision(installed_document) != current_document_revision or registry_revision(installed_registry) != current_registry_revision:
                 raise AuthoringConflict("Authoring base revisions changed before the transaction began")
+            if state_payload is not None and self.state_path is not None and self.state_path.read_bytes() != state_base:
+                raise AuthoringConflict("Workflow content approval changed before the authoring transaction began")
 
         def validate_commit() -> None:
-            installed_html = self.target.read_text(encoding="utf-8-sig")
+            installed_html = load_html(self.target)
             installed_document = extract_bento_doc(installed_html)
             installed_sidecar = json.loads(self.sidecar.read_text(encoding="utf-8-sig"))
             installed_registry = json.loads(self.registry_path.read_text(encoding="utf-8-sig"))
@@ -403,15 +484,26 @@ class AuthoringArtifactStorage:
                 raise BentoConverterError("Authoring document artifacts differ after commit")
             if installed_registry != proposed_registry:
                 raise BentoConverterError("Authoring registry differs after commit")
-            assert_runtime_integrity(current_html, installed_html)
+            # The proposed HTML was already checked against the base before the
+            # transaction. Compare the installed bytes to that exact prepared
+            # representation here so post-commit validation is transitive and
+            # independent of any parser normalization.
+            assert_runtime_integrity(updated_html, installed_html)
             validate_authoring_document(installed_document, current=current_document, registry=installed_registry)
+            if state_payload is not None:
+                _, installed_state = self._load_workflow_state()
+                if installed_state["approvals"]["bentoContent"]["status"] != "pending":
+                    raise BentoConverterError("Authoring save did not invalidate workflow content approval")
 
-        transaction = self.transactions.commit(
-            {
+        payloads = {
                 self.target: updated_html.encode("utf-8"),
                 self.sidecar: (serialize_bento_doc(proposed_document) + "\n").encode("utf-8"),
                 self.registry_path: (json.dumps(proposed_registry, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8"),
-            },
+        }
+        if state_payload is not None and self.state_path is not None:
+            payloads[self.state_path] = state_payload
+        transaction = self.transactions.commit(
+            payloads,
             operation="authoring-save",
             base_document_revision=current_document_revision, base_registry_revision=current_registry_revision,
             target_document_revision=proposed_document_revision, target_registry_revision=proposed_registry_revision,
@@ -421,7 +513,10 @@ class AuthoringArtifactStorage:
         return {
             "documentRevision": proposed_document_revision,
             "registryRevision": proposed_registry_revision,
-            "contentApprovalInvalidated": True,
+            "contentApprovalInvalidated": (
+                proposed_document_revision != current_document_revision
+                or proposed_registry_revision != current_registry_revision
+            ),
             "transactionId": transaction["transactionId"],
             "validation": "pass",
         }
@@ -449,6 +544,9 @@ class AuthoringArtifactStorage:
         validate_authoring_document(backup_document, current=backup_document, registry=backup_registry)
         result_document_revision = document_revision(backup_document)
         result_registry_revision = registry_revision(backup_registry)
+        state_payload, state_base, _ = self._state_invalidation_payload(
+            result_document_revision, result_registry_revision,
+        )
         report = {
             "operation": "authoring-revert", "baseDocumentRevision": base_document_revision,
             "baseRegistryRevision": base_registry_revision, "resultDocumentRevision": result_document_revision,
@@ -462,13 +560,18 @@ class AuthoringArtifactStorage:
                 or registry_revision(installed_registry) != base_registry_revision
             ):
                 raise AuthoringConflict("Authoring base revisions changed before the revert transaction began")
+            if state_payload is not None and self.state_path is not None and self.state_path.read_bytes() != state_base:
+                raise AuthoringConflict("Workflow content approval changed before the revert transaction began")
 
-        transaction = self.transactions.commit(
-            {
+        payloads = {
                 self.target: backup_html.encode("utf-8"),
                 self.sidecar: (serialize_bento_doc(backup_document) + "\n").encode("utf-8"),
                 self.registry_path: (json.dumps(backup_registry, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8"),
-            },
+        }
+        if state_payload is not None and self.state_path is not None:
+            payloads[self.state_path] = state_payload
+        transaction = self.transactions.commit(
+            payloads,
             operation="authoring-revert", base_document_revision=base_document_revision,
             base_registry_revision=base_registry_revision, target_document_revision=result_document_revision,
             target_registry_revision=result_registry_revision, validate_base=validate_base,
