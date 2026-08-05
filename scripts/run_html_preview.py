@@ -1,4 +1,4 @@
-"""Serve chapter HTML and local assets from a loopback-only preview server."""
+"""Serve single-deck or modular HTML authoring sources on loopback."""
 
 from __future__ import annotations
 
@@ -20,8 +20,13 @@ from scripts.deck_workflow import WorkflowError, load_state, repository_root
 STATUS_FORMAT = "bento/html-preview-status/v1"
 
 
-def _chapter_snapshot(repository: Path) -> tuple[dict[str, Any], list[str], str | None]:
+def _preview_snapshot(repository: Path) -> tuple[dict[str, Any], list[str], str | None]:
     state = load_state(repository)
+    if state.get("schemaVersion") == 2 and state["authoring"]["mode"] in {"single", "imported"}:
+        relative = state["authoring"]["entryHtml"]
+        path = (repository / relative).resolve()
+        files = [relative] if path.is_file() else []
+        return state, files, relative if files else None
     chapters_root = (repository / "chapters").resolve()
     files = [path.relative_to(repository).as_posix() for path in sorted(chapters_root.glob("*.preview.html")) if path.is_file()]
     current_id = state["workflow"].get("currentChapter")
@@ -34,8 +39,32 @@ def _chapter_snapshot(repository: Path) -> tuple[dict[str, Any], list[str], str 
 
 
 def _index_html(repository: Path) -> bytes:
-    state, files, current_path = _chapter_snapshot(repository)
+    state, files, current_path = _preview_snapshot(repository)
     stage = html.escape(state["workflow"]["stage"])
+    single = state.get("schemaVersion") == 2 and state["authoring"]["mode"] in {"single", "imported"}
+    if single:
+        current_section = html.escape(state["workflow"].get("currentSection") or "-")
+        sections = []
+        slides = []
+        for section_id, section in state["sections"].items():
+            section_label = html.escape(section["title"])
+            section_hash = quote(section_id, safe="")
+            marker = " <strong>current</strong>" if section_id == state["workflow"].get("currentSection") else ""
+            sections.append(f'<li><a href="#section={section_hash}">{section_label}</a>{marker}</li>')
+            for slide_id in section["slideIds"]:
+                slides.append(f'<li><a href="#slide={quote(slide_id, safe="")}">{html.escape(slide_id)}</a></li>')
+        source_url = "/" + quote((current_path or "").replace("\\", "/"), safe="/")
+        payload = f"""<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>BentoSlide deck preview</title>
+<style>html,body{{height:100%;margin:0}}body{{font:14px/1.5 system-ui,sans-serif;color:#172033;display:grid;grid-template-columns:260px 1fr}}aside{{padding:18px;overflow:auto;border-right:1px solid #ccd5e1;background:#f8fafc}}iframe{{width:100%;height:100%;border:0;background:white}}code{{background:#e7edf5;padding:2px 5px;border-radius:4px}}li{{margin:5px 0}}button{{padding:6px 10px}}strong{{color:#1d4ed8}}</style>
+</head><body><aside><h1>BentoSlide</h1><p>stage: <code>{stage}</code><br>current section: <code>{current_section}</code></p>
+<button id="reload" type="button">Reload</button><h2>Sections</h2><ul>{''.join(sections) or '<li>No sections</li>'}</ul>
+<h2>Slides</h2><ul>{''.join(slides) or '<li>No registered slides</li>'}</ul></aside>
+<iframe id="deck" title="Deck preview" src="{source_url}"></iframe>
+<script>const frame=document.getElementById('deck');function navigate(){{const match=location.hash.match(/^#(section|slide)=(.+)$/);if(!match)return;const attr=match[1]==='section'?'data-section-id':'data-slide-id';const apply=()=>{{const node=frame.contentDocument&&frame.contentDocument.querySelector('['+attr+'="'+CSS.escape(decodeURIComponent(match[2]))+'"]');if(node)node.scrollIntoView({{block:'start'}});}};if(frame.contentDocument)apply();else frame.addEventListener('load',apply,{{once:true}});}}window.addEventListener('hashchange',navigate);frame.addEventListener('load',navigate);document.getElementById('reload').onclick=()=>{{frame.contentWindow.location.reload();}};navigate();</script>
+</body></html>"""
+        return payload.encode("utf-8")
     current_id = html.escape(state["workflow"].get("currentChapter") or "-")
     items = []
     for relative in files:
@@ -53,17 +82,24 @@ def _index_html(repository: Path) -> bytes:
     return payload.encode("utf-8")
 
 
-def _safe_chapter_path(repository: Path, request_path: str) -> Path | None:
+def _safe_preview_path(repository: Path, request_path: str) -> Path | None:
     decoded = unquote(request_path)
     if "\x00" in decoded or "\\" in decoded:
         return None
     pure = PurePosixPath(decoded.lstrip("/"))
-    if not pure.parts or pure.parts[0] != "chapters" or any(part in {"", ".", ".."} for part in pure.parts):
+    if not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
         return None
-    chapters_root = (repository / "chapters").resolve()
+    state = load_state(repository)
+    if state.get("schemaVersion") == 2 and state["authoring"]["mode"] in {"single", "imported"}:
+        entry = (repository / state["authoring"]["entryHtml"]).resolve()
+        allowed_root = entry.parent
+    else:
+        if pure.parts[0] != "chapters":
+            return None
+        allowed_root = (repository / "chapters").resolve()
     candidate = (repository.joinpath(*pure.parts)).resolve()
     try:
-        candidate.relative_to(chapters_root)
+        candidate.relative_to(allowed_root)
     except ValueError:
         return None
     return candidate if candidate.is_file() else None
@@ -112,19 +148,28 @@ class HtmlPreviewHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, _index_html(self.server.repository), "text/html; charset=utf-8")
             return
         if route == "/api/status":
-            state, files, current_path = _chapter_snapshot(self.server.repository)
+            state, files, current_path = _preview_snapshot(self.server.repository)
             host, port = self.server.server_address[:2]
+            single = state.get("schemaVersion") == 2 and state["authoring"]["mode"] in {"single", "imported"}
             self._json(HTTPStatus.OK, {
                 "format": STATUS_FORMAT,
                 "repository": str(self.server.repository),
                 "stage": state["workflow"]["stage"],
                 "currentChapter": state["workflow"].get("currentChapter"),
+                "currentSection": state["workflow"].get("currentSection") if single else None,
+                "currentSlide": (
+                    next(iter(state["sections"].get(state["workflow"].get("currentSection"), {}).get("slideIds", [])), None)
+                    if single else None
+                ),
                 "currentPath": current_path,
                 "chapters": files,
+                "mode": state["authoring"]["mode"] if single else "modular",
+                "sections": list(state["sections"]) if single else [],
+                "slides": [slide for section in state["sections"].values() for slide in section["slideIds"]] if single else [],
                 "url": f"http://{host}:{port}/",
             })
             return
-        path = _safe_chapter_path(self.server.repository, route)
+        path = _safe_preview_path(self.server.repository, route)
         if path is None:
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
@@ -146,9 +191,15 @@ def create_preview_server(repository: str | Path, *, host: str = "127.0.0.1", po
         raise WorkflowError(f"Invalid preview port: {port}")
     root = repository_root(repository)
     load_state(root)
-    chapters = root / "chapters"
-    if not chapters.is_dir():
-        raise WorkflowError(f"chapters/ does not exist: {chapters}")
+    state = load_state(root)
+    if state.get("schemaVersion") == 2 and state["authoring"]["mode"] in {"single", "imported"}:
+        entry = root / state["authoring"]["entryHtml"]
+        if not entry.is_file():
+            raise WorkflowError(f"Single HTML authoring entry does not exist: {entry}")
+    else:
+        chapters = root / "chapters"
+        if not chapters.is_dir():
+            raise WorkflowError(f"chapters/ does not exist: {chapters}")
     return HtmlPreviewServer((host, port), root)
 
 

@@ -152,6 +152,19 @@ class DeckMigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "escapes"):
             validate_state(self.root, escaped)
 
+    def test_migration_does_not_overwrite_a_different_existing_manifest(self) -> None:
+        manifest_path = self.root / "sources/source-manifest.yaml"
+        original = yaml.safe_dump({
+            "schemaVersion": 1, "authorityMode": "multiple", "items": [],
+        }, sort_keys=False).encode("utf-8")
+        manifest_path.write_bytes(original)
+        deck_before = (self.root / "deck.yaml").read_bytes()
+        with self.assertRaisesRegex(WorkflowError, "differs from the v1 migration result"):
+            command_migrate(self.root, load_state(self.root), dry_run=False, report_path=None)
+        self.assertEqual(manifest_path.read_bytes(), original)
+        self.assertEqual((self.root / "deck.yaml").read_bytes(), deck_before)
+        self.assertFalse((self.root / "deck.v1.backup.yaml").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,7 @@ from .errors import BentoConverterError
 from .html_converter import HtmlConversionResult, convert_html_layout
 from .html_document import assert_runtime_integrity, extract_bento_doc, load_html, write_embedded_document
 from .html_layout import LayoutResult, extract_computed_layout
-from .html_source import discover_chapters, merge_registries
+from .html_source import discover_chapters, discover_source_unit, merge_registries
 from .visual_comparison import compare_crops, compare_images
 
 
@@ -145,8 +145,10 @@ def _semantic_comparison(layout: LayoutResult, conversion: HtmlConversionResult,
 
 def build_from_html(
     *,
-    html_dir: str | Path,
-    registry_dir: str | Path,
+    html_dir: str | Path | None = None,
+    registry_dir: str | Path | None = None,
+    html_path: str | Path | None = None,
+    registry_path: str | Path | None = None,
     base_path: str | Path,
     output_path: str | Path,
     browser_executable: str | Path | None = None,
@@ -158,6 +160,18 @@ def build_from_html(
     base = Path(base_path).resolve()
     if output == base:
         raise BentoConverterError("Output path must differ from the Bento base HTML.")
+    explicit = html_path is not None or registry_path is not None
+    modular = html_dir is not None or registry_dir is not None
+    if explicit == modular:
+        raise BentoConverterError("Choose exactly one source form: --html/--registry or --html-dir/--registry-dir.")
+    if explicit:
+        if html_path is None or registry_path is None:
+            raise BentoConverterError("Single-file conversion requires both HTML and registry paths.")
+        chapters = [discover_source_unit(html_path, registry_path)]
+    else:
+        if html_dir is None or registry_dir is None:
+            raise BentoConverterError("Modular conversion requires both HTML and registry directories.")
+        chapters = discover_chapters(html_dir, registry_dir)
     root = output.parent
     source_dir = root / "screenshots" / "source"
     bento_dir = root / "screenshots" / "bento"
@@ -165,7 +179,6 @@ def build_from_html(
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     _clear_generated_files(source_dir, bento_dir, diagnostics_dir)
 
-    chapters = discover_chapters(html_dir, registry_dir)
     registry = merge_registries(chapters)
     layout = extract_computed_layout(chapters, source_dir, browser_executable=browser_executable)
     conversion = convert_html_layout(layout, registry, chapters)

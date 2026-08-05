@@ -57,10 +57,30 @@ def validate_registry(registry: dict[str, Any], *, allow_v1: bool = True) -> Non
                 raise BentoConverterError("Registry v2 source definitions must be objects keyed by stable IDs")
             if not isinstance(source.get("path"), str) or not source["path"]:
                 raise BentoConverterError(f"Registry source {source_id!r} requires a path")
+            source_path = Path(source["path"])
+            if source_path.is_absolute() or ".." in source_path.parts:
+                raise BentoConverterError(f"Registry source {source_id!r} path must be repository-relative")
     for collection in REGISTRY_COLLECTIONS:
         value = registry.get(collection, {})
         if not isinstance(value, dict):
             raise BentoConverterError(f"Registry {collection} must be an object")
+        for definition_id, definition in value.items():
+            if not isinstance(definition_id, str) or not definition_id or not isinstance(definition, dict):
+                raise BentoConverterError(f"Registry {collection} definitions must be objects keyed by stable IDs")
+            provenance = definition.get("provenance")
+            if provenance is None:
+                continue
+            if not isinstance(provenance, dict):
+                raise BentoConverterError(f"Registry {collection}.{definition_id}.provenance must be an object")
+            if registry.get("format") != REGISTRY_V2:
+                continue
+            source_id = provenance.get("sourceId")
+            if not isinstance(source_id, str) or not source_id:
+                raise BentoConverterError(f"Registry {collection}.{definition_id}.provenance requires sourceId")
+            if source_id not in registry.get("sources", {}):
+                raise BentoConverterError(f"Registry {collection}.{definition_id} references unknown sourceId {source_id!r}")
+            if "locator" in provenance and not isinstance(provenance["locator"], str):
+                raise BentoConverterError(f"Registry {collection}.{definition_id}.provenance.locator must be a string")
     protected = registry.get("protected", {})
     if not isinstance(protected, dict):
         raise BentoConverterError("Registry protected must be an object")

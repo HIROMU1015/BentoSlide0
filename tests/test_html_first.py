@@ -14,7 +14,7 @@ from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.html_converter import convert_html_layout
 from bento_converter.html_layout import LayoutResult
 from bento_converter.html_pipeline import build_from_html
-from bento_converter.html_source import SourceChapter, discover_chapters, merge_registries
+from bento_converter.html_source import SourceChapter, discover_chapters, discover_source_unit, merge_registries
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -48,6 +48,32 @@ class HtmlSourceTests(unittest.TestCase):
             (root / "a.registry.json").write_text(json.dumps({"format": "future", "chapterId": "a"}), encoding="utf-8")
             with self.assertRaisesRegex(Exception, "bento/html-registry/v1"):
                 discover_chapters(root, root)
+
+    def test_single_v2_source_unit_supports_japanese_and_space_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "日本語 deck"
+            root.mkdir()
+            html_path = root / "資料 preview.html"
+            registry_path = root / "資料 registry.json"
+            html_path.write_text("<section class='slide' data-slide-id='one'></section>", encoding="utf-8")
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "deck", "sources": {},
+                "assets": {}, "fonts": {}, "equations": {}, "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }), encoding="utf-8")
+            unit = discover_source_unit(html_path, registry_path)
+            self.assertEqual(unit.unit_id, "deck")
+            self.assertEqual(merge_registries([unit])["format"], "bento/html-registry/v2")
+
+    def test_converter_requires_exactly_one_complete_source_form(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "out/presentation.bento.html"
+            with self.assertRaisesRegex(Exception, "exactly one source form"):
+                build_from_html(
+                    base_path=ROOT / "Bento_Slides.base.bento.html", output_path=output,
+                    html_path="a.html", registry_path="a.json", html_dir="chapters", registry_dir="chapters",
+                )
+            self.assertFalse(output.parent.exists())
 
 
 class HtmlConversionTests(unittest.TestCase):
@@ -145,6 +171,33 @@ class HtmlConversionTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("BENTO_BROWSER_TEST") == "1", "Set BENTO_BROWSER_TEST=1 for Chromium HTML-first integration.")
 class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
+    def test_single_html_and_v2_registry_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "日本語 deck"
+            root.mkdir()
+            source = root / "deck preview.html"
+            source.write_text(
+                "<!doctype html><style>.slide{position:relative;width:1280px;height:720px}</style>"
+                "<section class='slide' data-slide-id='single' data-section-id='intro'>"
+                "<h1 data-bento-id='title' style='position:absolute;left:80px;top:80px'>Single deck</h1>"
+                "</section>", encoding="utf-8",
+            )
+            registry_path = root / "deck registry.json"
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "deck", "sources": {},
+                "document": {"title": "Single"}, "assets": {}, "fonts": {}, "equations": {},
+                "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": ["single"], "elementIds": ["title"], "requiredText": ["Single deck"]},
+            }), encoding="utf-8")
+            result = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html",
+                output_path=root / "output/presentation.generated.bento.html", browser_check=False,
+            )
+            self.assertEqual([slide["id"] for slide in result.document["slides"]], ["single"])
+            merged = json.loads((root / "output/diagnostics/merged-registry.json").read_text(encoding="utf-8"))
+            self.assertEqual(merged["format"], "bento/html-registry/v2")
+
     def test_local_resources_inside_svg_fallback_are_self_contained_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -12,8 +12,10 @@ from bento_converter.html_pipeline import build_from_html
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--html-dir", required=True, type=Path, help="Directory containing sorted chapter HTML files")
-    result.add_argument("--registry-dir", required=True, type=Path, help="Directory containing matching *.registry.json files")
+    result.add_argument("--html", type=Path, help="Single deck HTML source")
+    result.add_argument("--registry", type=Path, help="Registry paired with --html")
+    result.add_argument("--html-dir", type=Path, help="Directory containing sorted chapter HTML files")
+    result.add_argument("--registry-dir", type=Path, help="Directory containing matching *.registry.json files")
     result.add_argument("--base", required=True, type=Path, help="Official Bento base .bento.html")
     result.add_argument("--output", required=True, type=Path, help="Output presentation.bento.html")
     result.add_argument("--browser-executable", type=Path, help="Optional Chrome/Edge executable")
@@ -22,9 +24,19 @@ def parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> int:
+    explicit = args.html is not None or args.registry is not None
+    modular = args.html_dir is not None or args.registry_dir is not None
+    if explicit == modular:
+        raise BentoConverterError("Choose exactly one source form: --html/--registry or --html-dir/--registry-dir.")
+    if explicit and (args.html is None or args.registry is None):
+        raise BentoConverterError("Single-file conversion requires both --html and --registry.")
+    if modular and (args.html_dir is None or args.registry_dir is None):
+        raise BentoConverterError("Modular conversion requires both --html-dir and --registry-dir.")
     result = build_from_html(
         html_dir=args.html_dir,
         registry_dir=args.registry_dir,
+        html_path=args.html,
+        registry_path=args.registry,
         base_path=args.base,
         output_path=args.output,
         browser_executable=args.browser_executable,

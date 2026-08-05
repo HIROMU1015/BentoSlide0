@@ -19,6 +19,7 @@ import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
 from bento_converter.bento_validator import validate_bento_doc
+from bento_converter.errors import BentoConverterError
 from bento_converter.html_document import extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
 from bento_converter.html_source import REGISTRY_FORMAT
 from bento_converter.registry_document import (
@@ -28,6 +29,7 @@ from bento_converter.registry_document import (
     registry_revision,
     validate_registry,
 )
+from bento_converter.section_approval import SectionApprovalEvidence, compute_section_approval_evidence
 from bento_converter.work_editor_storage import (
     WorkEditorStorage,
     document_revision,
@@ -239,7 +241,9 @@ def load_source_manifest(root: Path, state: dict[str, Any], *, require_exists: b
         source_path = item.get("path")
         if not isinstance(source_path, str) or not source_path:
             raise WorkflowError(f"Source manifest item {source_id!r} requires a path")
-        _repo_path(root, source_path, field=f"sources.items[{index}].path")
+        resolved_source = _repo_path(root, source_path, field=f"sources.items[{index}].path")
+        if require_exists and not resolved_source.exists():
+            raise WorkflowError(f"Source manifest item does not exist: {source_path}")
         if not isinstance(item.get("type"), str) or not item["type"]:
             raise WorkflowError(f"Source manifest item {source_id!r} requires a type")
         if item.get("role") not in {"primary", "evidence", "reference", "supplementary", "imported"}:
@@ -353,6 +357,20 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                 raise WorkflowError(f"{mode} authoring requires entryHtml and registry")
             _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
             _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+            if state["chapters"]:
+                raise WorkflowError(f"{mode} authoring must use sections rather than chapters")
+            if workflow["currentChapter"] is not None:
+                raise WorkflowError(f"{mode} authoring cannot have a current chapter")
+            registered_slides: set[str] = set()
+            for section_id, section in state["sections"].items():
+                duplicates = registered_slides.intersection(section["slideIds"])
+                if duplicates:
+                    raise WorkflowError(f"Slide IDs are registered in multiple sections: {sorted(duplicates)}")
+                registered_slides.update(section["slideIds"])
+                if section["status"] == "approved" and section["approvalDigest"] is None:
+                    raise WorkflowError(f"Approved section has no approval digest: {section_id}")
+                if section["status"] != "approved" and section["approvalDigest"] is not None:
+                    raise WorkflowError(f"Unapproved section retains an approval digest: {section_id}")
     resolved_outputs = {
         field: _repo_path(root, value, field=f"outputs.{field}")
         for field, value in state["outputs"].items() if value is not None
@@ -450,10 +468,17 @@ def _transition(state: dict[str, Any], stage: str, status: str, *, current: str 
     workflow["sourceOfTruth"] = (
         LEGACY_STAGE_SOURCE[stage] if state.get("schemaVersion") == 1 else STAGE_SOURCE[stage]
     )
-    workflow["currentChapter"] = current
     if state.get("schemaVersion") == 2:
-        workflow["currentSection"] = current
-        state["authoring"]["currentSection"] = current
+        if state["authoring"]["mode"] == "modular":
+            workflow["currentChapter"] = current
+            workflow["currentSection"] = None
+            state["authoring"]["currentSection"] = None
+        else:
+            workflow["currentChapter"] = None
+            workflow["currentSection"] = current
+            state["authoring"]["currentSection"] = current
+    else:
+        workflow["currentChapter"] = current
     workflow["blockingReason"] = None
     workflow["blockedFrom"] = None
 
@@ -465,6 +490,19 @@ def _require_stage(state: dict[str, Any], *allowed: str) -> None:
 
 
 def discover_source_candidates(root: Path, state: dict[str, Any]) -> tuple[Path | None, list[Path]]:
+    if state.get("schemaVersion") == 2:
+        manifest = load_source_manifest(root, state)
+        candidates = [
+            _repo_path(root, item["path"], field=f"sources.items.{item['id']}.path")
+            for item in manifest["items"]
+        ]
+        primaries = [
+            _repo_path(root, item["path"], field=f"sources.items.{item['id']}.path")
+            for item in manifest["items"] if item.get("role") == "primary"
+        ]
+        if manifest["authorityMode"] == "single" and len(primaries) != 1:
+            raise WorkflowError("Single-authority source manifest requires exactly one primary item")
+        return (primaries[0] if len(primaries) == 1 else None), candidates
     sources = (root / "sources").resolve()
     if not sources.is_dir():
         raise WorkflowError("sources/ does not exist")
@@ -581,6 +619,57 @@ def validate_chapters(root: Path, state: dict[str, Any], *, require_complete: bo
         if duplicates:
             raise WorkflowError(f"Slide IDs are duplicated across chapters: {sorted(duplicates)}")
         all_slides.update(parser.slide_ids)
+
+
+def load_single_section_evidence(
+    root: Path, state: dict[str, Any],
+) -> dict[str, SectionApprovalEvidence]:
+    if state.get("schemaVersion") != 2 or state["authoring"]["mode"] not in {"single", "imported"}:
+        raise WorkflowError("Single section validation requires schema v2 single/imported authoring")
+    html_path = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    registry_path = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    if not registry_path.is_file():
+        raise WorkflowError(f"Authoring registry does not exist: {state['authoring']['registry']}")
+    registry = _read_json(registry_path, label="single HTML registry")
+    try:
+        validate_registry(registry, allow_v1=True)
+        return compute_section_approval_evidence(html_path, registry, repository=root)
+    except BentoConverterError as exc:
+        raise WorkflowError(str(exc)) from exc
+
+
+def validate_sections(root: Path, state: dict[str, Any], *, require_approved: bool = False) -> dict[str, SectionApprovalEvidence]:
+    if not state["sections"]:
+        raise WorkflowError("No sections are registered in deck.yaml")
+    evidence = load_single_section_evidence(root, state)
+    registered = set(state["sections"])
+    discovered = set(evidence)
+    if registered != discovered:
+        raise WorkflowError(
+            f"HTML/state section IDs differ; missing in HTML={sorted(registered - discovered)}, "
+            f"unregistered in HTML={sorted(discovered - registered)}"
+        )
+    for section_id, entry in state["sections"].items():
+        actual_slides = list(evidence[section_id].slide_ids)
+        if entry["slideIds"] != actual_slides:
+            raise WorkflowError(
+                f"Section {section_id!r} slideIds differ from HTML: "
+                f"state={entry['slideIds']}, HTML={actual_slides}"
+            )
+        if entry["status"] == "approved" and entry["approvalDigest"] != evidence[section_id].digest:
+            raise WorkflowError(
+                f"Approved section changed after approval: {section_id}; unlock and review it again"
+            )
+        if require_approved and entry["status"] != "approved":
+            raise WorkflowError(f"Section is not approved: {section_id}")
+    return evidence
+
+
+def validate_html_authoring(root: Path, state: dict[str, Any], *, require_approved: bool = False) -> None:
+    if state.get("schemaVersion") == 2 and state["authoring"]["mode"] in {"single", "imported"}:
+        validate_sections(root, state, require_approved=require_approved)
+    else:
+        validate_chapters(root, state, require_complete=require_approved)
 
 
 def _load_sidecar(path: Path) -> dict[str, Any]:
@@ -848,6 +937,14 @@ def migrate_v1_state(
         raise WorkflowError("Only deck schema v1 can be migrated")
 
     manifest = _migration_manifest(state)
+    manifest_path = root / "sources/source-manifest.yaml"
+    if manifest_path.exists():
+        try:
+            existing_manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise WorkflowError(f"Cannot validate existing source manifest before migration: {exc}") from exc
+        if existing_manifest != manifest:
+            raise WorkflowError("Existing sources/source-manifest.yaml differs from the v1 migration result")
     _validate_v1_late_artifacts(root, state)
     registry, registry_revision_value = _migration_registry_snapshot(root, state, manifest, write=False)
     now = utc_now()
@@ -978,7 +1075,8 @@ def command_migrate(
     _migration_registry_snapshot(root, state, manifest, write=True)
     manifest_path = _repo_path(root, migrated["sources"]["manifest"], field="sources.manifest")
     manifest_payload = yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False).encode("utf-8")
-    _atomic_write_bytes(manifest_path, manifest_payload)
+    if not manifest_path.exists():
+        _atomic_write_bytes(manifest_path, manifest_payload)
     atomic_write_state(root, migrated)
     destination = report_path or (root / "output/migration-report.json")
     _atomic_write_json(destination, report)
@@ -997,6 +1095,8 @@ def command_status(root: Path, state: dict[str, Any], *, as_json: bool) -> None:
     print(f"owner: {workflow['owner']}")
     print(f"source of truth: {workflow['sourceOfTruth']}")
     print(f"current chapter: {workflow['currentChapter'] or '-'}")
+    if state.get("schemaVersion") == 2:
+        print(f"current section: {workflow['currentSection'] or '-'}")
     if workflow.get("blockingReason"):
         print(f"blocking reason: {workflow['blockingReason']}")
 
@@ -1012,6 +1112,8 @@ def command_initialize(root: Path, state: dict[str, Any]) -> None:
 
 def command_configure_chapters(root: Path, state: dict[str, Any], chapter_ids: Iterable[str]) -> None:
     _require_stage(state, "planning", "awaiting_plan_approval")
+    if state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular":
+        raise WorkflowError("configure-chapters is only available in modular authoring mode")
     values = list(dict.fromkeys(chapter_ids))
     if not values or any(not CHAPTER_PATTERN.fullmatch(value) for value in values):
         raise WorkflowError("Chapter IDs must use chapter-XX names")
@@ -1031,11 +1133,35 @@ def command_configure_chapters(root: Path, state: dict[str, Any], chapter_ids: I
     append_work_log(root, "Configured chapters: " + ", ".join(values))
 
 
+def command_configure_sections(root: Path, state: dict[str, Any], section_ids: Iterable[str]) -> None:
+    _require_stage(state, "planning", "awaiting_plan_approval")
+    if state.get("schemaVersion") != 2 or state["authoring"]["mode"] not in {"single", "imported"}:
+        raise WorkflowError("configure-sections requires schema v2 single/imported authoring")
+    values = list(dict.fromkeys(section_ids))
+    if not values or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) for value in values):
+        raise WorkflowError("Section IDs must use stable alphanumeric, dot, underscore, or hyphen names")
+    for existing, entry in state["sections"].items():
+        if existing not in values and entry["status"] != "planned":
+            raise WorkflowError(f"Cannot remove section after authoring has begun: {existing}")
+    state["sections"] = {
+        section_id: state["sections"].get(section_id, {
+            "title": section_id,
+            "status": "planned",
+            "slideIds": [],
+            "approvalDigest": None,
+        })
+        for section_id in values
+    }
+    atomic_write_state(root, state)
+    append_work_log(root, "Configured sections: " + ", ".join(values))
+
+
 def command_submit_plan(root: Path, state: dict[str, Any]) -> None:
     _require_stage(state, "planning")
     validate_planning(root)
-    if not state["chapters"]:
-        raise WorkflowError("Register the planned chapters before requesting approval")
+    planned_units = state["sections"] if state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular" else state["chapters"]
+    if not planned_units:
+        raise WorkflowError("Register the planned sections or chapters before requesting approval")
     _transition(state, "awaiting_plan_approval", "awaiting_approval")
     atomic_write_state(root, state)
     append_work_log(root, "Submitted explanation policy, story outline, and slide plan for approval")
@@ -1044,14 +1170,110 @@ def command_submit_plan(root: Path, state: dict[str, Any]) -> None:
 def command_approve_plan(root: Path, state: dict[str, Any]) -> None:
     _require_stage(state, "awaiting_plan_approval")
     validate_planning(root)
-    if not state["chapters"]:
-        raise WorkflowError("No chapters are configured")
+    single = state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular"
+    planned_units = state["sections"] if single else state["chapters"]
+    if not planned_units:
+        raise WorkflowError("No sections or chapters are configured")
     for key in ("explanationPolicy", "storyOutline", "slidePlan"):
         state["approvals"][key] = "approved"
-    first = next(iter(state["chapters"]))
+    first = next(iter(planned_units))
     _transition(state, "html_authoring", "in_progress", current=first)
     atomic_write_state(root, state)
     append_work_log(root, "Recorded plan approval and opened HTML authoring")
+
+
+def _select_section(state: dict[str, Any], requested: str | None) -> str:
+    if requested:
+        if requested not in state["sections"]:
+            raise WorkflowError(f"Section is not registered: {requested}")
+        return requested
+    current = state["workflow"].get("currentSection")
+    if current and state["sections"][current]["status"] != "approved":
+        return current
+    for section_id, entry in state["sections"].items():
+        if entry["status"] != "approved":
+            return section_id
+    raise WorkflowError("All registered sections are approved")
+
+
+def command_begin_section(root: Path, state: dict[str, Any], requested: str | None) -> None:
+    _require_stage(state, "html_authoring")
+    section_id = _select_section(state, requested)
+    entry = state["sections"][section_id]
+    if entry["status"] not in {"planned", "authoring"}:
+        raise WorkflowError(f"Section cannot enter authoring from status {entry['status']!r}: {section_id}")
+    entry["status"] = "authoring"
+    entry["approvalDigest"] = None
+    _transition(state, "html_authoring", "in_progress", current=section_id)
+    atomic_write_state(root, state)
+    append_work_log(root, f"Began authoring section {section_id}")
+
+
+def command_complete_section(root: Path, state: dict[str, Any], requested: str | None) -> None:
+    _require_stage(state, "html_authoring")
+    section_id = _select_section(state, requested)
+    if state["sections"][section_id]["status"] != "authoring":
+        raise WorkflowError(f"Section is not in authoring: {section_id}")
+    evidence = load_single_section_evidence(root, state)
+    if set(evidence) != set(state["sections"]):
+        raise WorkflowError("Single HTML section IDs must exactly match deck.yaml before review")
+    current = evidence[section_id]
+    entry = state["sections"][section_id]
+    entry["slideIds"] = list(current.slide_ids)
+    entry["status"] = "review"
+    entry["approvalDigest"] = None
+    _transition(state, "html_review", "awaiting_approval", current=section_id)
+    atomic_write_state(root, state)
+    append_work_log(root, f"Validated section {section_id} and requested visual approval")
+
+
+def command_approve_section(root: Path, state: dict[str, Any], requested: str | None) -> None:
+    _require_stage(state, "html_review")
+    section_id = requested or state["workflow"].get("currentSection")
+    if not section_id or section_id not in state["sections"]:
+        raise WorkflowError("No current section is available for visual approval")
+    entry = state["sections"][section_id]
+    if entry["status"] != "review":
+        raise WorkflowError(f"Section is not awaiting visual approval: {section_id}")
+    evidence = load_single_section_evidence(root, state)
+    if set(evidence) != set(state["sections"]):
+        raise WorkflowError("Single HTML section IDs must exactly match deck.yaml before approval")
+    current = evidence[section_id]
+    if entry["slideIds"] != list(current.slide_ids):
+        raise WorkflowError(f"Section slide membership changed during review: {section_id}")
+    # Revalidate every previously approved section. A global CSS/theme edit will
+    # change every digest and cannot silently ride along with one section review.
+    for approved_id, approved in state["sections"].items():
+        if approved["status"] == "approved" and approved["approvalDigest"] != evidence[approved_id].digest:
+            raise WorkflowError(f"Approved section changed after approval: {approved_id}; unlock it first")
+    entry["status"] = "approved"
+    entry["approvalDigest"] = current.digest
+    remaining = [key for key, value in state["sections"].items() if value["status"] != "approved"]
+    if remaining:
+        next_section = remaining[0]
+        state["sections"][next_section]["status"] = "authoring"
+        _transition(state, "html_authoring", "in_progress", current=next_section)
+    else:
+        validate_sections(root, state, require_approved=True)
+        state["handoff"]["readyForCodex"] = True
+        _transition(state, "ready_for_conversion", "ready")
+    atomic_write_state(root, state)
+    append_work_log(root, f"Approved visual composition for section {section_id}")
+
+
+def command_unlock_section(root: Path, state: dict[str, Any], section_id: str) -> None:
+    _require_stage(state, "html_authoring", "html_review", "ready_for_conversion")
+    if section_id not in state["sections"]:
+        raise WorkflowError(f"Section is not registered: {section_id}")
+    entry = state["sections"][section_id]
+    if entry["status"] != "approved":
+        raise WorkflowError(f"Section is not approved: {section_id}")
+    entry["status"] = "authoring"
+    entry["approvalDigest"] = None
+    state["handoff"]["readyForCodex"] = False
+    _transition(state, "html_authoring", "in_progress", current=section_id)
+    atomic_write_state(root, state)
+    append_work_log(root, f"Unlocked section {section_id} for HTML authoring")
 
 
 def _select_chapter(state: dict[str, Any], requested: str | None) -> str:
@@ -1120,7 +1342,7 @@ def command_prepare_conversion(root: Path, state: dict[str, Any]) -> None:
     _require_stage(state, "ready_for_conversion")
     if any(state["approvals"][key] != "approved" for key in ("explanationPolicy", "storyOutline", "slidePlan")):
         raise WorkflowError("Plan approvals are incomplete")
-    validate_chapters(root, state, require_complete=True)
+    validate_html_authoring(root, state, require_approved=True)
     if not state["handoff"]["readyForCodex"]:
         raise WorkflowError("Work-to-Codex handoff is not ready")
     _transition(state, "converting", "in_progress")
@@ -1211,26 +1433,34 @@ def _validate_resume_target(root: Path, state: dict[str, Any], snapshot: dict[st
         discover_source_candidates(root, state)
         if stage == "awaiting_plan_approval":
             validate_planning(root)
-            if not state["chapters"]:
-                raise WorkflowError("Cannot resume plan approval without configured chapters")
+            units = state["sections"] if state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular" else state["chapters"]
+            if not units:
+                raise WorkflowError("Cannot resume plan approval without configured sections or chapters")
         return
     if any(state["approvals"][key] != "approved" for key in ("explanationPolicy", "storyOutline", "slidePlan")):
         raise WorkflowError(f"Cannot resume {stage!r} while plan approvals are incomplete")
-    if not state["chapters"]:
-        raise WorkflowError(f"Cannot resume {stage!r} without configured chapters")
+    single = state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular"
+    units = state["sections"] if single else state["chapters"]
+    if not units:
+        raise WorkflowError(f"Cannot resume {stage!r} without configured sections or chapters")
     if stage == "html_authoring":
         return
     if stage == "html_review":
-        current = snapshot["currentChapter"]
+        current = snapshot["currentSection"] if single else snapshot["currentChapter"]
         if not current:
-            raise WorkflowError("Cannot resume HTML review without a current chapter")
-        entry = state["chapters"][current]
+            raise WorkflowError("Cannot resume HTML review without a current section or chapter")
+        entry = units[current]
         if entry["status"] != "review":
-            raise WorkflowError(f"Chapter is not awaiting review: {current}")
-        _load_chapter(root, current, entry)
+            raise WorkflowError(f"Authoring unit is not awaiting review: {current}")
+        if single:
+            evidence = load_single_section_evidence(root, state)
+            if current not in evidence or list(evidence[current].slide_ids) != entry["slideIds"]:
+                raise WorkflowError(f"Section changed while workflow was blocked: {current}")
+        else:
+            _load_chapter(root, current, entry)
         return
     if stage in {"ready_for_conversion", "converting"}:
-        validate_chapters(root, state, require_complete=True)
+        validate_html_authoring(root, state, require_approved=True)
         if not state["handoff"]["readyForCodex"]:
             raise WorkflowError("Cannot resume conversion because the Work-to-Codex handoff is not ready")
         return
@@ -1271,11 +1501,18 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("initialize")
     configure = commands.add_parser("configure-chapters")
     configure.add_argument("chapters", nargs="+")
+    configure_sections = commands.add_parser("configure-sections")
+    configure_sections.add_argument("sections", nargs="+")
     commands.add_parser("submit-plan")
     commands.add_parser("approve-plan")
     for name in ("begin-chapter", "complete-chapter", "approve-chapter"):
         child = commands.add_parser(name)
         child.add_argument("--chapter")
+    for name in ("begin-section", "complete-section", "approve-section"):
+        child = commands.add_parser(name)
+        child.add_argument("--section")
+    unlock = commands.add_parser("unlock-section")
+    unlock.add_argument("--section", required=True)
     commands.add_parser("prepare-conversion")
     commands.add_parser("mark-converted")
     commands.add_parser("begin-finalization")
@@ -1312,6 +1549,8 @@ def run(args: argparse.Namespace) -> int:
         command_initialize(root, state)
     elif command == "configure-chapters":
         command_configure_chapters(root, state, args.chapters)
+    elif command == "configure-sections":
+        command_configure_sections(root, state, args.sections)
     elif command == "submit-plan":
         command_submit_plan(root, state)
     elif command == "approve-plan":
@@ -1322,6 +1561,14 @@ def run(args: argparse.Namespace) -> int:
         command_complete_chapter(root, state, args.chapter)
     elif command == "approve-chapter":
         command_approve_chapter(root, state, args.chapter)
+    elif command == "begin-section":
+        command_begin_section(root, state, args.section)
+    elif command == "complete-section":
+        command_complete_section(root, state, args.section)
+    elif command == "approve-section":
+        command_approve_section(root, state, args.section)
+    elif command == "unlock-section":
+        command_unlock_section(root, state, args.section)
     elif command == "prepare-conversion":
         command_prepare_conversion(root, state)
     elif command == "mark-converted":

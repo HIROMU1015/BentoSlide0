@@ -10,7 +10,10 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
+import yaml
+
 from scripts.deck_workflow import WorkflowError, atomic_write_state, load_state
+from scripts.deck_workflow import migrate_v1_state
 from scripts.run_html_preview import create_preview_server
 
 
@@ -111,6 +114,72 @@ class HtmlPreviewTests(unittest.TestCase):
         with self.assertRaises(OSError):
             other = create_preview_server(self.root, port=self.server.server_port)
             other.server_close()
+
+
+class SingleHtmlPreviewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "日本語 deck"
+        (self.root / "workflow").mkdir(parents=True)
+        (self.root / "sources").mkdir()
+        (self.root / "deck/assets").mkdir(parents=True)
+        shutil.copy2(ROOT / "deck.yaml", self.root / "deck.yaml")
+        shutil.copy2(ROOT / "workflow/deck.schema.json", self.root / "workflow/deck.schema.json")
+        shutil.copy2(ROOT / "workflow/deck.v1.schema.json", self.root / "workflow/deck.v1.schema.json")
+        (self.root / "REQUEST.md").write_text("# Request\n", encoding="utf-8")
+        (self.root / "sources/source-manifest.yaml").write_text(
+            yaml.safe_dump({"schemaVersion": 1, "authorityMode": "single", "items": []}), encoding="utf-8",
+        )
+        (self.root / "deck/deck.preview.html").write_text(
+            '<section class="slide" data-slide-id="slide-1" data-section-id="intro">Single preview</section>',
+            encoding="utf-8",
+        )
+        (self.root / "deck/assets/theme.css").write_text("body{color:#123456}", encoding="utf-8")
+        (self.root / "deck/deck.registry.json").write_text("{}", encoding="utf-8")
+        state, _, _ = migrate_v1_state(self.root, load_state(self.root), dry_run=True)
+        state["sources"].update(manifest="sources/source-manifest.yaml", authorityMode="single")
+        state["authoring"].update(mode="single", entryHtml="deck/deck.preview.html", registry="deck/deck.registry.json", currentSection="intro")
+        state["chapters"] = {}
+        state["sections"] = {
+            "intro": {"title": "導入", "status": "approved", "slideIds": ["slide-1"], "approvalDigest": "sha256:" + "0" * 64},
+        }
+        state["workflow"].update(
+            stage="html_review", status="awaiting_approval", owner="work", sourceOfTruth="html",
+            currentChapter=None, currentSection="intro", blockingReason=None, blockedFrom=None,
+        )
+        atomic_write_state(self.root, state)
+        self.server = create_preview_server(self.root, port=HtmlPreviewTests.free_port())
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.temporary.cleanup()
+
+    def read(self, path: str) -> tuple[int, str, str]:
+        with urlopen(self.base + path, timeout=3) as response:
+            return response.status, response.headers.get_content_type(), response.read().decode("utf-8")
+
+    def test_index_status_navigation_and_deck_assets(self) -> None:
+        body = self.read("/")[2]
+        self.assertIn("deck/deck.preview.html", body)
+        self.assertIn("#section=intro", body)
+        self.assertIn("#slide=slide-1", body)
+        self.assertIn("Reload", body)
+        payload = json.loads(self.read("/api/status")[2])
+        self.assertEqual(payload["mode"], "single")
+        self.assertEqual(payload["currentSection"], "intro")
+        self.assertEqual(payload["currentSlide"], "slide-1")
+        self.assertEqual(payload["sections"], ["intro"])
+        self.assertEqual(payload["slides"], ["slide-1"])
+        self.assertIn("Single preview", self.read("/deck/deck.preview.html")[2])
+        self.assertIn("#123456", self.read("/deck/assets/theme.css")[2])
+        with self.assertRaises(HTTPError) as captured:
+            urlopen(self.base + "/deck/%2e%2e/deck.yaml", timeout=3)
+        self.assertEqual(captured.exception.code, 404)
 
 
 if __name__ == "__main__":

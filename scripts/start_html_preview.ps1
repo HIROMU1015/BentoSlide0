@@ -70,9 +70,6 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $repository 'deck.yaml') -PathType Leaf)) {
         throw 'deck.yaml was not found.'
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $repository 'chapters') -PathType Container)) {
-        throw 'chapters/ was not found.'
-    }
     New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
     $lockHandle = Enter-BentoFileLock -Repository $repository -Name 'html-preview-launcher.lock'
     if (-not $lockHandle.Acquired) { throw 'Another HTML preview launcher is already working. Try again in a few seconds.' }

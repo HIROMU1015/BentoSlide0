@@ -37,6 +37,18 @@ class RegistryDocumentTests(unittest.TestCase):
         with self.assertRaisesRegex(BentoConverterError, "Unsupported"):
             validate_registry({"format": "future"})
 
+    def test_v2_provenance_requires_a_registered_source(self) -> None:
+        value = {
+            "format": REGISTRY_V2, "unitId": "deck", "sources": {},
+            "assets": {}, "fonts": {}, "equations": {}, "figures": {}, "tables": {},
+            "charts": {"result": {"provenance": {"sourceId": "missing", "locator": "row 1"}}},
+            "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+        }
+        with self.assertRaisesRegex(BentoConverterError, "unknown sourceId"):
+            validate_registry(value)
+        value["sources"]["missing"] = {"path": "sources/results.csv", "type": "dataset"}
+        validate_registry(value)
+
 
 if __name__ == "__main__":
     unittest.main()

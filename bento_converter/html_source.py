@@ -7,17 +7,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .errors import JsonLoadError, ValidationError, issue
+from .errors import BentoConverterError, JsonLoadError, ValidationError, issue
+from .registry_document import REGISTRY_V1, REGISTRY_V2, validate_registry
 
-REGISTRY_FORMAT = "bento/html-registry/v1"
+REGISTRY_FORMAT = REGISTRY_V1
 
 
 @dataclass(frozen=True)
-class SourceChapter:
+class SourceUnit:
     chapter_id: str
     html_path: Path
     registry_path: Path
     registry: dict[str, Any]
+
+    @property
+    def unit_id(self) -> str:
+        return self.chapter_id
+
+
+# Public compatibility alias. The converter still uses ``chapter_id`` internally
+# because the computed-layout report format predates single-file source units.
+SourceChapter = SourceUnit
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -37,7 +47,42 @@ def _registry_name(html_path: Path) -> str:
     return html_path.stem + ".registry.json"
 
 
-def discover_chapters(html_dir: str | Path, registry_dir: str | Path) -> list[SourceChapter]:
+def _validate_source_registry(registry: dict[str, Any], *, expected_unit: str | None = None) -> tuple[str | None, list[str]]:
+    errors: list[str] = []
+    try:
+        validate_registry(registry, allow_v1=True)
+    except BentoConverterError as exc:
+        return None, [f"{exc}; use {REGISTRY_V1!r} or {REGISTRY_V2!r}"]
+    unit_id = registry.get("unitId") if registry.get("format") == REGISTRY_V2 else registry.get("chapterId")
+    label = "unitId" if registry.get("format") == REGISTRY_V2 else "chapterId"
+    if not isinstance(unit_id, str) or not unit_id.strip():
+        errors.append(issue(field=label, actual=unit_id, fix="Provide a non-empty source unit id."))
+    elif expected_unit is not None and unit_id != expected_unit:
+        errors.append(issue(field=label, actual=unit_id, fix=f"Use {expected_unit!r}."))
+    for equation_id, equation in registry.get("equations", {}).items():
+        if not isinstance(equation, dict) or not isinstance(equation.get("latex"), str) or not equation["latex"].strip():
+            errors.append(issue(element_id=equation_id, field="equations.*.latex", actual=equation, fix="Provide the original non-empty LaTeX source."))
+    return unit_id if isinstance(unit_id, str) else None, errors
+
+
+def discover_source_unit(html: str | Path, registry: str | Path) -> SourceUnit:
+    """Load one explicit HTML/registry pair as a normalized source unit."""
+
+    html_path = Path(html)
+    registry_path = Path(registry)
+    if not html_path.is_file():
+        raise JsonLoadError(f"HTML source does not exist: {html_path}")
+    if not registry_path.is_file():
+        raise JsonLoadError(f"Registry source does not exist: {registry_path}")
+    document = _load_json(registry_path)
+    unit_id, errors = _validate_source_registry(document)
+    if errors:
+        raise ValidationError(errors)
+    assert unit_id is not None
+    return SourceUnit(unit_id, html_path.resolve(), registry_path.resolve(), document)
+
+
+def discover_chapters(html_dir: str | Path, registry_dir: str | Path) -> list[SourceUnit]:
     html_root = Path(html_dir)
     registry_root = Path(registry_dir)
     if not html_root.is_dir():
@@ -51,7 +96,7 @@ def discover_chapters(html_dir: str | Path, registry_dir: str | Path) -> list[So
     if not html_paths:
         raise JsonLoadError(f"No chapter HTML files found in {html_root}")
 
-    chapters: list[SourceChapter] = []
+    chapters: list[SourceUnit] = []
     errors: list[str] = []
     chapter_ids: set[str] = set()
     for html_path in html_paths:
@@ -62,33 +107,28 @@ def discover_chapters(html_dir: str | Path, registry_dir: str | Path) -> list[So
             )
             continue
         registry = _load_json(registry_path)
-        chapter_id = registry.get("chapterId")
+        chapter_id, registry_errors = _validate_source_registry(registry)
+        errors.extend(registry_errors)
         if registry.get("format") != REGISTRY_FORMAT:
-            errors.append(issue(field="format", actual=registry.get("format"), fix=f"Use {REGISTRY_FORMAT!r}."))
-        if not isinstance(chapter_id, str) or not chapter_id.strip():
-            errors.append(issue(field="chapterId", actual=chapter_id, fix="Provide a non-empty chapter id."))
+            errors.append(issue(field="format", actual=registry.get("format"), fix=f"Use {REGISTRY_FORMAT!r} for modular chapter discovery."))
+        if not chapter_id:
             continue
         if chapter_id in chapter_ids:
             errors.append(issue(field="chapterId", actual=chapter_id, fix="Use a unique chapter id."))
             continue
         chapter_ids.add(chapter_id)
-        for collection in ("assets", "fonts", "equations", "figures", "tables", "charts"):
-            if collection in registry and not isinstance(registry[collection], dict):
-                errors.append(issue(field=collection, actual=registry[collection], fix="Use an object keyed by stable registry id."))
-        for equation_id, equation in registry.get("equations", {}).items():
-            if not isinstance(equation, dict) or not isinstance(equation.get("latex"), str) or not equation["latex"].strip():
-                errors.append(issue(element_id=equation_id, field="equations.*.latex", actual=equation, fix="Provide the original non-empty LaTeX source."))
-        chapters.append(SourceChapter(chapter_id, html_path.resolve(), registry_path.resolve(), registry))
+        chapters.append(SourceUnit(chapter_id, html_path.resolve(), registry_path.resolve(), registry))
     if errors:
         raise ValidationError(errors)
     return chapters
 
 
-def merge_registries(chapters: list[SourceChapter]) -> dict[str, Any]:
+def merge_registries(chapters: list[SourceUnit]) -> dict[str, Any]:
     """Merge chapter registries while rejecting ambiguous global identifiers."""
 
+    use_v2 = any(chapter.registry.get("format") == REGISTRY_V2 for chapter in chapters)
     merged: dict[str, Any] = {
-        "format": REGISTRY_FORMAT,
+        "format": REGISTRY_V2 if use_v2 else REGISTRY_FORMAT,
         "document": {},
         "assets": {},
         "fonts": {},
@@ -98,8 +138,18 @@ def merge_registries(chapters: list[SourceChapter]) -> dict[str, Any]:
         "charts": {},
         "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
     }
+    if use_v2:
+        merged["unitId"] = chapters[0].unit_id if len(chapters) == 1 else "deck"
+        merged["sources"] = {}
     errors: list[str] = []
     for chapter in chapters:
+        if use_v2:
+            for source_id, source in chapter.registry.get("sources", {}).items():
+                previous = merged["sources"].get(source_id)
+                if previous is not None and previous != source:
+                    errors.append(issue(element_id=source_id, field="sources", actual=source, fix="Use globally unique source ids or identical definitions."))
+                else:
+                    merged["sources"][source_id] = source
         document = chapter.registry.get("document", {})
         if document and not isinstance(document, dict):
             errors.append(issue(field=f"{chapter.chapter_id}.document", actual=document, fix="Use an object."))
