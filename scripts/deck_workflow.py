@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import os
 import re
@@ -19,6 +21,13 @@ from jsonschema import Draft202012Validator, FormatChecker
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.html_document import extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
 from bento_converter.html_source import REGISTRY_FORMAT
+from bento_converter.registry_document import (
+    canonical_registry_json,
+    load_registry,
+    normalize_registry,
+    registry_revision,
+    validate_registry,
+)
 from bento_converter.work_editor_storage import (
     WorkEditorStorage,
     document_revision,
@@ -29,7 +38,9 @@ from bento_converter.work_editor_storage import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_RELATIVE = Path("workflow/deck.schema.json")
+LEGACY_SCHEMA_RELATIVE = Path("workflow/deck.v1.schema.json")
 STATE_RELATIVE = Path("deck.yaml")
+SOURCE_MANIFEST_FORMAT = 1
 CHAPTER_PATTERN = re.compile(r"^chapter-[0-9]{2,}$")
 PLAN_FILES = {
     "explanationPolicy": Path("planning/explanation-policy.md"),
@@ -45,6 +56,8 @@ STAGE_OWNER = {
     "ready_for_conversion": "codex",
     "converting": "codex",
     "bento_validation": "codex",
+    "bento_authoring": "work",
+    "content_review": "work",
     "bento_finalization": "work",
     "complete": "codex",
 }
@@ -52,13 +65,23 @@ STAGE_SOURCE = {
     "initialized": "sources",
     "planning": "planning",
     "awaiting_plan_approval": "planning",
+    "html_authoring": "html",
+    "html_review": "html",
+    "ready_for_conversion": "html",
+    "converting": "html",
+    "bento_validation": "generated",
+    "bento_authoring": "authoring",
+    "content_review": "authoring",
+    "bento_finalization": "final",
+    "complete": "final",
+}
+
+LEGACY_STAGE_SOURCE = {
+    **STAGE_SOURCE,
     "html_authoring": "chapters",
     "html_review": "chapters",
     "ready_for_conversion": "chapters",
     "converting": "chapters",
-    "bento_validation": "generated",
-    "bento_finalization": "final",
-    "complete": "final",
 }
 
 
@@ -143,6 +166,13 @@ def _final_baseline_path(root: Path, state: dict[str, Any]) -> Path:
     return final_html.parent / "revisions" / f"{stem}.baseline.bento.json"
 
 
+def _final_registry_baseline_path(root: Path, state: dict[str, Any]) -> Path:
+    final_html = _repo_path(root, state["outputs"]["finalHtml"], field="outputs.finalHtml")
+    name = final_html.name
+    stem = name[: -len(".bento.html")] if name.endswith(".bento.html") else final_html.stem
+    return final_html.parent / "revisions" / f"{stem}.baseline.registry.json"
+
+
 def _read_json(path: Path, *, label: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -151,6 +181,84 @@ def _read_json(path: Path, *, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WorkflowError(f"{label} root must be an object: {path}")
     return value
+
+
+def _atomic_write_bytes(destination: Path, payload: bytes) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent, delete=False,
+    )
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _atomic_write_json(destination: Path, value: dict[str, Any]) -> None:
+    payload = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    _atomic_write_bytes(destination, payload)
+
+
+def load_source_manifest(root: Path, state: dict[str, Any], *, require_exists: bool = True) -> dict[str, Any]:
+    if state.get("schemaVersion") != 2:
+        raise WorkflowError("Source manifests require deck schema v2")
+    path = _repo_path(root, state["sources"]["manifest"], field="sources.manifest")
+    if not path.is_file():
+        if require_exists:
+            raise WorkflowError(f"Source manifest does not exist: {state['sources']['manifest']}")
+        return {"schemaVersion": SOURCE_MANIFEST_FORMAT, "authorityMode": state["sources"]["authorityMode"], "items": []}
+    try:
+        manifest = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise WorkflowError(f"Cannot read source manifest {path}: {exc}") from exc
+    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != SOURCE_MANIFEST_FORMAT:
+        raise WorkflowError("Source manifest schemaVersion must be 1")
+    if manifest.get("authorityMode") not in {"single", "multiple", "imported"}:
+        raise WorkflowError("Source manifest authorityMode is invalid")
+    if manifest["authorityMode"] != state["sources"]["authorityMode"]:
+        raise WorkflowError("Source manifest authorityMode differs from deck.yaml")
+    items = manifest.get("items")
+    if not isinstance(items, list):
+        raise WorkflowError("Source manifest items must be an array")
+    seen: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise WorkflowError(f"Source manifest item {index} must be an object")
+        source_id = item.get("id")
+        if not isinstance(source_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source_id):
+            raise WorkflowError(f"Source manifest item {index} has an invalid id")
+        if source_id in seen:
+            raise WorkflowError(f"Duplicate source manifest id: {source_id}")
+        seen.add(source_id)
+        source_path = item.get("path")
+        if not isinstance(source_path, str) or not source_path:
+            raise WorkflowError(f"Source manifest item {source_id!r} requires a path")
+        _repo_path(root, source_path, field=f"sources.items[{index}].path")
+        if not isinstance(item.get("type"), str) or not item["type"]:
+            raise WorkflowError(f"Source manifest item {source_id!r} requires a type")
+        if item.get("role") not in {"primary", "evidence", "reference", "supplementary", "imported"}:
+            raise WorkflowError(f"Source manifest item {source_id!r} has an invalid role")
+    if manifest["authorityMode"] == "single":
+        primaries = [item for item in items if item.get("role") == "primary"]
+        if len(primaries) > 1:
+            raise WorkflowError("Single-authority source manifest has multiple primary items")
+    return manifest
+
+
+def content_approval_digest(document_revision_value: str, registry_revision_value: str) -> str:
+    for label, value in (("document", document_revision_value), ("registry", registry_revision_value)):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise WorkflowError(f"Invalid {label} revision for content approval")
+    payload = (
+        "bento/content-approval/v1\0" + document_revision_value + "\0" + registry_revision_value
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 def load_state(root: Path) -> dict[str, Any]:
@@ -166,7 +274,10 @@ def load_state(root: Path) -> dict[str, Any]:
 
 
 def validate_state(root: Path, state: dict[str, Any]) -> None:
-    schema_path = root / SCHEMA_RELATIVE
+    version = state.get("schemaVersion")
+    if version not in {1, 2}:
+        raise WorkflowError(f"Unsupported deck.yaml schemaVersion: {version!r}")
+    schema_path = root / (LEGACY_SCHEMA_RELATIVE if version == 1 else SCHEMA_RELATIVE)
     schema = _read_json(schema_path, label="deck schema")
     errors = sorted(
         Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(state),
@@ -181,14 +292,21 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
 
     workflow = state["workflow"]
     stage = workflow["stage"]
+    stage_sources = LEGACY_STAGE_SOURCE if version == 1 else STAGE_SOURCE
     if stage != "blocked":
         if workflow["owner"] != STAGE_OWNER[stage]:
             raise WorkflowError(f"workflow.owner must be {STAGE_OWNER[stage]!r} for stage {stage!r}")
-        if workflow["sourceOfTruth"] != STAGE_SOURCE[stage]:
-            raise WorkflowError(f"workflow.sourceOfTruth must be {STAGE_SOURCE[stage]!r} for stage {stage!r}")
+        if workflow["sourceOfTruth"] != stage_sources[stage]:
+            raise WorkflowError(f"workflow.sourceOfTruth must be {stage_sources[stage]!r} for stage {stage!r}")
     current = workflow["currentChapter"]
     if current is not None and current not in state["chapters"]:
         raise WorkflowError(f"workflow.currentChapter is not registered: {current}")
+    if version == 2:
+        current_section = workflow["currentSection"]
+        if current_section is not None and current_section not in state["sections"]:
+            raise WorkflowError(f"workflow.currentSection is not registered: {current_section}")
+        if state["authoring"]["currentSection"] != current_section:
+            raise WorkflowError("authoring.currentSection must match workflow.currentSection")
     blocked_from = workflow.get("blockedFrom")
     if stage == "blocked":
         if not workflow["blockingReason"]:
@@ -200,14 +318,17 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
             raise WorkflowError(f"workflow.blockedFrom.stage cannot be {previous_stage!r}")
         if blocked_from["owner"] != STAGE_OWNER[previous_stage]:
             raise WorkflowError("workflow.blockedFrom.owner does not match its stage")
-        if blocked_from["sourceOfTruth"] != STAGE_SOURCE[previous_stage]:
+        if blocked_from["sourceOfTruth"] != stage_sources[previous_stage]:
             raise WorkflowError("workflow.blockedFrom.sourceOfTruth does not match its stage")
         previous_current = blocked_from["currentChapter"]
         if previous_current is not None and previous_current not in state["chapters"]:
             raise WorkflowError(f"workflow.blockedFrom.currentChapter is not registered: {previous_current}")
+        if version == 2:
+            previous_section = blocked_from["currentSection"]
+            if previous_section is not None and previous_section not in state["sections"]:
+                raise WorkflowError(f"workflow.blockedFrom.currentSection is not registered: {previous_section}")
     elif workflow["blockingReason"] is not None or blocked_from is not None:
         raise WorkflowError("workflow.blockingReason and blockedFrom must be null outside the blocked stage")
-
     for field in ("request",):
         _repo_path(root, state["project"][field], field=f"project.{field}")
     if state["project"]["primarySource"]:
@@ -219,21 +340,68 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
             raise WorkflowError(f"Invalid chapter id: {chapter_id}")
         _repo_path(root, chapter["html"], field=f"chapters.{chapter_id}.html")
         _repo_path(root, chapter["registry"], field=f"chapters.{chapter_id}.registry")
+    if version == 2:
+        manifest_path = _repo_path(root, state["sources"]["manifest"], field="sources.manifest")
+        if manifest_path.is_file():
+            load_source_manifest(root, state)
+        mode = state["authoring"]["mode"]
+        if mode == "modular":
+            if state["authoring"]["entryHtml"] is not None or state["authoring"]["registry"] is not None:
+                raise WorkflowError("Modular authoring must use chapters rather than authoring.entryHtml/registry")
+        else:
+            if state["authoring"]["entryHtml"] is None or state["authoring"]["registry"] is None:
+                raise WorkflowError(f"{mode} authoring requires entryHtml and registry")
+            _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+            _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
     resolved_outputs = {
         field: _repo_path(root, value, field=f"outputs.{field}")
-        for field, value in state["outputs"].items()
+        for field, value in state["outputs"].items() if value is not None
     }
     if len(set(resolved_outputs.values())) != len(resolved_outputs):
-        raise WorkflowError("Generated/final HTML and JSON output paths must be distinct")
+        raise WorkflowError("Generated/authoring/final Bento and registry output paths must be distinct")
     if resolved_outputs["generatedJson"] != _sidecar_path(resolved_outputs["generatedHtml"]):
         raise WorkflowError("outputs.generatedJson must be the sidecar path derived from outputs.generatedHtml")
     if resolved_outputs["finalJson"] != _sidecar_path(resolved_outputs["finalHtml"]):
         raise WorkflowError("outputs.finalJson must be the sidecar path derived from outputs.finalHtml")
+    if version == 2:
+        authoring_values = [state["outputs"][field] for field in ("authoringHtml", "authoringJson", "authoringRegistry")]
+        if any(value is None for value in authoring_values) and not all(value is None for value in authoring_values):
+            raise WorkflowError("Authoring HTML, JSON, and registry paths must all be set or all be null")
+        late_compatibility = state["migration"]["lateStageCompatibility"]
+        if all(value is None for value in authoring_values):
+            late_stage = stage in {"bento_finalization", "complete"} or (
+                stage == "blocked" and blocked_from["stage"] == "bento_finalization"
+            )
+            if not late_compatibility or not late_stage:
+                raise WorkflowError("Authoring outputs may be null only for migrated late-stage decks")
+        else:
+            if resolved_outputs["authoringJson"] != _sidecar_path(resolved_outputs["authoringHtml"]):
+                raise WorkflowError("outputs.authoringJson must be the sidecar path derived from outputs.authoringHtml")
+        if state["outputs"]["finalRegistry"] is None:
+            raise WorkflowError("outputs.finalRegistry is required in schema v2")
+        approval = state["approvals"]["bentoContent"]
+        approval_values = (
+            approval["documentRevision"], approval["registryRevision"],
+            approval["approvalDigest"], approval["approvedAt"],
+        )
+        if approval["status"] == "pending" and any(value is not None for value in approval_values):
+            raise WorkflowError("Pending Bento content approval must not retain revision metadata")
+        if approval["status"] == "approved":
+            if any(value is None for value in approval_values):
+                raise WorkflowError("Approved Bento content requires document/registry revisions, digest, and timestamp")
+            expected_digest = content_approval_digest(approval["documentRevision"], approval["registryRevision"])
+            if approval["approvalDigest"] != expected_digest:
+                raise WorkflowError("Bento content approval digest does not match its revisions")
     baseline = state["validation"].get("finalBaseline")
     if baseline is not None:
-        baseline_path = _repo_path(root, baseline["path"], field="validation.finalBaseline.path")
+        document_field = "path" if version == 1 else "documentPath"
+        baseline_path = _repo_path(root, baseline[document_field], field=f"validation.finalBaseline.{document_field}")
         if baseline_path != _final_baseline_path(root, state):
-            raise WorkflowError("validation.finalBaseline.path does not match outputs.finalHtml")
+            raise WorkflowError(f"validation.finalBaseline.{document_field} does not match outputs.finalHtml")
+        if version == 2:
+            registry_path = _repo_path(root, baseline["registryPath"], field="validation.finalBaseline.registryPath")
+            if registry_path != _final_registry_baseline_path(root, state):
+                raise WorkflowError("validation.finalBaseline.registryPath does not match outputs.finalHtml")
     current_url = state["preview"]["currentUrl"]
     if current_url:
         port = int(current_url.rsplit(":", 1)[1].rstrip("/"))
@@ -279,8 +447,13 @@ def _transition(state: dict[str, Any], stage: str, status: str, *, current: str 
     workflow["stage"] = stage
     workflow["status"] = status
     workflow["owner"] = STAGE_OWNER[stage]
-    workflow["sourceOfTruth"] = STAGE_SOURCE[stage]
+    workflow["sourceOfTruth"] = (
+        LEGACY_STAGE_SOURCE[stage] if state.get("schemaVersion") == 1 else STAGE_SOURCE[stage]
+    )
     workflow["currentChapter"] = current
+    if state.get("schemaVersion") == 2:
+        workflow["currentSection"] = current
+        state["authoring"]["currentSection"] = current
     workflow["blockingReason"] = None
     workflow["blockedFrom"] = None
 
@@ -547,6 +720,271 @@ def validate_output_bundle(
     return result
 
 
+def _source_type(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    return {
+        ".pdf": "paper", ".md": "document", ".markdown": "document",
+        ".txt": "document", ".html": "html", ".htm": "html",
+        ".json": "dataset", ".csv": "dataset", ".tsv": "dataset",
+        ".png": "image", ".jpg": "image", ".jpeg": "image", ".svg": "image",
+    }.get(suffix, "document")
+
+
+def _migration_manifest(state: dict[str, Any]) -> dict[str, Any]:
+    items: list[dict[str, str]] = []
+    used: set[str] = set()
+
+    def add(path: str, role: str, preferred_id: str) -> None:
+        source_id = preferred_id
+        suffix = 2
+        while source_id in used:
+            source_id = f"{preferred_id}-{suffix}"
+            suffix += 1
+        used.add(source_id)
+        items.append({"id": source_id, "path": path, "type": _source_type(path), "role": role})
+
+    primary = state["project"].get("primarySource")
+    if primary:
+        add(primary, "primary", "primary-source")
+    for index, path in enumerate(state["project"].get("supplementarySources", []), start=1):
+        add(path, "supplementary", f"supplementary-{index}")
+    return {"schemaVersion": 1, "authorityMode": "single", "items": items}
+
+
+def _migration_sections(state: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for chapter_id, chapter in state["chapters"].items():
+        approved = chapter["status"] == "complete" and chapter["visualApproval"] == "approved"
+        status = "approved" if approved else chapter["status"]
+        if status == "complete":
+            status = "review"
+        result[chapter_id] = {
+            "title": chapter_id,
+            "status": status,
+            "slideIds": [],
+            "approvalDigest": None,
+        }
+    return result
+
+
+def _migrated_stage_source(stage: str) -> str:
+    return STAGE_SOURCE[stage]
+
+
+def _migration_registry_snapshot(
+    root: Path, state: dict[str, Any], source_manifest: dict[str, Any], *, write: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    stage = state["workflow"]["stage"]
+    previous_stage = state["workflow"].get("blockedFrom", {}).get("stage") if stage == "blocked" else None
+    needs_snapshot = stage in {"bento_validation", "bento_finalization", "complete"} or previous_stage in {
+        "bento_validation", "bento_finalization",
+    }
+    if not needs_snapshot:
+        return None, None
+    generated_html = _repo_path(root, state["outputs"]["generatedHtml"], field="outputs.generatedHtml")
+    registry_path = generated_html.parent / "diagnostics" / "merged-registry.json"
+    if not registry_path.is_file():
+        raise WorkflowError(f"Late-stage migration requires merged registry: {registry_path}")
+    try:
+        registry = load_registry(registry_path)
+        normalized = normalize_registry(registry, unit_id="deck", source_manifest=source_manifest)
+        validate_registry(normalized, allow_v1=False)
+    except BentoConverterError as exc:
+        raise WorkflowError(f"Late-stage merged registry validation failed: {exc}") from exc
+    if write:
+        final_html = _repo_path(root, state["outputs"]["finalHtml"], field="outputs.finalHtml")
+        final_registry = final_html.with_name(
+            final_html.name[: -len(".bento.html")] + ".registry.json"
+            if final_html.name.endswith(".bento.html") else final_html.stem + ".registry.json"
+        )
+        baseline_registry = _final_registry_baseline_path(root, {
+            "outputs": {"finalHtml": final_html.relative_to(root).as_posix()}
+        })
+        payload = (json.dumps(normalized, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+        _atomic_write_bytes(final_registry, payload)
+        _atomic_write_bytes(baseline_registry, payload)
+    return normalized, registry_revision(normalized)
+
+
+def _validate_v1_late_artifacts(root: Path, state: dict[str, Any]) -> None:
+    stage = state["workflow"]["stage"]
+    previous_stage = state["workflow"].get("blockedFrom", {}).get("stage") if stage == "blocked" else None
+    if stage not in {"bento_validation", "bento_finalization", "complete"} and previous_stage not in {
+        "bento_validation", "bento_finalization",
+    }:
+        return
+    outputs = state["outputs"]
+    final_html_path = _repo_path(root, outputs["finalHtml"], field="outputs.finalHtml")
+    final_json_path = _repo_path(root, outputs["finalJson"], field="outputs.finalJson")
+    if not final_html_path.is_file() or not final_json_path.is_file():
+        raise WorkflowError("Late-stage migration requires the existing final HTML/JSON pair")
+    final_document = extract_bento_doc(load_html(final_html_path))
+    if final_document != _load_sidecar(final_json_path):
+        raise WorkflowError("Late-stage migration final HTML and JSON sidecar differ")
+    validate_bento_doc(final_document)
+    baseline = state["validation"].get("finalBaseline")
+    if not isinstance(baseline, dict):
+        raise WorkflowError("Late-stage migration requires the existing final baseline")
+    baseline_path = _repo_path(root, baseline["path"], field="validation.finalBaseline.path")
+    if not baseline_path.is_file():
+        raise WorkflowError(f"Late-stage migration baseline does not exist: {baseline['path']}")
+    baseline_document = _load_sidecar(baseline_path)
+    if document_revision(baseline_document) != baseline["documentRevision"]:
+        raise WorkflowError("Late-stage migration baseline revision does not match deck.yaml")
+    if protected_content_fingerprint(baseline_document) != baseline["protectedContentFingerprint"]:
+        raise WorkflowError("Late-stage migration baseline fingerprint does not match deck.yaml")
+
+
+def migrate_v1_state(
+    root: Path, state: dict[str, Any], *, dry_run: bool,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    if state.get("schemaVersion") == 2:
+        report = {
+            "format": "bento/deck-migration-report/v1", "changed": False,
+            "fromSchemaVersion": 2, "toSchemaVersion": 2, "dryRun": dry_run,
+        }
+        return copy.deepcopy(state), report, load_source_manifest(root, state, require_exists=False)
+    if state.get("schemaVersion") != 1:
+        raise WorkflowError("Only deck schema v1 can be migrated")
+
+    manifest = _migration_manifest(state)
+    _validate_v1_late_artifacts(root, state)
+    registry, registry_revision_value = _migration_registry_snapshot(root, state, manifest, write=False)
+    now = utc_now()
+    stage = state["workflow"]["stage"]
+    blocked_from = copy.deepcopy(state["workflow"].get("blockedFrom"))
+    late_stage = stage in {"bento_finalization", "complete"} or (
+        stage == "blocked" and isinstance(blocked_from, dict) and blocked_from["stage"] == "bento_finalization"
+    )
+    outputs = state["outputs"]
+    final_html = Path(outputs["finalHtml"])
+    final_registry = final_html.with_name(
+        final_html.name[: -len(".bento.html")] + ".registry.json"
+        if final_html.name.endswith(".bento.html") else final_html.stem + ".registry.json"
+    ).as_posix()
+    migrated_workflow = copy.deepcopy(state["workflow"])
+    migrated_workflow["sourceOfTruth"] = (
+        _migrated_stage_source(blocked_from["stage"]) if stage == "blocked"
+        else _migrated_stage_source(stage)
+    )
+    migrated_workflow["currentSection"] = migrated_workflow.get("currentChapter")
+    if blocked_from is not None:
+        blocked_from["sourceOfTruth"] = _migrated_stage_source(blocked_from["stage"])
+        blocked_from["currentSection"] = blocked_from.get("currentChapter")
+        migrated_workflow["blockedFrom"] = blocked_from
+    baseline = state["validation"].get("finalBaseline")
+    migrated_baseline = None
+    if baseline is not None:
+        if registry_revision_value is None:
+            raise WorkflowError("A v1 final baseline cannot migrate without a validated merged registry")
+        migrated_baseline = {
+            "documentPath": baseline["path"],
+            "documentRevision": baseline["documentRevision"],
+            "registryPath": _final_registry_baseline_path(root, {
+                "outputs": {"finalHtml": outputs["finalHtml"]}
+            }).relative_to(root).as_posix(),
+            "registryRevision": registry_revision_value,
+            "protectedContentFingerprint": baseline["protectedContentFingerprint"],
+        }
+    approved_content = late_stage and baseline is not None and registry_revision_value is not None
+    bento_content = {
+        "status": "approved" if approved_content else "pending",
+        "documentRevision": baseline["documentRevision"] if approved_content else None,
+        "registryRevision": registry_revision_value if approved_content else None,
+        "approvalDigest": (
+            content_approval_digest(baseline["documentRevision"], registry_revision_value)
+            if approved_content else None
+        ),
+        "approvedAt": now if approved_content else None,
+    }
+    migrated = {
+        "schemaVersion": 2,
+        "project": {
+            "kind": "paper_explanation",
+            "title": state["project"]["title"],
+            "request": state["project"]["request"],
+            "primarySource": state["project"]["primarySource"],
+            "supplementarySources": state["project"]["supplementarySources"],
+        },
+        "sources": {"manifest": "sources/source-manifest.yaml", "authorityMode": manifest["authorityMode"]},
+        "authoring": {
+            "mode": "modular", "entryHtml": None, "registry": None,
+            "currentSection": migrated_workflow["currentSection"],
+        },
+        "workflow": migrated_workflow,
+        "approvals": {
+            **state["approvals"],
+            "bentoContent": bento_content,
+        },
+        "sections": _migration_sections(state),
+        "chapters": copy.deepcopy(state["chapters"]),
+        "handoff": {
+            "readyForCodex": state["handoff"]["readyForCodex"],
+            "readyForBentoAuthoring": stage == "bento_authoring",
+            "readyForContentReview": stage == "content_review",
+            "readyForFinalEditing": state["handoff"]["readyForFinalEditing"],
+        },
+        "outputs": {
+            "generatedHtml": outputs["generatedHtml"],
+            "generatedJson": outputs["generatedJson"],
+            "generatedRegistry": str(Path(outputs["generatedHtml"]).parent / "diagnostics/merged-registry.json").replace("\\", "/"),
+            "authoringHtml": None if late_stage else "output/presentation.authoring.bento.html",
+            "authoringJson": None if late_stage else "output/presentation.authoring.bento.json",
+            "authoringRegistry": None if late_stage else "output/presentation.authoring.registry.json",
+            "finalHtml": outputs["finalHtml"],
+            "finalJson": outputs["finalJson"],
+            "finalRegistry": final_registry,
+        },
+        "preview": copy.deepcopy(state["preview"]),
+        "validation": {
+            "finalStatus": state["validation"]["finalStatus"],
+            "checkedAt": state["validation"]["checkedAt"],
+            "finalBaseline": migrated_baseline,
+        },
+        "migration": {
+            "fromSchemaVersion": 1,
+            "migratedAt": now,
+            "lateStageCompatibility": late_stage,
+        },
+    }
+    validate_state(root, migrated)
+    report = {
+        "format": "bento/deck-migration-report/v1",
+        "changed": True,
+        "fromSchemaVersion": 1,
+        "toSchemaVersion": 2,
+        "dryRun": dry_run,
+        "stage": stage,
+        "authoringMode": "modular",
+        "lateStageCompatibility": late_stage,
+        "sourceManifestItems": len(manifest["items"]),
+        "registryRevision": registry_revision_value,
+    }
+    return migrated, report, manifest
+
+
+def command_migrate(
+    root: Path, state: dict[str, Any], *, dry_run: bool, report_path: Path | None,
+) -> None:
+    migrated, report, manifest = migrate_v1_state(root, state, dry_run=dry_run)
+    if dry_run or not report["changed"]:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    original_state = (root / STATE_RELATIVE).read_bytes()
+    backup = root / "deck.v1.backup.yaml"
+    if backup.exists() and backup.read_bytes() != original_state:
+        raise WorkflowError(f"Migration backup already exists with different content: {backup}")
+    _atomic_write_bytes(backup, original_state)
+    _migration_registry_snapshot(root, state, manifest, write=True)
+    manifest_path = _repo_path(root, migrated["sources"]["manifest"], field="sources.manifest")
+    manifest_payload = yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False).encode("utf-8")
+    _atomic_write_bytes(manifest_path, manifest_payload)
+    atomic_write_state(root, migrated)
+    destination = report_path or (root / "output/migration-report.json")
+    _atomic_write_json(destination, report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
 def command_status(root: Path, state: dict[str, Any], *, as_json: bool) -> None:
     if as_json:
         # ASCII-safe JSON survives Windows PowerShell 5 native-process decoding;
@@ -758,6 +1196,8 @@ def command_block(root: Path, state: dict[str, Any], owner: str, reason: str) ->
         "sourceOfTruth": workflow["sourceOfTruth"],
         "currentChapter": workflow["currentChapter"],
     }
+    if state.get("schemaVersion") == 2:
+        workflow["blockedFrom"]["currentSection"] = workflow["currentSection"]
     workflow.update({"stage": "blocked", "status": "blocked", "owner": owner, "blockingReason": reason})
     atomic_write_state(root, state)
     append_work_log(root, f"Blocked ({owner}): {reason}")
@@ -825,6 +1265,9 @@ def parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", dest="as_json")
     commands.add_parser("validate")
+    migrate = commands.add_parser("migrate")
+    migrate.add_argument("--dry-run", action="store_true")
+    migrate.add_argument("--report", type=Path)
     commands.add_parser("initialize")
     configure = commands.add_parser("configure-chapters")
     configure.add_argument("chapters", nargs="+")
@@ -858,6 +1301,9 @@ def run(args: argparse.Namespace) -> int:
         command_status(root, state, as_json=args.as_json)
     elif command == "validate":
         print("deck.yaml: PASS")
+    elif command == "migrate":
+        report_path = _repo_path(root, str(args.report), field="migration.report") if args.report else None
+        command_migrate(root, state, dry_run=args.dry_run, report_path=report_path)
     elif command == "discover-sources":
         selected, candidates = discover_source_candidates(root, state)
         payload = {"primarySource": selected.relative_to(root).as_posix() if selected else None, "candidates": [path.relative_to(root).as_posix() for path in candidates]}

@@ -1,44 +1,67 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/HIROMU1015/BentoSlide0/workflow/deck.schema.json",
-  "title": "BentoSlide local workflow state",
+  "title": "BentoSlide local workflow state v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "project", "workflow", "approvals", "chapters", "handoff", "outputs", "preview", "validation"],
+  "required": ["schemaVersion", "project", "sources", "authoring", "workflow", "approvals", "sections", "chapters", "handoff", "outputs", "preview", "validation", "migration"],
   "properties": {
-    "schemaVersion": {"const": 1},
+    "schemaVersion": {"const": 2},
     "project": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["title", "request", "primarySource", "supplementarySources"],
+      "required": ["kind", "title", "request", "primarySource", "supplementarySources"],
       "properties": {
+        "kind": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"},
         "title": {"type": ["string", "null"]},
         "request": {"type": "string", "minLength": 1},
         "primarySource": {"type": ["string", "null"]},
         "supplementarySources": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
       }
     },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "authorityMode"],
+      "properties": {
+        "manifest": {"type": "string", "minLength": 1},
+        "authorityMode": {"enum": ["single", "multiple", "imported"]}
+      }
+    },
+    "authoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "entryHtml", "registry", "currentSection"],
+      "properties": {
+        "mode": {"enum": ["single", "modular", "imported"]},
+        "entryHtml": {"type": ["string", "null"], "minLength": 1},
+        "registry": {"type": ["string", "null"], "minLength": 1},
+        "currentSection": {"type": ["string", "null"]}
+      }
+    },
     "workflow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["stage", "status", "owner", "sourceOfTruth", "currentChapter", "blockingReason"],
+      "required": ["stage", "status", "owner", "sourceOfTruth", "currentChapter", "currentSection", "blockingReason", "blockedFrom"],
       "properties": {
-        "stage": {"enum": ["initialized", "planning", "awaiting_plan_approval", "html_authoring", "html_review", "ready_for_conversion", "converting", "bento_validation", "bento_finalization", "complete", "blocked"]},
+        "stage": {"enum": ["initialized", "planning", "awaiting_plan_approval", "html_authoring", "html_review", "ready_for_conversion", "converting", "bento_validation", "bento_authoring", "content_review", "bento_finalization", "complete", "blocked"]},
         "status": {"enum": ["pending", "in_progress", "awaiting_approval", "ready", "blocked", "complete"]},
         "owner": {"enum": ["work", "codex"]},
-        "sourceOfTruth": {"enum": ["sources", "planning", "chapters", "generated", "final"]},
+        "sourceOfTruth": {"enum": ["sources", "planning", "html", "generated", "authoring", "final"]},
         "currentChapter": {"type": ["string", "null"]},
+        "currentSection": {"type": ["string", "null"]},
         "blockingReason": {"type": ["string", "null"], "minLength": 1},
         "blockedFrom": {
           "type": ["object", "null"],
           "additionalProperties": false,
-          "required": ["stage", "status", "owner", "sourceOfTruth", "currentChapter"],
+          "required": ["stage", "status", "owner", "sourceOfTruth", "currentChapter", "currentSection"],
           "properties": {
-            "stage": {"enum": ["initialized", "planning", "awaiting_plan_approval", "html_authoring", "html_review", "ready_for_conversion", "converting", "bento_validation", "bento_finalization"]},
+            "stage": {"enum": ["initialized", "planning", "awaiting_plan_approval", "html_authoring", "html_review", "ready_for_conversion", "converting", "bento_validation", "bento_authoring", "content_review", "bento_finalization"]},
             "status": {"enum": ["pending", "in_progress", "awaiting_approval", "ready", "blocked", "complete"]},
             "owner": {"enum": ["work", "codex"]},
-            "sourceOfTruth": {"enum": ["sources", "planning", "chapters", "generated", "final"]},
-            "currentChapter": {"type": ["string", "null"]}
+            "sourceOfTruth": {"enum": ["sources", "planning", "html", "generated", "authoring", "final"]},
+            "currentChapter": {"type": ["string", "null"]},
+            "currentSection": {"type": ["string", "null"]}
           }
         }
       }
@@ -46,12 +69,39 @@
     "approvals": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["explanationPolicy", "storyOutline", "slidePlan", "finalBento"],
+      "required": ["explanationPolicy", "storyOutline", "slidePlan", "bentoContent", "finalBento"],
       "properties": {
         "explanationPolicy": {"enum": ["pending", "approved"]},
         "storyOutline": {"enum": ["pending", "approved"]},
         "slidePlan": {"enum": ["pending", "approved"]},
+        "bentoContent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "documentRevision", "registryRevision", "approvalDigest", "approvedAt"],
+          "properties": {
+            "status": {"enum": ["pending", "approved"]},
+            "documentRevision": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+            "registryRevision": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+            "approvalDigest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+            "approvedAt": {"type": ["string", "null"], "format": "date-time"}
+          }
+        },
         "finalBento": {"enum": ["pending", "approved"]}
+      }
+    },
+    "sections": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "status", "slideIds", "approvalDigest"],
+        "properties": {
+          "title": {"type": "string", "minLength": 1},
+          "status": {"enum": ["planned", "authoring", "review", "approved"]},
+          "slideIds": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+          "approvalDigest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+        }
       }
     },
     "chapters": {
@@ -72,21 +122,28 @@
     "handoff": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["readyForCodex", "readyForFinalEditing"],
+      "required": ["readyForCodex", "readyForBentoAuthoring", "readyForContentReview", "readyForFinalEditing"],
       "properties": {
         "readyForCodex": {"type": "boolean"},
+        "readyForBentoAuthoring": {"type": "boolean"},
+        "readyForContentReview": {"type": "boolean"},
         "readyForFinalEditing": {"type": "boolean"}
       }
     },
     "outputs": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generatedHtml", "generatedJson", "finalHtml", "finalJson"],
+      "required": ["generatedHtml", "generatedJson", "generatedRegistry", "authoringHtml", "authoringJson", "authoringRegistry", "finalHtml", "finalJson", "finalRegistry"],
       "properties": {
         "generatedHtml": {"type": "string", "minLength": 1},
         "generatedJson": {"type": "string", "minLength": 1},
+        "generatedRegistry": {"type": "string", "minLength": 1},
+        "authoringHtml": {"type": ["string", "null"], "minLength": 1},
+        "authoringJson": {"type": ["string", "null"], "minLength": 1},
+        "authoringRegistry": {"type": ["string", "null"], "minLength": 1},
         "finalHtml": {"type": "string", "minLength": 1},
-        "finalJson": {"type": "string", "minLength": 1}
+        "finalJson": {"type": "string", "minLength": 1},
+        "finalRegistry": {"type": ["string", "null"], "minLength": 1}
       }
     },
     "preview": {
@@ -96,29 +153,38 @@
       "properties": {
         "htmlPort": {"type": "integer", "minimum": 1, "maximum": 65535},
         "bentoPort": {"type": "integer", "minimum": 1, "maximum": 65535},
-        "currentUrl": {
-          "type": ["string", "null"],
-          "pattern": "^http://127\\.0\\.0\\.1:[0-9]{1,5}/$"
-        }
+        "currentUrl": {"type": ["string", "null"], "pattern": "^http://127\\.0\\.0\\.1:[0-9]{1,5}/$"}
       }
     },
     "validation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["finalStatus", "checkedAt"],
+      "required": ["finalStatus", "checkedAt", "finalBaseline"],
       "properties": {
         "finalStatus": {"enum": ["pending", "pass", "fail"]},
         "checkedAt": {"type": ["string", "null"], "format": "date-time"},
         "finalBaseline": {
           "type": ["object", "null"],
           "additionalProperties": false,
-          "required": ["path", "documentRevision", "protectedContentFingerprint"],
+          "required": ["documentPath", "documentRevision", "registryPath", "registryRevision", "protectedContentFingerprint"],
           "properties": {
-            "path": {"type": "string", "minLength": 1},
+            "documentPath": {"type": "string", "minLength": 1},
             "documentRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "registryPath": {"type": "string", "minLength": 1},
+            "registryRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
             "protectedContentFingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
           }
         }
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fromSchemaVersion", "migratedAt", "lateStageCompatibility"],
+      "properties": {
+        "fromSchemaVersion": {"type": ["integer", "null"], "minimum": 1},
+        "migratedAt": {"type": ["string", "null"], "format": "date-time"},
+        "lateStageCompatibility": {"type": "boolean"}
       }
     }
   }

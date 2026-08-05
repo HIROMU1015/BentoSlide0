@@ -48,7 +48,7 @@ class DeckWorkflowTests(unittest.TestCase):
         for directory in ("workflow", "sources/private", "planning", "chapters", "output/diagnostics"):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         for relative in (
-            "deck.yaml", "REQUEST.md", "workflow/deck.schema.json",
+            "deck.yaml", "REQUEST.md", "workflow/deck.schema.json", "workflow/deck.v1.schema.json",
             "planning/explanation-policy.md", "planning/story-outline.md", "planning/slide-plan.md",
             "planning/decisions.md", "planning/work-log.md",
         ):

@@ -62,6 +62,7 @@ class FastFinalEditTests(unittest.TestCase):
         for directory in (workflow, diagnostics, revisions):
             directory.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / "workflow/deck.schema.json", workflow / "deck.schema.json")
+        shutil.copy2(ROOT / "workflow/deck.v1.schema.json", workflow / "deck.v1.schema.json")
 
         source = artifacts / "custom.generated.bento.html"
         target = artifacts / "custom.final.bento.html"
