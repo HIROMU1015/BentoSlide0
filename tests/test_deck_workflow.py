@@ -12,6 +12,7 @@ from unittest import mock
 
 import yaml
 
+from bento_converter.errors import ValidationError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, serialize_bento_doc
 from scripts.deck_workflow import (
     WorkflowError,
@@ -28,6 +29,7 @@ from scripts.deck_workflow import (
     command_initialize,
     command_mark_converted,
     command_prepare_conversion,
+    command_resume,
     command_submit_plan,
     discover_source_candidates,
     load_state,
@@ -141,6 +143,10 @@ class DeckWorkflowTests(unittest.TestCase):
         return self.state()
 
     def test_schema_rejects_wrong_stage_owner_and_path_escape(self) -> None:
+        previous_template = self.state()
+        previous_template["workflow"].pop("blockedFrom")
+        previous_template["validation"].pop("finalBaseline")
+        validate_state(self.root, previous_template)
         state = self.state()
         state["workflow"]["owner"] = "codex"
         with self.assertRaisesRegex(WorkflowError, "owner"):
@@ -157,6 +163,10 @@ class DeckWorkflowTests(unittest.TestCase):
         state["outputs"]["finalHtml"] = state["outputs"]["generatedHtml"]
         with self.assertRaisesRegex(WorkflowError, "must be distinct"):
             validate_state(self.root, state)
+        state = self.state()
+        state["outputs"]["generatedJson"] = "output/not-the-generated-sidecar.json"
+        with self.assertRaisesRegex(WorkflowError, "sidecar path"):
+            validate_state(self.root, state)
 
     def test_blocked_state_records_machine_readable_reason(self) -> None:
         command_block(self.root, self.state(), "work", "Primary source decision is required")
@@ -164,6 +174,28 @@ class DeckWorkflowTests(unittest.TestCase):
         self.assertEqual(blocked["workflow"]["stage"], "blocked")
         self.assertEqual(blocked["workflow"]["owner"], "work")
         self.assertEqual(blocked["workflow"]["blockingReason"], "Primary source decision is required")
+        self.assertEqual(blocked["workflow"]["blockedFrom"]["stage"], "initialized")
+        command_resume(self.root, blocked)
+        resumed = self.state()
+        self.assertEqual(resumed["workflow"]["stage"], "initialized")
+        self.assertIsNone(resumed["workflow"]["blockedFrom"])
+
+    def test_resume_revalidates_files_before_restoring_html_review(self) -> None:
+        state = self.plan_to_authoring()
+        command_begin_chapter(self.root, state, "chapter-01")
+        self.add_chapter("chapter-01")
+        command_complete_chapter(self.root, self.state(), "chapter-01")
+        command_block(self.root, self.state(), "work", "Review source needs repair")
+        registry = self.root / "chapters/chapter-01.registry.json"
+        registry.unlink()
+        with self.assertRaisesRegex(WorkflowError, "registry does not exist"):
+            command_resume(self.root, self.state())
+        self.assertEqual(self.state()["workflow"]["stage"], "blocked")
+        self.add_chapter("chapter-01")
+        command_resume(self.root, self.state())
+        resumed = self.state()
+        self.assertEqual(resumed["workflow"]["stage"], "html_review")
+        self.assertEqual(resumed["workflow"]["currentChapter"], "chapter-01")
 
     def test_atomic_write_uses_replace_and_roundtrips_unicode(self) -> None:
         state = self.state()
@@ -278,6 +310,10 @@ class DeckWorkflowTests(unittest.TestCase):
         self.assertEqual(updated["workflow"]["stage"], "bento_validation")
         self.assertTrue((self.root / "output/presentation.final.bento.html").is_file())
         self.assertEqual(hashlib.sha256((self.root / "output/presentation.generated.bento.html").read_bytes()).hexdigest(), generated_hash)
+        baseline = updated["validation"]["finalBaseline"]
+        self.assertIsNotNone(baseline)
+        self.assertTrue((self.root / baseline["path"]).is_file())
+        self.assertRegex(baseline["protectedContentFingerprint"], r"^sha256:[0-9a-f]{64}$")
 
     def test_mark_converted_preserves_existing_final(self) -> None:
         state = self.ready_for_conversion()
@@ -299,6 +335,45 @@ class DeckWorkflowTests(unittest.TestCase):
         self.assertEqual(completed["workflow"]["stage"], "complete")
         self.assertEqual(completed["validation"]["finalStatus"], "pass")
         self.assertFalse(completed["handoff"]["readyForFinalEditing"])
+
+    def test_final_validation_rejects_content_replacement_but_allows_layout(self) -> None:
+        state = self.ready_for_conversion()
+        self.prepare_output_bundle(state, existing_final=False)
+        command_mark_converted(self.root, self.state())
+        command_begin_finalization(self.root, self.state())
+        final_html_path = self.root / "output/presentation.final.bento.html"
+        final_json_path = self.root / "output/presentation.final.bento.json"
+        final_html = load_html(final_html_path)
+        document = extract_bento_doc(final_html)
+        shape = next(element for slide in document["slides"] for element in slide["elements"] if element["type"] == "shape")
+        shape["x"] += 3
+        shape["fill"] = "#abcdef"
+        final_html_path.write_bytes(embed_bento_doc(final_html, document).encode("utf-8"))
+        final_json_path.write_text(serialize_bento_doc(document) + "\n", encoding="utf-8")
+        command_approve_final(self.root, self.state())
+
+        document = extract_bento_doc(load_html(final_html_path))
+        text = next(element for slide in document["slides"] for element in slide["elements"] if element["type"] == "text")
+        text["html"] = "externally replaced content"
+        final_html_path.write_bytes(embed_bento_doc(load_html(final_html_path), document).encode("utf-8"))
+        final_json_path.write_text(serialize_bento_doc(document) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValidationError, "protected"):
+            command_complete(self.root, self.state())
+
+    def test_final_fingerprint_rejects_slide_structure_reordering(self) -> None:
+        state = self.ready_for_conversion()
+        self.prepare_output_bundle(state, existing_final=False)
+        command_mark_converted(self.root, self.state())
+        command_begin_finalization(self.root, self.state())
+        final_html_path = self.root / "output/presentation.final.bento.html"
+        final_json_path = self.root / "output/presentation.final.bento.json"
+        final_html = load_html(final_html_path)
+        document = extract_bento_doc(final_html)
+        document["slides"].reverse()
+        final_html_path.write_bytes(embed_bento_doc(final_html, document).encode("utf-8"))
+        final_json_path.write_text(serialize_bento_doc(document) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(WorkflowError, "content/structure"):
+            command_approve_final(self.root, self.state())
 
 
 if __name__ == "__main__":

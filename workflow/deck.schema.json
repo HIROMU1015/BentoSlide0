@@ -28,7 +28,19 @@
         "owner": {"enum": ["work", "codex"]},
         "sourceOfTruth": {"enum": ["sources", "planning", "chapters", "generated", "final"]},
         "currentChapter": {"type": ["string", "null"]},
-        "blockingReason": {"type": ["string", "null"], "minLength": 1}
+        "blockingReason": {"type": ["string", "null"], "minLength": 1},
+        "blockedFrom": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["stage", "status", "owner", "sourceOfTruth", "currentChapter"],
+          "properties": {
+            "stage": {"enum": ["initialized", "planning", "awaiting_plan_approval", "html_authoring", "html_review", "ready_for_conversion", "converting", "bento_validation", "bento_finalization"]},
+            "status": {"enum": ["pending", "in_progress", "awaiting_approval", "ready", "blocked", "complete"]},
+            "owner": {"enum": ["work", "codex"]},
+            "sourceOfTruth": {"enum": ["sources", "planning", "chapters", "generated", "final"]},
+            "currentChapter": {"type": ["string", "null"]}
+          }
+        }
       }
     },
     "approvals": {
@@ -96,7 +108,17 @@
       "required": ["finalStatus", "checkedAt"],
       "properties": {
         "finalStatus": {"enum": ["pending", "pass", "fail"]},
-        "checkedAt": {"type": ["string", "null"], "format": "date-time"}
+        "checkedAt": {"type": ["string", "null"], "format": "date-time"},
+        "finalBaseline": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["path", "documentRevision", "protectedContentFingerprint"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "documentRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "protectedContentFingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        }
       }
     }
   }

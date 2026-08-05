@@ -9,8 +9,14 @@ $repository = Get-BentoRepositoryRoot -ScriptsDirectory $PSScriptRoot
 Set-Location -LiteralPath $repository
 try {
     $python = Find-BentoLauncherPython -Repository $repository -RequiredImports @('bento_converter', 'yaml', 'jsonschema', 'scripts.deck_workflow')
-    $payload = & $python.Executable -m scripts.deck_workflow --root $repository status --json 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "Cannot read deck workflow state: $($payload -join ' ')" }
+    $previousConsoleEncoding = [Console]::OutputEncoding
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    try {
+        $payload = & $python.Executable -m scripts.deck_workflow --root $repository status --json 2>&1
+        $workflowExitCode = $LASTEXITCODE
+    }
+    finally { [Console]::OutputEncoding = $previousConsoleEncoding }
+    if ($workflowExitCode -ne 0) { throw "Cannot read deck workflow state: $($payload -join ' ')" }
     $deck = ($payload -join "`n") | ConvertFrom-Json
     $stage = [string]$deck.workflow.stage
     switch ($stage) {
@@ -24,11 +30,18 @@ try {
             exit $LASTEXITCODE
         }
         'bento_finalization' {
+            $sourcePath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.generatedHtml)
+            $targetPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.finalHtml)
+            $registryPath = Join-Path ([System.IO.Path]::GetDirectoryName($sourcePath)) 'diagnostics\merged-registry.json'
             if ($NoClipboard) {
-                & (Join-Path $PSScriptRoot 'start_bento_editor.ps1') -Port ([int]$deck.preview.bentoPort) -NoClipboard
+                & (Join-Path $PSScriptRoot 'start_bento_editor.ps1') `
+                    -Source $sourcePath -Target $targetPath -Registry $registryPath `
+                    -Port ([int]$deck.preview.bentoPort) -NoClipboard
             }
             else {
-                & (Join-Path $PSScriptRoot 'start_bento_editor.ps1') -Port ([int]$deck.preview.bentoPort)
+                & (Join-Path $PSScriptRoot 'start_bento_editor.ps1') `
+                    -Source $sourcePath -Target $targetPath -Registry $registryPath `
+                    -Port ([int]$deck.preview.bentoPort)
             }
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $url = "http://127.0.0.1:$($deck.preview.bentoPort)/"

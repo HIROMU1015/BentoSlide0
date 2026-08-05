@@ -143,6 +143,17 @@ class WindowsWorkspaceLauncherTests(unittest.TestCase):
         duplicate = self.run_cmd(repository / "start_html_preview.cmd", "-NoClipboard")
         self.assertEqual(duplicate.returncode, 0, duplicate.stdout)
         self.assertEqual(json.loads((repository / "output/html-preview-session.json").read_text(encoding="utf-8-sig"))["pid"], first_pid)
+        original_session = (repository / "output/html-preview-session.json").read_bytes()
+        mismatched = json.loads(original_session.decode("utf-8-sig"))
+        mismatched["processStartTimeUtc"] = "2000-01-01T00:00:00Z"
+        (repository / "output/html-preview-session.json").write_text(json.dumps(mismatched), encoding="utf-8")
+        mismatched_session = (repository / "output/html-preview-session.json").read_bytes()
+        refused = self.run_cmd(repository / "start_html_preview.cmd", "-NoClipboard")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual((repository / "output/html-preview-session.json").read_bytes(), mismatched_session)
+        self.assertEqual((repository / "output/html-preview.pid").read_text(encoding="ascii").strip(), str(first_pid))
+        self.assertEqual(self.wait_status(port)["currentChapter"], "chapter-01")
+        (repository / "output/html-preview-session.json").write_bytes(original_session)
         with self.assertRaises(HTTPError) as traversal:
             urlopen(f"http://127.0.0.1:{port}/chapters/%2e%2e/deck.yaml", timeout=2)
         self.assertEqual(traversal.exception.code, 404)
@@ -198,20 +209,36 @@ class WindowsWorkspaceLauncherTests(unittest.TestCase):
     def test_bento_finalization_dispatch_preserves_generated_and_existing_final(self) -> None:
         repository = self.copy_repository("Bento Finalization")
         port = self.free_port()
-        self.set_stage(repository, "bento_finalization", bento_port=port)
-        source = repository / "output/presentation.generated.bento.html"
+        state = self.set_stage(repository, "bento_finalization", bento_port=port)
+        source = repository / "custom artifacts/生成/deck.generated.bento.html"
+        source.parent.mkdir(parents=True)
+        shutil.copy2(repository / "demo.bento.html", source)
+        target = repository / "custom artifacts/最終/deck.final.bento.html"
+        target.parent.mkdir(parents=True)
+        registry = source.parent / "diagnostics/merged-registry.json"
+        registry.parent.mkdir(parents=True)
+        registry.write_text("{}\n", encoding="utf-8")
+        state["outputs"].update({
+            "generatedHtml": "custom artifacts/生成/deck.generated.bento.html",
+            "generatedJson": "custom artifacts/生成/deck.generated.bento.json",
+            "finalHtml": "custom artifacts/最終/deck.final.bento.html",
+            "finalJson": "custom artifacts/最終/deck.final.bento.json",
+        })
+        (repository / "deck.yaml").write_text(yaml.safe_dump(state, allow_unicode=True, sort_keys=False), encoding="utf-8")
         source_html = load_html(source)
         document = extract_bento_doc(source_html)
         next(element for slide in document["slides"] for element in slide["elements"] if element["type"] == "shape")["x"] += 11
-        target = repository / "output/presentation.final.bento.html"
         target.write_text(embed_bento_doc(source_html, document), encoding="utf-8")
         source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
         target_hash = hashlib.sha256(target.read_bytes()).hexdigest()
         started = self.run_cmd(repository / "start_deck_workspace.cmd", "-NoClipboard")
         self.assertEqual(started.returncode, 0, started.stdout)
         status = self.wait_status(port)
-        self.assertEqual(status["target"], "output/presentation.final.bento.html")
+        self.assertEqual(status["target"], "custom artifacts/最終/deck.final.bento.html")
         session = json.loads((repository / "output/work-editor-session.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(Path(session["source"]), source.resolve())
+        self.assertEqual(Path(session["target"]), target.resolve())
+        self.assertEqual(Path(session["registry"]), registry.resolve())
         command_line = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command", f"(Get-CimInstance Win32_Process -Filter \"ProcessId = {session['pid']}\").CommandLine"],
             text=True, capture_output=True, encoding="utf-8", errors="replace", check=True,

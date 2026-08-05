@@ -39,10 +39,13 @@ begin-finalization           bento_validation -> bento_finalization
 approve-final                record human approval after final technical checks
 complete                     bento_finalization -> complete
 block                        record an explicit blocker and owner
+resume                       revalidate files and restore the pre-block stage
 ```
 
 Writes to `deck.yaml` use a same-directory temporary file, flush/fsync, and atomic replacement. Transitions validate real files, not only the stage string.
-The four generated/final HTML/JSON paths must be distinct. A blocked transition records its non-empty reason in `workflow.blockingReason`; outside `blocked` that field is null.
+The four generated/final HTML/JSON paths must be distinct. JSON sidecars are the sibling `.bento.json` paths derived from their HTML files; conversion diagnostics live under the generated HTML parent. A blocked transition records its non-empty reason and complete prior workflow tuple in `workflow.blockingReason` and `workflow.blockedFrom`. `resume` revalidates the target stage before restoring it, so users never edit YAML to recover.
+
+At the first generated-to-final handoff, the workflow stores an immutable baseline Bento JSON plus its complete revision and protected-content fingerprint. Final validation compares final against that baseline: geometry, presentation styling, theme/background, and element z-order may change; document/slide structure, IDs, types, text, equations, data, media sources, notes, behavior, and references may not. An explicit content-edit/reset workflow must deliberately replace the baseline; ordinary finalization never does.
 
 ## Short-command routing
 
@@ -72,3 +75,5 @@ Require `bento_finalization`, start the existing Windows Bento editor launcher, 
 - Codex -> Work: generated diagnostics and browser checks pass; final HTML/JSON is initialized or retained without reset; `begin-finalization` sets `handoff.readyForFinalEditing`.
 
 Never trigger conversion from a workspace launcher. Never rebuild into the final path. Structural regeneration after final editing requires explicit user authorization and a deliberate final reset outside normal operation.
+
+If the stage becomes `blocked`, resolve the reported material condition and run `resume` on the user's behalf. Do not ask the user to restore stage fields manually.

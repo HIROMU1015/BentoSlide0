@@ -16,6 +16,7 @@ Work from the repository root. Read `START_HERE.md` and `deck.yaml` first. Route
 - For `最終調整を開始して`, require `bento_finalization`, prefer `start_deck_workspace.cmd` or the existing Bento launcher, retain final as authoritative, and run final verification after save/reload.
 
 Use `deck.yaml` as the only machine state source. State changes must go through `scripts.deck_workflow` so schema, approvals, files, atomic writes, and handoffs are validated. Do not infer state from `planning/work-log.md` or chat history.
+When a blocker is resolved, run `python -m scripts.deck_workflow resume`; it revalidates the saved pre-block stage. Never repair stage fields manually.
 
 ## HTML-first flow
 
@@ -65,7 +66,7 @@ Open the localhost URL in the Work browser and use the injected controls to save
 
 ### 4. Final validation
 
-After editing, validate final HTML/JSON equality, runtime fingerprint, resource scan, protected content, revision/backup evidence, browser serialize round-trip, and the usual Bento browser check. For CI handoff, confirm `html-first-evidence` includes `work-editor-evidence/`.
+After editing, validate final HTML/JSON equality, runtime fingerprint, resource scan, protected content, immutable finalization-baseline fingerprint, revision/backup evidence, browser serialize round-trip, and the usual Bento browser check. The baseline permits geometry/style/theme/z-order edits but rejects content, IDs/types, slide structure, data, notes, behavior, and references. For CI handoff, confirm `html-first-evidence` includes `work-editor-evidence/`.
 
 ## Legacy JSON-first flow
 

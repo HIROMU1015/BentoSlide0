@@ -6,7 +6,7 @@ The Work editor serves an existing Bento runtime on `127.0.0.1` and persists fin
 
 ### Windows one-click operation
 
-For the full local workflow, double-click `start_deck_workspace.cmd`. It reads `deck.yaml`: authoring/review stages start the local HTML preview, and `bento_finalization` starts this Work editor. Use `stop_deck_workspace.cmd` to stop the recorded workspace service safely.
+For the full local workflow, double-click `start_deck_workspace.cmd`. It reads `deck.yaml`: authoring/review stages start the local HTML preview, and `bento_finalization` starts this Work editor with the configured generated/final paths and the diagnostics registry beside generated. Use `stop_deck_workspace.cmd` to stop the recorded workspace service safely.
 
 The lower-level editor-only launcher remains available. From Explorer, double-click `start_bento_editor.cmd`. It resolves the repository from its own location, starts the editor as a hidden independent process, copies `http://127.0.0.1:8765/` to the clipboard, and then closes. Keep the ChatGPT Work browser tab open and reload it on later sessions. It never opens a normal browser or controls ChatGPT Work.
 
@@ -60,3 +60,5 @@ Open `http://127.0.0.1:8765/`. The server refuses non-loopback bind addresses. T
 ## Storage guarantees
 
 Before replacement, the server validates Bento schema/references, registry and protected content, recursive resource scan, and current runtime fingerprint. It writes HTML and JSON temporary files in the target directory, flushes them, replaces the pair, verifies their equality, and rolls back both on failure. The pre-save pair is copied to `revisions/presentation.final.rev-NNNNNN.bento.{html,json}`; the default retention limit is ten. The toolbar exists only in the HTTP response and never in final HTML.
+
+The repository workflow additionally records a finalization baseline in the target revisions directory. Completion accepts geometry, presentation styling, theme/background, and z-order differences from that baseline, while rejecting content, slide/element identity or structure, equations, chart/table/media data, notes, behavior, and references. This catches a final file replaced outside the Work editor without making mutable generated output authoritative after finalization begins.

@@ -20,6 +20,8 @@ $stdoutLogPath = Join-Path $stateDirectory 'html-preview.stdout.log'
 $errorLogPath = Join-Path $stateDirectory 'html-preview.error.log'
 $lockHandle = $null
 $startedProcess = $null
+$sessionCreatedByThisInvocation = $false
+$pidCreatedByThisInvocation = $false
 
 function Get-HtmlPreviewStatus {
     param([Parameter(Mandatory = $true)][int]$StatusPort, [int]$TimeoutSeconds = 2)
@@ -162,7 +164,9 @@ try {
     $temporary = $sessionPath + '.tmp'
     $record | ConvertTo-Json | Set-Content -LiteralPath $temporary -Encoding utf8
     Move-Item -LiteralPath $temporary -Destination $sessionPath -Force
+    $sessionCreatedByThisInvocation = $true
     Set-Content -LiteralPath $pidPath -Value ([string]$startedProcess.Id) -Encoding ascii
+    $pidCreatedByThisInvocation = $true
     & $python.Executable -m scripts.deck_workflow --root $repository set-current-url --url $url | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Cannot update preview.currentUrl.' }
     Add-HtmlPreviewLog -Lines @("pid=$($startedProcess.Id)", 'status=started')
@@ -174,8 +178,12 @@ catch {
     if ($null -ne $startedProcess) {
         try { $startedProcess.Refresh(); if (-not $startedProcess.HasExited) { Stop-Process -Id $startedProcess.Id -Force -ErrorAction SilentlyContinue } } catch { }
     }
-    Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $sessionPath -Force -ErrorAction SilentlyContinue
+    if ($pidCreatedByThisInvocation) {
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+    }
+    if ($sessionCreatedByThisInvocation) {
+        Remove-Item -LiteralPath $sessionPath -Force -ErrorAction SilentlyContinue
+    }
     if (Test-Path -LiteralPath $logPath) { Add-HtmlPreviewLog -Lines @("failedAt=$([System.DateTimeOffset]::Now.ToString('o'))", "error=$($_.Exception.Message)", 'status=failed') }
     Write-Host $_.Exception.Message -ForegroundColor Red
     if (Test-Path -LiteralPath $errorLogPath) { Get-Content -LiteralPath $errorLogPath -Tail 20 -ErrorAction SilentlyContinue }

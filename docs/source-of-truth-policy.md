@@ -13,3 +13,7 @@ Default final saves permit geometry and presentation styling while protecting ex
 
 Stage changes must go through `python -m scripts.deck_workflow ...`; direct YAML rewrites are unsupported. Each transition validates its inputs and atomically replaces `deck.yaml`, so a failed check leaves the previous state intact.
 Generated/final HTML and JSON paths must all be distinct. A `blocked` state keeps its owner and reason in `deck.yaml`, not only in the human-readable work log.
+
+`block` also stores the complete preceding workflow tuple. After the cause is resolved, `resume` revalidates the relevant source, plan, chapter pair, conversion bundle, or final bundle before restoring that tuple. Manual stage repair is unsupported.
+
+When final is first initialized or safely retained, generated is saved as an immutable content/structure baseline under the final revisions directory. Final remains authoritative for allowed presentation edits, but completion compares it with that baseline and rejects external content or structure replacement. Rebuilding generated later does not silently replace this baseline.

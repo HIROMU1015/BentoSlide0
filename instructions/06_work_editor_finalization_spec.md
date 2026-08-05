@@ -17,6 +17,7 @@ Windowsではリポジトリ直下の既存ランチャーを使用します。
 既定URLは`http://127.0.0.1:8765/`です。通常ブラウザーは自動起動せず、ChatGPT Workの内蔵ブラウザーで開くか既存タブを再読み込みします。停止時だけ`stop_bento_editor.cmd`を使用します。
 
 ランチャーは`--reset-final`と`--allow-content-edit`を渡しません。finalがなければ既存Work editorがgeneratedから初期化し、finalがあれば継続使用します。
+stage-awareランチャーは`deck.yaml`のgenerated/finalパスを渡し、registryはgenerated HTMLと同じ親の`diagnostics/merged-registry.json`を使用します。
 
 ## 3. 現行API契約
 
@@ -44,10 +45,11 @@ Work editor注入後も`window.bento.serialize()`は同期的にHTML文字列を
 5. revision backupを作成する
 6. final HTMLとsidecarをatomic replaceし、不一致時はrollbackする
 7. 永続化するHTML変更を検証済み`#bento-doc`だけに限定する
+8. final引き渡し時のbaselineに対し、内容・ID・構造・数式・データ・参照を維持する
 
 ## 6. 編集範囲
 
-通常の最終調整はx/y/w/h、余白、文字サイズ、改行、行間、色、z-order、表・chart・connector配置に限定します。本文、数式、数値、条件、図表データの変更には一次資料とregistryの再確認および明示的な内容編集許可が必要です。
+通常の最終調整はx/y/w/h、余白、文字サイズ、自動折返し、行間、色、z-order、表・chart・connector配置に限定します。本文や明示的な改行、数式、数値、条件、図表データの変更には一次資料とregistryの再確認および明示的な内容編集許可が必要です。
 
 UI上のドラッグや入力だけを「UI編集」と呼びます。`window.bento.loadDoc()`で文書モデルを変更した場合は「Bento API編集」と記録します。保存はどちらもWork editor APIを通します。
 
@@ -56,6 +58,7 @@ UI上のドラッグや入力だけを「UI編集」と呼びます。`window.be
 - final HTML内`#bento-doc`とfinal JSON sidecarが一致する
 - generatedは変わっていない
 - runtime fingerprintがgeneratedと一致する
+- finalの内容・構造fingerprintが保存済みbaselineと一致する
 - revisionとbackupが更新される
 - toolbarがserialize結果と保存ファイルへ混入しない
 - 保存後の再読み込みで位置・寸法・styleが維持される

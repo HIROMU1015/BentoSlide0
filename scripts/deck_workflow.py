@@ -17,9 +17,14 @@ import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
 from bento_converter.bento_validator import validate_bento_doc
-from bento_converter.html_document import extract_bento_doc, load_html, runtime_fingerprint
+from bento_converter.html_document import extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
 from bento_converter.html_source import REGISTRY_FORMAT
-from bento_converter.work_editor_storage import WorkEditorStorage, validate_editor_document
+from bento_converter.work_editor_storage import (
+    WorkEditorStorage,
+    document_revision,
+    protected_content_fingerprint,
+    validate_editor_document,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,6 +129,20 @@ def _repo_path(root: Path, value: str, *, field: str) -> Path:
     return resolved
 
 
+def _sidecar_path(html_path: Path) -> Path:
+    name = html_path.name
+    if name.endswith(".bento.html"):
+        return html_path.with_name(name[: -len(".bento.html")] + ".bento.json")
+    return html_path.with_suffix(".bento.json")
+
+
+def _final_baseline_path(root: Path, state: dict[str, Any]) -> Path:
+    final_html = _repo_path(root, state["outputs"]["finalHtml"], field="outputs.finalHtml")
+    name = final_html.name
+    stem = name[: -len(".bento.html")] if name.endswith(".bento.html") else final_html.stem
+    return final_html.parent / "revisions" / f"{stem}.baseline.bento.json"
+
+
 def _read_json(path: Path, *, label: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -170,10 +189,24 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
     current = workflow["currentChapter"]
     if current is not None and current not in state["chapters"]:
         raise WorkflowError(f"workflow.currentChapter is not registered: {current}")
-    if stage == "blocked" and not workflow["blockingReason"]:
-        raise WorkflowError("workflow.blockingReason is required while blocked")
-    if stage != "blocked" and workflow["blockingReason"] is not None:
-        raise WorkflowError("workflow.blockingReason must be null outside the blocked stage")
+    blocked_from = workflow.get("blockedFrom")
+    if stage == "blocked":
+        if not workflow["blockingReason"]:
+            raise WorkflowError("workflow.blockingReason is required while blocked")
+        if not isinstance(blocked_from, dict):
+            raise WorkflowError("workflow.blockedFrom is required while blocked")
+        previous_stage = blocked_from["stage"]
+        if previous_stage in {"blocked", "complete"}:
+            raise WorkflowError(f"workflow.blockedFrom.stage cannot be {previous_stage!r}")
+        if blocked_from["owner"] != STAGE_OWNER[previous_stage]:
+            raise WorkflowError("workflow.blockedFrom.owner does not match its stage")
+        if blocked_from["sourceOfTruth"] != STAGE_SOURCE[previous_stage]:
+            raise WorkflowError("workflow.blockedFrom.sourceOfTruth does not match its stage")
+        previous_current = blocked_from["currentChapter"]
+        if previous_current is not None and previous_current not in state["chapters"]:
+            raise WorkflowError(f"workflow.blockedFrom.currentChapter is not registered: {previous_current}")
+    elif workflow["blockingReason"] is not None or blocked_from is not None:
+        raise WorkflowError("workflow.blockingReason and blockedFrom must be null outside the blocked stage")
 
     for field in ("request",):
         _repo_path(root, state["project"][field], field=f"project.{field}")
@@ -186,10 +219,21 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
             raise WorkflowError(f"Invalid chapter id: {chapter_id}")
         _repo_path(root, chapter["html"], field=f"chapters.{chapter_id}.html")
         _repo_path(root, chapter["registry"], field=f"chapters.{chapter_id}.registry")
-    if len(set(state["outputs"].values())) != len(state["outputs"]):
+    resolved_outputs = {
+        field: _repo_path(root, value, field=f"outputs.{field}")
+        for field, value in state["outputs"].items()
+    }
+    if len(set(resolved_outputs.values())) != len(resolved_outputs):
         raise WorkflowError("Generated/final HTML and JSON output paths must be distinct")
-    for field, value in state["outputs"].items():
-        _repo_path(root, value, field=f"outputs.{field}")
+    if resolved_outputs["generatedJson"] != _sidecar_path(resolved_outputs["generatedHtml"]):
+        raise WorkflowError("outputs.generatedJson must be the sidecar path derived from outputs.generatedHtml")
+    if resolved_outputs["finalJson"] != _sidecar_path(resolved_outputs["finalHtml"]):
+        raise WorkflowError("outputs.finalJson must be the sidecar path derived from outputs.finalHtml")
+    baseline = state["validation"].get("finalBaseline")
+    if baseline is not None:
+        baseline_path = _repo_path(root, baseline["path"], field="validation.finalBaseline.path")
+        if baseline_path != _final_baseline_path(root, state):
+            raise WorkflowError("validation.finalBaseline.path does not match outputs.finalHtml")
     current_url = state["preview"]["currentUrl"]
     if current_url:
         port = int(current_url.rsplit(":", 1)[1].rstrip("/"))
@@ -238,6 +282,7 @@ def _transition(state: dict[str, Any], stage: str, status: str, *, current: str 
     workflow["sourceOfTruth"] = STAGE_SOURCE[stage]
     workflow["currentChapter"] = current
     workflow["blockingReason"] = None
+    workflow["blockedFrom"] = None
 
 
 def _require_stage(state: dict[str, Any], *allowed: str) -> None:
@@ -369,7 +414,65 @@ def _load_sidecar(path: Path) -> dict[str, Any]:
     return _read_json(path, label="Bento JSON sidecar")
 
 
-def validate_output_bundle(root: Path, state: dict[str, Any], *, require_final: bool) -> dict[str, Any]:
+def _atomic_write_bento_json(path: Path, document: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (serialize_bento_doc(document) + "\n").encode("utf-8")
+    handle = tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False)
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def initialize_final_baseline(root: Path, state: dict[str, Any], document: dict[str, Any]) -> None:
+    if state["validation"].get("finalBaseline") is not None:
+        return
+    path = _final_baseline_path(root, state)
+    _atomic_write_bento_json(path, document)
+    state["validation"]["finalBaseline"] = {
+        "path": path.relative_to(root).as_posix(),
+        "documentRevision": document_revision(document),
+        "protectedContentFingerprint": protected_content_fingerprint(document),
+    }
+
+
+def _baseline_document(
+    root: Path,
+    state: dict[str, Any],
+    generated_document: dict[str, Any],
+    *,
+    allow_missing: bool,
+) -> tuple[dict[str, Any], str]:
+    metadata = state["validation"].get("finalBaseline")
+    if metadata is None:
+        if not allow_missing:
+            raise WorkflowError("Final content baseline has not been initialized")
+        return generated_document, protected_content_fingerprint(generated_document)
+    path = _repo_path(root, metadata["path"], field="validation.finalBaseline.path")
+    if not path.is_file():
+        raise WorkflowError(f"Final content baseline does not exist: {metadata['path']}")
+    document = _load_sidecar(path)
+    if document_revision(document) != metadata["documentRevision"]:
+        raise WorkflowError("Final content baseline document revision does not match deck.yaml")
+    fingerprint = protected_content_fingerprint(document)
+    if fingerprint != metadata["protectedContentFingerprint"]:
+        raise WorkflowError("Final content baseline fingerprint does not match deck.yaml")
+    return document, fingerprint
+
+
+def validate_output_bundle(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    require_final: bool,
+    allow_missing_baseline: bool = False,
+) -> dict[str, Any]:
     outputs = state["outputs"]
     generated_html_path = _repo_path(root, outputs["generatedHtml"], field="outputs.generatedHtml")
     generated_json_path = _repo_path(root, outputs["generatedJson"], field="outputs.generatedJson")
@@ -422,7 +525,14 @@ def validate_output_bundle(root: Path, state: dict[str, Any], *, require_final: 
     if final_document != _load_sidecar(final_json_path):
         raise WorkflowError("Final Bento HTML #bento-doc and JSON sidecar differ")
     registry = _read_json(required[2], label="merged registry")
-    validate_editor_document(final_document, current=final_document, registry=registry, allow_content_edit=False)
+    baseline_document, baseline_fingerprint = _baseline_document(
+        root, state, generated_document, allow_missing=allow_missing_baseline,
+    )
+    validate_editor_document(final_document, current=baseline_document, registry=registry, allow_content_edit=False)
+    if protected_content_fingerprint(final_document) != baseline_fingerprint:
+        raise WorkflowError(
+            "Final Bento content/structure differs from its finalization baseline; only presentation edits are allowed"
+        )
     if runtime_fingerprint(final_html) != result["generatedRuntime"]:
         raise WorkflowError("Final Bento runtime differs from generated runtime")
     result["finalDocument"] = final_document
@@ -431,7 +541,9 @@ def validate_output_bundle(root: Path, state: dict[str, Any], *, require_final: 
 
 def command_status(root: Path, state: dict[str, Any], *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps(state, ensure_ascii=False, indent=2))
+        # ASCII-safe JSON survives Windows PowerShell 5 native-process decoding;
+        # ConvertFrom-Json restores the original Unicode path strings.
+        print(json.dumps(state, ensure_ascii=True, indent=2))
         return
     workflow = state["workflow"]
     print(f"stage: {workflow['stage']}")
@@ -581,6 +693,10 @@ def command_mark_converted(root: Path, state: dict[str, Any]) -> None:
         reset_final=False,
         allow_content_edit=False,
     )
+    # Before the first handoff, prove that an existing final is still a layout-only
+    # descendant of generated. Persist generated as the immutable content baseline.
+    validate_output_bundle(root, state, require_final=True, allow_missing_baseline=True)
+    initialize_final_baseline(root, state, bundle["generatedDocument"])
     validate_output_bundle(root, state, require_final=True)
     _transition(state, "bento_validation", "in_progress")
     atomic_write_state(root, state)
@@ -624,9 +740,74 @@ def command_complete(root: Path, state: dict[str, Any]) -> None:
 def command_block(root: Path, state: dict[str, Any], owner: str, reason: str) -> None:
     if not reason.strip():
         raise WorkflowError("A non-empty blocking reason is required")
-    state["workflow"].update({"stage": "blocked", "status": "blocked", "owner": owner, "blockingReason": reason})
+    workflow = state["workflow"]
+    if workflow["stage"] in {"blocked", "complete"}:
+        raise WorkflowError(f"Stage {workflow['stage']!r} cannot be blocked")
+    workflow["blockedFrom"] = {
+        "stage": workflow["stage"],
+        "status": workflow["status"],
+        "owner": workflow["owner"],
+        "sourceOfTruth": workflow["sourceOfTruth"],
+        "currentChapter": workflow["currentChapter"],
+    }
+    workflow.update({"stage": "blocked", "status": "blocked", "owner": owner, "blockingReason": reason})
     atomic_write_state(root, state)
     append_work_log(root, f"Blocked ({owner}): {reason}")
+
+
+def _validate_resume_target(root: Path, state: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    stage = snapshot["stage"]
+    if stage == "initialized":
+        return
+    if stage in {"planning", "awaiting_plan_approval"}:
+        discover_source_candidates(root, state)
+        if stage == "awaiting_plan_approval":
+            validate_planning(root)
+            if not state["chapters"]:
+                raise WorkflowError("Cannot resume plan approval without configured chapters")
+        return
+    if any(state["approvals"][key] != "approved" for key in ("explanationPolicy", "storyOutline", "slidePlan")):
+        raise WorkflowError(f"Cannot resume {stage!r} while plan approvals are incomplete")
+    if not state["chapters"]:
+        raise WorkflowError(f"Cannot resume {stage!r} without configured chapters")
+    if stage == "html_authoring":
+        return
+    if stage == "html_review":
+        current = snapshot["currentChapter"]
+        if not current:
+            raise WorkflowError("Cannot resume HTML review without a current chapter")
+        entry = state["chapters"][current]
+        if entry["status"] != "review":
+            raise WorkflowError(f"Chapter is not awaiting review: {current}")
+        _load_chapter(root, current, entry)
+        return
+    if stage in {"ready_for_conversion", "converting"}:
+        validate_chapters(root, state, require_complete=True)
+        if not state["handoff"]["readyForCodex"]:
+            raise WorkflowError("Cannot resume conversion because the Work-to-Codex handoff is not ready")
+        return
+    if stage == "bento_validation":
+        validate_output_bundle(root, state, require_final=True)
+        return
+    if stage == "bento_finalization":
+        validate_output_bundle(root, state, require_final=True)
+        if not state["handoff"]["readyForFinalEditing"]:
+            raise WorkflowError("Cannot resume finalization because the Codex-to-Work handoff is not ready")
+        return
+    raise WorkflowError(f"Unsupported resume target: {stage}")
+
+
+def command_resume(root: Path, state: dict[str, Any]) -> None:
+    _require_stage(state, "blocked")
+    snapshot = state["workflow"].get("blockedFrom")
+    if not isinstance(snapshot, dict):
+        raise WorkflowError("Blocked state has no resumable workflow snapshot")
+    _validate_resume_target(root, state, snapshot)
+    state["workflow"].update(snapshot)
+    state["workflow"]["blockingReason"] = None
+    state["workflow"]["blockedFrom"] = None
+    atomic_write_state(root, state)
+    append_work_log(root, f"Resumed workflow at {snapshot['stage']}")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -654,6 +835,7 @@ def parser() -> argparse.ArgumentParser:
     blocked = commands.add_parser("block")
     blocked.add_argument("--owner", choices=("work", "codex"), required=True)
     blocked.add_argument("--reason", required=True)
+    commands.add_parser("resume")
     current_url = commands.add_parser("set-current-url")
     current_url.add_argument("--url", required=True)
     commands.add_parser("clear-current-url")
@@ -698,6 +880,8 @@ def run(args: argparse.Namespace) -> int:
         command_complete(root, state)
     elif command == "block":
         command_block(root, state, args.owner, args.reason)
+    elif command == "resume":
+        command_resume(root, state)
     elif command == "set-current-url":
         if not re.fullmatch(r"http://127\.0\.0\.1:[0-9]{1,5}/", args.url):
             raise WorkflowError("preview.currentUrl must be a 127.0.0.1 HTTP URL")

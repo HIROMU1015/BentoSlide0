@@ -19,6 +19,8 @@ This repository can be copied or cloned as a self-contained production workspace
 
 `deck.yaml` is the machine-readable workflow state. When a local service is needed, double-click `start_deck_workspace.cmd`; it reads the stage and starts only the appropriate service: HTML preview on port 4173 while authoring/reviewing, or the existing Bento Work editor on port 8765 during finalization. Open the copied URL in the ChatGPT Work browser. `stop_deck_workspace.cmd` safely stops the recorded service. Neither launcher opens a normal browser, resets an existing final, nor enables content editing.
 
+Configured repository-relative generated/final paths are honored by the stage-aware launcher. A blocked workflow retains its previous stage and resumes through validated `deck_workflow resume`; final handoff also records an immutable content/structure baseline so final layout and style can change without allowing external content replacement.
+
 Start with [START_HERE.md](START_HERE.md). The full state model and short-command routing are documented in [workflow/WORKFLOW.md](workflow/WORKFLOW.md); `AGENTS.md` provides the compact agent entry point.
 
 ### Developer setup

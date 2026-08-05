@@ -119,6 +119,62 @@ CONTENT_FIELDS_BY_TYPE = {
     "media": {"src", "poster", "kind"},
     "shape": {"shape", "d", "pathBox", "lineStart", "lineEnd"},
 }
+PRESENTATION_EDITABLE_ROOT_FIELDS = {"modified", "theme"}
+PRESENTATION_EDITABLE_SLIDE_FIELDS = {"background"}
+PRESENTATION_EDITABLE_ELEMENT_FIELDS = {
+    "x", "y", "w", "h", "z", "zIndex", "rotation", "opacity",
+    "shadow", "blur", "blend", "backdropFilter", "fx",
+    "fontSize", "fontFamily", "fontWeight", "color", "colorGradient",
+    "align", "valign", "lineHeight", "letterSpacing", "textStroke",
+    "fill", "fillGradient", "stroke", "strokeWidth", "radius",
+    "strokeDash", "strokeStyle", "fit", "style",
+}
+
+
+def protected_content_projection(document: dict[str, Any]) -> dict[str, Any]:
+    """Return content/structure fields while excluding permitted presentation edits."""
+
+    root = {
+        key: value for key, value in document.items()
+        if key not in PRESENTATION_EDITABLE_ROOT_FIELDS | {"slides"}
+    }
+    slides: list[dict[str, Any]] = []
+    for slide in document.get("slides", []):
+        if not isinstance(slide, dict):
+            slides.append({"invalidSlide": slide})
+            continue
+        projected_slide = {
+            key: value for key, value in slide.items()
+            if key not in PRESENTATION_EDITABLE_SLIDE_FIELDS | {"elements"}
+        }
+        elements = []
+        for element in slide.get("elements", []):
+            if not isinstance(element, dict):
+                elements.append({"invalidElement": element})
+                continue
+            elements.append({
+                key: value for key, value in element.items()
+                if key not in PRESENTATION_EDITABLE_ELEMENT_FIELDS
+            })
+        # Bento uses element array order as z-order, which is an allowed presentation edit.
+        projected_slide["elements"] = sorted(
+            elements,
+            key=lambda item: (str(item.get("id", "")), json.dumps(item, ensure_ascii=False, sort_keys=True)),
+        )
+        slides.append(projected_slide)
+    root["slides"] = slides
+    return root
+
+
+def protected_content_fingerprint(document: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        protected_content_projection(document),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def validate_editor_document(
