@@ -1,4 +1,4 @@
 interface:
   display_name: "Bento Slide Build"
-  short_description: "Build deterministic Bento decks from HTML or legacy JSON"
-  default_prompt: "Use $bento-slide-build to build this HTML-first Bento deck, validate native and fallback mappings, and report the evidence bundle."
+  short_description: "Manage and build local HTML-first Bento deck workflows"
+  default_prompt: "Use $bento-slide-build to inspect deck.yaml, advance the local workflow safely, build or finalize the Bento deck, and verify the required evidence."

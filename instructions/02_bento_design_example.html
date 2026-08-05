@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1280, initial-scale=1">
+  <title>HTML-first Bento design example</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --primary: #0f172a;
+      --text: #1e293b;
+      --muted: #64748b;
+      --accent: #1d4ed8;
+      --accent-soft: #dbeafe;
+      --line: #cbd5e1;
+      --warning: #b91c1c;
+      --shadow: 0 18px 50px rgba(15, 23, 42, 0.10);
+      font-family: Inter, "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 40px;
+      background: #e2e8f0;
+      color: var(--text);
+    }
+    #deck {
+      display: grid;
+      gap: 40px;
+      justify-content: center;
+    }
+    .slide {
+      position: relative;
+      width: 1280px;
+      height: 720px;
+      overflow: hidden;
+      background: var(--bg);
+      box-shadow: var(--shadow);
+    }
+    .slide::after {
+      content: attr(data-slide-id);
+      position: absolute;
+      right: 32px;
+      bottom: 22px;
+      font-size: 14px;
+      color: #94a3b8;
+    }
+    .title {
+      position: absolute;
+      left: 72px;
+      top: 54px;
+      width: 1030px;
+      margin: 0;
+      color: var(--primary);
+      font-size: 38px;
+      line-height: 1.25;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+    .lead {
+      position: absolute;
+      left: 72px;
+      top: 128px;
+      width: 1040px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 23px;
+      line-height: 1.45;
+    }
+    .label {
+      color: var(--accent);
+      font-size: 17px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .surface {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+    }
+
+    /* slide 1 */
+    .equation-panel {
+      position: absolute;
+      left: 120px;
+      top: 230px;
+      width: 1040px;
+      height: 180px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #eff6ff 0%, #ffffff 70%);
+      border: 1px solid #bfdbfe;
+      border-radius: 28px;
+    }
+    .equation {
+      font-family: "STIX Two Text", "Times New Roman", serif;
+      color: var(--primary);
+      font-size: 43px;
+      line-height: 1.2;
+    }
+    .equation-notes {
+      position: absolute;
+      left: 120px;
+      top: 448px;
+      width: 1040px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+    .equation-note {
+      min-height: 128px;
+      padding: 22px 24px;
+    }
+    .equation-note h3 {
+      margin: 8px 0 10px;
+      color: var(--primary);
+      font-size: 22px;
+    }
+    .equation-note p {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.5;
+    }
+
+    /* slide 2 */
+    .chart-wrap {
+      position: absolute;
+      left: 72px;
+      top: 214px;
+      width: 740px;
+      height: 392px;
+      padding: 28px 34px;
+    }
+    .bars {
+      height: 285px;
+      display: flex;
+      align-items: end;
+      gap: 60px;
+      padding: 20px 42px 0;
+      border-left: 2px solid var(--line);
+      border-bottom: 2px solid var(--line);
+    }
+    .bar-group {
+      width: 130px;
+      text-align: center;
+    }
+    .bar {
+      width: 92px;
+      margin: 0 auto 12px;
+      border-radius: 16px 16px 4px 4px;
+      background: linear-gradient(180deg, #2563eb, #1d4ed8);
+    }
+    .bar-value {
+      color: var(--primary);
+      font-weight: 800;
+      font-size: 20px;
+    }
+    .bar-label {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 17px;
+    }
+    .interpretation {
+      position: absolute;
+      left: 850px;
+      top: 214px;
+      width: 358px;
+      height: 392px;
+      padding: 30px;
+    }
+    .interpretation h2 {
+      margin: 12px 0 18px;
+      color: var(--primary);
+      font-size: 27px;
+      line-height: 1.35;
+    }
+    .interpretation p {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.55;
+    }
+    .takeaway {
+      position: absolute;
+      left: 850px;
+      top: 512px;
+      width: 358px;
+      min-height: 94px;
+      padding: 20px 22px;
+      background: var(--accent-soft);
+      border-radius: 18px;
+      color: #1e3a8a;
+      font-size: 18px;
+      line-height: 1.45;
+      font-weight: 700;
+    }
+
+    /* slide 3 */
+    .flow {
+      position: absolute;
+      left: 92px;
+      top: 238px;
+      width: 1096px;
+      height: 300px;
+      display: grid;
+      grid-template-columns: 1fr 120px 1fr 120px 1fr;
+      align-items: center;
+    }
+    .flow-node {
+      min-height: 180px;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .flow-node h2 {
+      margin: 10px 0 12px;
+      color: var(--primary);
+      font-size: 27px;
+    }
+    .flow-node p {
+      margin: 0;
+      font-size: 19px;
+      line-height: 1.5;
+    }
+    .arrow {
+      position: relative;
+      height: 4px;
+      margin: 0 18px;
+      background: var(--accent);
+      border-radius: 99px;
+    }
+    .arrow::after {
+      content: "";
+      position: absolute;
+      right: -1px;
+      top: 50%;
+      width: 16px;
+      height: 16px;
+      border-top: 4px solid var(--accent);
+      border-right: 4px solid var(--accent);
+      transform: translateY(-50%) rotate(45deg);
+    }
+    .boundary {
+      position: absolute;
+      left: 232px;
+      top: 572px;
+      width: 816px;
+      padding: 16px 22px;
+      border-left: 5px solid var(--warning);
+      background: #fff7ed;
+      color: #7c2d12;
+      font-size: 17px;
+      line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+<main id="deck">
+  <section
+    class="slide"
+    data-slide-id="ch1-s1"
+    data-layout="equation-dissection"
+    data-transition="none"
+  >
+    <h1 class="title" data-bento-id="ch1-s1-title" data-bento-type="text" data-bento-role="title" data-bento-export="native">
+      相互作用表示は支配項と摂動項を分離して扱う
+    </h1>
+    <p class="lead" data-bento-id="ch1-s1-lead" data-bento-type="text" data-bento-role="lead" data-bento-export="native">
+      数式を中心に置き、記号・直感・成立条件を別の視線位置へ分ける。
+    </p>
+
+    <div class="equation-panel" data-bento-id="ch1-s1-equation-panel" data-bento-type="shape" data-bento-export="auto">
+      <div
+        class="equation"
+        data-bento-id="interaction-picture-equation"
+        data-bento-type="equation"
+        data-bento-role="equation"
+        data-bento-export="native"
+        data-equation-id="interaction_picture_hamiltonian"
+        data-latex="H_I(t)=e^{itH_0}H_1e^{-itH_0}"
+      >
+        H<sub>I</sub>(t) = e<sup>itH<sub>0</sub></sup> H<sub>1</sub> e<sup>−itH<sub>0</sub></sup>
+      </div>
+    </div>
+
+    <div class="equation-notes" data-bento-id="ch1-s1-equation-notes" data-bento-type="group" data-bento-export="auto">
+      <article class="equation-note surface" data-bento-id="ch1-s1-symbols" data-bento-type="text" data-bento-role="supporting-explanation" data-bento-export="native">
+        <div class="label">Symbols</div>
+        <h3>H₀ と H₁</h3>
+        <p>支配項と残差項を区別する。</p>
+      </article>
+      <article class="equation-note surface" data-bento-id="ch1-s1-intuition" data-bento-type="text" data-bento-role="supporting-explanation" data-bento-export="native">
+        <div class="label">Intuition</div>
+        <h3>回転する摂動</h3>
+        <p>H₀の時間発展を基準にH₁を見る。</p>
+      </article>
+      <article class="equation-note surface" data-bento-id="ch1-s1-condition" data-bento-type="text" data-bento-role="boundary" data-bento-export="native">
+        <div class="label">Condition</div>
+        <h3>分割の意味</h3>
+        <p>論文で定義された分解に限定する。</p>
+      </article>
+    </div>
+  </section>
+
+  <section
+    class="slide"
+    data-slide-id="ch1-s2"
+    data-layout="chart-interpretation"
+    data-transition="none"
+  >
+    <h1 class="title" data-bento-id="ch1-s2-title" data-bento-type="text" data-bento-role="title" data-bento-export="native">
+      高次化により同じ精度で必要ステップ数が減少する
+    </h1>
+    <p class="lead" data-bento-id="ch1-s2-lead" data-bento-type="text" data-bento-role="lead" data-bento-export="native">
+      ObservationとInterpretationを分離し、グラフ値は構造化データとして保持する。
+    </p>
+
+    <div class="chart-wrap surface" data-bento-id="step-count-chart" data-bento-type="chart" data-bento-role="primary-visual" data-bento-export="native" data-chart-id="step_count_chart">
+      <div class="bars" aria-hidden="true">
+        <div class="bar-group"><div class="bar" style="height:240px"></div><div class="bar-value">120</div><div class="bar-label">2nd</div></div>
+        <div class="bar-group"><div class="bar" style="height:150px"></div><div class="bar-value">75</div><div class="bar-label">4th</div></div>
+        <div class="bar-group"><div class="bar" style="height:96px"></div><div class="bar-value">48</div><div class="bar-label">8th</div></div>
+      </div>
+      <script type="application/json" data-chart-option>
+        {
+          "preset": "bar",
+          "xAxis": {"type": "category", "data": ["2nd", "4th", "8th"]},
+          "yAxis": {"type": "value"},
+          "series": [{"type": "bar", "data": [120, 75, 48]}]
+        }
+      </script>
+    </div>
+
+    <aside class="interpretation surface" data-bento-id="ch1-s2-interpretation" data-bento-type="text" data-bento-role="interpretation" data-bento-export="native">
+      <div class="label">Interpretation</div>
+      <h2>次数を上げるほど、必要な時間分割数は減る</h2>
+      <p>ただし、1ステップ当たりの回路コストも同時に評価する必要がある。</p>
+    </aside>
+    <div class="takeaway" data-bento-id="ch1-s2-takeaway" data-bento-type="text" data-bento-role="main-claim" data-bento-export="native">
+      ステップ数だけでは総コストの優劣を決められない。
+    </div>
+  </section>
+
+  <section
+    class="slide"
+    data-slide-id="ch1-s3"
+    data-layout="input-process-output"
+    data-transition="none"
+  >
+    <h1 class="title" data-bento-id="ch1-s3-title" data-bento-type="text" data-bento-role="title" data-bento-export="native">
+      評価は入力条件・回路生成・資源集計の3段階で進む
+    </h1>
+    <p class="lead" data-bento-id="ch1-s3-lead" data-bento-type="text" data-bento-role="lead" data-bento-export="native">
+      矢印を実要素として使い、各ノードの意味と順序を変換後も保持する。
+    </p>
+
+    <div class="flow" data-bento-id="ch1-s3-flow" data-bento-type="group" data-bento-export="auto">
+      <article class="flow-node surface" data-bento-id="ch1-s3-input" data-bento-type="text" data-bento-role="process-step" data-bento-export="native" data-layout-group="main-flow">
+        <div class="label">Input</div>
+        <h2>Hamiltonianと精度</h2>
+        <p>論文で固定された対象・誤差条件を入力する。</p>
+      </article>
+      <div class="arrow" data-bento-id="ch1-s3-arrow-1" data-bento-type="shape" data-bento-role="connector" data-bento-export="auto" data-layout-group="main-flow"></div>
+      <article class="flow-node surface" data-bento-id="ch1-s3-process" data-bento-type="text" data-bento-role="process-step" data-bento-export="native" data-layout-group="main-flow">
+        <div class="label">Process</div>
+        <h2>回路を生成</h2>
+        <p>指定された手法と次数で回路構造を構成する。</p>
+      </article>
+      <div class="arrow" data-bento-id="ch1-s3-arrow-2" data-bento-type="shape" data-bento-role="connector" data-bento-export="auto" data-layout-group="main-flow"></div>
+      <article class="flow-node surface" data-bento-id="ch1-s3-output" data-bento-type="text" data-bento-role="process-step" data-bento-export="native" data-layout-group="main-flow">
+        <div class="label">Output</div>
+        <h2>資源を集計</h2>
+        <p>ゲート数、補助量子ビット、実行時間を比較する。</p>
+      </article>
+    </div>
+
+    <div class="boundary" data-bento-id="ch1-s3-boundary" data-bento-type="text" data-bento-role="boundary" data-bento-export="native">
+      Boundary：論文にない追加条件や評価軸を、見栄えのために補わない。
+    </div>
+  </section>
+</main>
+</body>
+</html>

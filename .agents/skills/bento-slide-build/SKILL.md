@@ -1,11 +1,21 @@
 ---
 name: bento-slide-build
-description: Build, inspect, validate, browser-check, and finalize deterministic Bento Slides HTML from HTML/CSS plus registry JSON, or from the legacy coordinate design JSON, using an existing Bento base HTML. Use when asked to generate or regenerate a .bento.html deck, run the localhost Work editor, save final Bento edits, verify runtime integrity, inspect native-versus-fallback decisions, compare screenshots, or refresh slide evidence in this repository.
+description: Manage the repository-centered BentoSlide workflow and build, inspect, validate, browser-check, and finalize deterministic Bento Slides HTML from chapter HTML/CSS plus registry JSON, or from legacy coordinate design JSON. Use for short deck commands, deck.yaml stages, chapter preview, HTML-first conversion, localhost Work editor finalization, runtime integrity, native/fallback evidence, screenshots, or final slide validation in this repository.
 ---
 
 # Bento slide build
 
-Work from the repository root. For new work, treat chapter HTML/CSS and registry JSON together as the source of truth. Do not redesign, rewrite copy, or modify the Bento runtime. The coordinate design JSON flow is legacy compatibility only.
+Work from the repository root. Read `START_HERE.md` and `deck.yaml` first. Route the request through `workflow/WORKFLOW.md` and use `python -m scripts.deck_workflow status --json`; do not ask the user for routine filenames, chapter numbers, logs, or CLI steps. Treat chapter HTML/CSS and registry JSON together as the source of truth before conversion. Do not redesign, rewrite copy, or modify the Bento runtime. The coordinate design JSON flow is legacy compatibility only.
+
+## Local workflow
+
+- For `この資料を作成して`, resolve sources, create planning artifacts, register all chapters, and submit the plan for content approval.
+- For `この方針で進めて`, record plan approval, author the first incomplete HTML/registry pair, start `start_html_preview.cmd`, and request visual approval.
+- For `次へ`, approve the current chapter through the workflow CLI and select the next automatically; become conversion-ready only when every pair is approved.
+- For `BentoSlideに変換して`, require `ready_for_conversion`, run the verified HTML-first flow below, mark conversion only after evidence exists, and begin finalization.
+- For `最終調整を開始して`, require `bento_finalization`, prefer `start_deck_workspace.cmd` or the existing Bento launcher, retain final as authoritative, and run final verification after save/reload.
+
+Use `deck.yaml` as the only machine state source. State changes must go through `scripts.deck_workflow` so schema, approvals, files, atomic writes, and handoffs are validated. Do not infer state from `planning/work-log.md` or chat history.
 
 ## HTML-first flow
 
@@ -16,8 +26,10 @@ Use these four ordered stages. Do not skip from source authoring directly to fin
 Read `docs/html-first-authoring-contract.md`, identify matching sorted `*.preview.html` / `*.registry.json` chapters, and build the complete evidence bundle:
 
 ```powershell
-python -m scripts.build_bento_from_html --html-dir input/ --registry-dir input/ --base Bento_Slides.base.bento.html --output output/presentation.generated.bento.html
+python -m scripts.build_bento_from_html --html-dir chapters/ --registry-dir chapters/ --base Bento_Slides.base.bento.html --output output/presentation.generated.bento.html
 ```
+
+Use the output path recorded in `deck.yaml`.
 
 Keep semantic elements native. Use SVG/image only for the smallest block that requires fallback. Never silently flatten a whole slide.
 
@@ -28,7 +40,7 @@ Inspect `conversion-report.json`. Report every native compatibility class, fallb
 Verify the deterministic double build when reproducibility evidence is requested:
 
 ```powershell
-python -m scripts.check_html_first_determinism --html-dir input/ --registry-dir input/ --base Bento_Slides.base.bento.html --report output/determinism-report.json
+python -m scripts.check_html_first_determinism --html-dir chapters/ --registry-dir chapters/ --base Bento_Slides.base.bento.html --report output/determinism-report.json
 ```
 
 Run the full test matrix shown below. Confirm `diagnostics/resource-scan.json` recursively covers the generated document and passes, media posters/fragments are portable, `summary.criticalElementFail` is zero, and fallback capture remains slide-scoped.

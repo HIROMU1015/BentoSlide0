@@ -4,10 +4,10 @@
 
 Each chapter is represented by two files:
 
-- `chapter-NN.preview.html`: visual hierarchy, composition, text presentation, and fixed layout.
-- `chapter-NN.registry.json`: original LaTeX, paper/figure/table/chart provenance, assets, document metadata, and protected content that must not disappear.
+- `chapters/chapter-NN.preview.html`: visual hierarchy, composition, text presentation, and fixed layout.
+- `chapters/chapter-NN.registry.json`: original LaTeX, paper/figure/table/chart provenance, assets, document metadata, and protected content that must not disappear.
 
-Files are combined in lexical HTML filename order. For `chapter-01.preview.html`, the required registry name is `chapter-01.registry.json`. Registry ids are global across chapters; conflicting duplicate definitions fail the build.
+Files are combined in lexical HTML filename order. For `chapters/chapter-01.preview.html`, the required registry name is `chapters/chapter-01.registry.json`. Registry ids are global across chapters; conflicting duplicate definitions fail the build.
 
 ## HTML contract
 

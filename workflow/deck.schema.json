@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/HIROMU1015/BentoSlide0/workflow/deck.schema.json",
+  "title": "BentoSlide local workflow state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "project", "workflow", "approvals", "chapters", "handoff", "outputs", "preview", "validation"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "request", "primarySource", "supplementarySources"],
+      "properties": {
+        "title": {"type": ["string", "null"]},
+        "request": {"type": "string", "minLength": 1},
+        "primarySource": {"type": ["string", "null"]},
+        "supplementarySources": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "status", "owner", "sourceOfTruth", "currentChapter", "blockingReason"],
+      "properties": {
+        "stage": {"enum": ["initialized", "planning", "awaiting_plan_approval", "html_authoring", "html_review", "ready_for_conversion", "converting", "bento_validation", "bento_finalization", "complete", "blocked"]},
+        "status": {"enum": ["pending", "in_progress", "awaiting_approval", "ready", "blocked", "complete"]},
+        "owner": {"enum": ["work", "codex"]},
+        "sourceOfTruth": {"enum": ["sources", "planning", "chapters", "generated", "final"]},
+        "currentChapter": {"type": ["string", "null"]},
+        "blockingReason": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "approvals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["explanationPolicy", "storyOutline", "slidePlan", "finalBento"],
+      "properties": {
+        "explanationPolicy": {"enum": ["pending", "approved"]},
+        "storyOutline": {"enum": ["pending", "approved"]},
+        "slidePlan": {"enum": ["pending", "approved"]},
+        "finalBento": {"enum": ["pending", "approved"]}
+      }
+    },
+    "chapters": {
+      "type": "object",
+      "propertyNames": {"pattern": "^chapter-[0-9]{2,}$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["html", "registry", "status", "visualApproval"],
+        "properties": {
+          "html": {"type": "string", "minLength": 1},
+          "registry": {"type": "string", "minLength": 1},
+          "status": {"enum": ["planned", "authoring", "review", "complete"]},
+          "visualApproval": {"enum": ["pending", "approved"]}
+        }
+      }
+    },
+    "handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["readyForCodex", "readyForFinalEditing"],
+      "properties": {
+        "readyForCodex": {"type": "boolean"},
+        "readyForFinalEditing": {"type": "boolean"}
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generatedHtml", "generatedJson", "finalHtml", "finalJson"],
+      "properties": {
+        "generatedHtml": {"type": "string", "minLength": 1},
+        "generatedJson": {"type": "string", "minLength": 1},
+        "finalHtml": {"type": "string", "minLength": 1},
+        "finalJson": {"type": "string", "minLength": 1}
+      }
+    },
+    "preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["htmlPort", "bentoPort", "currentUrl"],
+      "properties": {
+        "htmlPort": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "bentoPort": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "currentUrl": {
+          "type": ["string", "null"],
+          "pattern": "^http://127\\.0\\.0\\.1:[0-9]{1,5}/$"
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["finalStatus", "checkedAt"],
+      "properties": {
+        "finalStatus": {"enum": ["pending", "pass", "fail"]},
+        "checkedAt": {"type": ["string", "null"], "format": "date-time"}
+      }
+    }
+  }
+}

@@ -4,6 +4,32 @@ Deterministic conversion tools for producing editable Bento Slides HTML. The def
 
 The previous coordinate-design JSON pipeline remains available as a legacy compatibility path.
 
+## Local-first paper-to-Bento workflow
+
+This repository can be copied or cloned as a self-contained production workspace. Normal operation does not require manually selecting ports or running individual Python modules:
+
+1. Clone or copy the repository for one deck.
+2. Put the source paper in `sources/private/` (or record another repository-relative path in `deck.yaml`).
+3. Optionally refine the request in `REQUEST.md`.
+4. In ChatGPT Work, say: `この資料を作成して`.
+5. Review the proposed content, then say: `この方針で進めて`.
+6. Review each chapter in the local HTML preview. Say `次へ`, or give only the visual correction, after each review.
+7. Ask Codex: `BentoSlideに変換して`.
+8. In ChatGPT Work, say: `最終調整を開始して`, then make final layout edits and save through the Work editor toolbar.
+
+`deck.yaml` is the machine-readable workflow state. When a local service is needed, double-click `start_deck_workspace.cmd`; it reads the stage and starts only the appropriate service: HTML preview on port 4173 while authoring/reviewing, or the existing Bento Work editor on port 8765 during finalization. Open the copied URL in the ChatGPT Work browser. `stop_deck_workspace.cmd` safely stops the recorded service. Neither launcher opens a normal browser, resets an existing final, nor enables content editing.
+
+Start with [START_HERE.md](START_HERE.md). The full state model and short-command routing are documented in [workflow/WORKFLOW.md](workflow/WORKFLOW.md); `AGENTS.md` provides the compact agent entry point.
+
+### Developer setup
+
+```powershell
+python -m pip install -r requirements-browser.txt
+python -m playwright install chromium
+python -m scripts.deck_workflow validate
+python -m scripts.deck_workflow status
+```
+
 ## HTML-first build
 
 Requirements:
@@ -17,8 +43,8 @@ Build one or more lexically sorted chapters:
 
 ```powershell
 python -m scripts.build_bento_from_html `
-  --html-dir input/ `
-  --registry-dir input/ `
+  --html-dir chapters/ `
+  --registry-dir chapters/ `
   --base Bento_Slides.base.bento.html `
   --output output/presentation.generated.bento.html
 ```
@@ -47,9 +73,9 @@ output/
 
 ## Work editor finalization
 
-### Windows one-click launcher
+### Direct Windows editor launcher
 
-After the HTML-first build has produced the default files, daily use on Windows is:
+`start_deck_workspace.cmd` is the normal stage-aware entry point. After the HTML-first build has produced the default files, the lower-level editor launcher remains available:
 
 1. Double-click `start_bento_editor.cmd` in Explorer.
 2. Open `http://127.0.0.1:8765/` in the ChatGPT Work browser, or reload the BentoSlide tab already left open.
@@ -97,6 +123,6 @@ python -m scripts.check_html_first_determinism --html-dir tests/fixtures/html_fi
 Remove-Item Env:BENTO_BROWSER_TEST
 ```
 
-The browser-gated suite covers the feature matrix and the localhost Work editor, including browser serialize/save/reload, revision conflict rejection, runtime preservation, media poster embedding, external SVG fragments, recursive resource scanning, chapter combination, native rendering, localized fallback, visual comparison, and determinism.
+The suite also validates the workflow state machine, atomic `deck.yaml` updates, source discovery, stage-aware output gates, loopback-only HTML preview, traversal rejection, and Windows launcher identity checks. The browser-gated suite covers the feature matrix and the localhost Work editor, including browser serialize/save/reload, revision conflict rejection, runtime preservation, media poster embedding, external SVG fragments, recursive resource scanning, chapter combination, native rendering, localized fallback, visual comparison, and determinism.
 
 GitHub Actions uploads the complete `html-first-evidence` artifact and writes a job summary with test count, native/fallback and visual results, Work editor save/conflict/runtime checks, poster/fragment/recursive-scan counts, unresolved resources, serialize and determinism status, and HTML/Bento JSON SHA-256 values.

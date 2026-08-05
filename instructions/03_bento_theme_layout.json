@@ -1,0 +1,63 @@
+{
+  "canvas": {
+    "width": 1280,
+    "height": 720
+  },
+  "safeArea": {
+    "left": 64,
+    "right": 64,
+    "top": 48,
+    "bottom": 48
+  },
+  "grid": 8,
+  "regions": {
+    "titleY": [48, 120],
+    "leadY": [120, 200],
+    "mainY": [210, 600],
+    "noteY": [620, 672]
+  },
+  "fontSizes": {
+    "title": [32, 40],
+    "lead": [22, 26],
+    "body": [19, 25],
+    "label": [18, 22],
+    "note": [15, 18],
+    "equation": [32, 48]
+  },
+  "fontStacks": {
+    "sans": "Inter, Noto Sans JP, Hiragino Sans, Yu Gothic, sans-serif",
+    "serif": "STIX Two Text, Noto Serif JP, Yu Mincho, serif",
+    "mono": "JetBrains Mono, Consolas, monospace"
+  },
+  "theme": {
+    "background": "#F8FAFC",
+    "surface": "#FFFFFF",
+    "primary": "#0F172A",
+    "accent": "#1D4ED8",
+    "text": "#1E293B",
+    "muted": "#64748B",
+    "line": "#CBD5E1",
+    "accentSoft": "#DBEAFE",
+    "warning": "#B91C1C",
+    "warningSoft": "#FEE2E2"
+  },
+  "htmlAuthoring": {
+    "slideSelector": ".slide[data-slide-id]",
+    "fixedCanvas": true,
+    "allowGrid": true,
+    "allowFlex": true,
+    "allowAbsolutePositioning": true,
+    "defaultExportMode": "auto",
+    "preferSemanticHtml": true,
+    "preferNativeBentoElements": true
+  },
+  "rules": {
+    "majorElementMinimumEdgeDistance": 20,
+    "preferGridAlignment": true,
+    "avoidUnintentionalOverlap": true,
+    "avoidTinyText": true,
+    "splitSlideWhenCrowded": true,
+    "doNotRasterizeTextByDefault": true,
+    "doNotUseWholeSlideSvgFallback": true
+  }
+}

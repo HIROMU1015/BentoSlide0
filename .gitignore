@@ -11,3 +11,9 @@ output/work-editor.pid
 output/work-editor-session.json
 output/work-editor-launcher.lock
 output/work-editor*.log
+output/html-preview.pid
+output/html-preview-session.json
+output/html-preview-launcher.lock
+output/html-preview*.log
+sources/private/*
+!sources/private/.gitkeep

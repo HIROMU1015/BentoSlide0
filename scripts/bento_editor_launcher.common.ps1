@@ -177,6 +177,32 @@ function Enter-BentoLauncherLock {
     }
 }
 
+function Enter-BentoFileLock {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($Name -notmatch '^[A-Za-z0-9._-]+$') {
+        throw 'Invalid launcher lock file name.'
+    }
+    $stateDirectory = Join-Path $Repository 'output'
+    [System.IO.Directory]::CreateDirectory($stateDirectory) | Out-Null
+    $lockPath = Join-Path $stateDirectory $Name
+    try {
+        $stream = [System.IO.File]::Open(
+            $lockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+        return [pscustomobject]@{ Stream = $stream; Acquired = $true; Path = $lockPath }
+    }
+    catch [System.IO.IOException] {
+        return [pscustomobject]@{ Stream = $null; Acquired = $false; Path = $lockPath }
+    }
+}
+
 function Exit-BentoLauncherLock {
     param($Handle)
 
@@ -211,4 +237,59 @@ function Copy-BentoUrlToClipboard {
     catch {
         return $false
     }
+}
+
+function Find-BentoLauncherPython {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [string[]]$RequiredImports = @('bento_converter')
+    )
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    foreach ($relative in @('.venv\Scripts\python.exe', 'venv\Scripts\python.exe', 'env\Scripts\python.exe')) {
+        $path = Join-Path $Repository $relative
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $candidates.Add([pscustomobject]@{ Command = $path; Prefix = @(); Label = $path })
+        }
+    }
+    $py = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($null -ne $py) {
+        $candidates.Add([pscustomobject]@{ Command = $py.Source; Prefix = @('-3'); Label = ($py.Source + ' -3') })
+    }
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($null -ne $python) {
+        $candidates.Add([pscustomobject]@{ Command = $python.Source; Prefix = @(); Label = $python.Source })
+    }
+
+    $importStatement = 'import sys'
+    foreach ($module in $RequiredImports) {
+        if ($module -notmatch '^[A-Za-z_][A-Za-z0-9_.]*$') {
+            throw 'Invalid required Python import name.'
+        }
+        $importStatement += '; import ' + $module
+    }
+    $importStatement += '; print(sys.executable)'
+    $attempts = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in $candidates) {
+        Push-Location $Repository
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = & $candidate.Command @($candidate.Prefix) -c $importStatement 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+            Pop-Location
+        }
+        if ($exitCode -eq 0) {
+            $executable = [string]($output | Select-Object -Last 1)
+            if (Test-Path -LiteralPath $executable -PathType Leaf) {
+                return [pscustomobject]@{ Executable = [System.IO.Path]::GetFullPath($executable); DetectedBy = $candidate.Label }
+            }
+        }
+        $attempts.Add(("{0}: {1}" -f $candidate.Label, (($output | ForEach-Object { [string]$_ }) -join ' ')))
+    }
+    $details = if ($attempts.Count -gt 0) { $attempts -join "`n" } else { 'No Python candidate was found.' }
+    throw "No compatible Python 3 environment was found.`n$details"
 }

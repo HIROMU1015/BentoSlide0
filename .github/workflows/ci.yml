@@ -34,6 +34,12 @@ jobs:
           cmp demo.generated.bento.html demo.bento.html
           echo PASS > ci-output/legacy-byte-match.txt
 
+      - name: Validate local workflow state and preview
+        run: |
+          python -m scripts.deck_workflow validate
+          python -m scripts.deck_workflow status --json
+          python -m unittest tests.test_deck_workflow tests.test_html_preview -v
+
       - name: Build HTML-first feature matrix and evidence bundle
         run: |
           python -m scripts.build_bento_from_html --html-dir tests/fixtures/html_first --registry-dir tests/fixtures/html_first --base Bento_Slides.base.bento.html --output ci-output/presentation.generated.bento.html
@@ -93,7 +99,7 @@ jobs:
       - name: Run Windows launcher tests
         shell: pwsh
         run: |
-          $testOutput = (& python -m unittest tests.test_windows_launcher -v 2>&1 | Out-String)
+          $testOutput = (& python -m unittest tests.test_windows_launcher tests.test_windows_workspace_launcher -v 2>&1 | Out-String)
           $testExitCode = $LASTEXITCODE
           Write-Host $testOutput
           if ($testExitCode -ne 0) {

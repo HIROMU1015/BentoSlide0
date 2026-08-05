@@ -1,0 +1,34 @@
+schemaVersion: 1
+project:
+  title: null
+  request: REQUEST.md
+  primarySource: null
+  supplementarySources: []
+workflow:
+  stage: initialized
+  status: pending
+  owner: work
+  sourceOfTruth: sources
+  currentChapter: null
+  blockingReason: null
+approvals:
+  explanationPolicy: pending
+  storyOutline: pending
+  slidePlan: pending
+  finalBento: pending
+chapters: {}
+handoff:
+  readyForCodex: false
+  readyForFinalEditing: false
+outputs:
+  generatedHtml: output/presentation.generated.bento.html
+  generatedJson: output/presentation.generated.bento.json
+  finalHtml: output/presentation.final.bento.html
+  finalJson: output/presentation.final.bento.json
+preview:
+  htmlPort: 4173
+  bentoPort: 8765
+  currentUrl: null
+validation:
+  finalStatus: pending
+  checkedAt: null
