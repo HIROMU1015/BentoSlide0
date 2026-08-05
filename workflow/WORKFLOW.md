@@ -92,9 +92,17 @@ In `html_review`, record the current digest and select the next incomplete secti
 
 Require `ready_for_conversion`; validate every approval digest; run the single-file HTML-first build to configured generated paths; inspect conversion, browser, screenshot, resource, runtime, and determinism evidence; call `mark-converted`, then `begin-authoring`; start the stage-aware authoring editor. Do not initialize final yet.
 
-### この内容で確定
+### BentoSlideで編集を開始して
 
-Enter `content_review`, validate and approve current authoring document/registry revisions, then call `begin-finalization`. Any intervening write invalidates approval and requires a new review. This is the only normal authoring-to-final handoff.
+Require `bento_authoring`, start the stage-aware editor in authoring mode, and expose the same revision-checked authoring HTML/JSON/registry to the user and Work. Do not enter content review or finalization automatically.
+
+### 内容を確定して
+
+Validate the current authoring document/registry and call `begin-content-review`. Request the user's content/structure approval. Do not call `approve-content` from this phrase alone.
+
+### この内容で最終調整へ
+
+Require `content_review`; treat this phrase as explicit approval of the currently displayed content/structure, call `approve-content`, recheck both revisions, and call `begin-finalization`. Any intervening write invalidates approval. This is the only normal authoring-to-final handoff.
 
 ### 最終調整を開始して
 

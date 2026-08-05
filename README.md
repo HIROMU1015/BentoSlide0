@@ -10,8 +10,11 @@
 4. 構成確認後、`この方針で進めて`と伝えます。
 5. HTMLの見た目を確認し、`次へ`または修正内容だけを伝えます。
 6. Codexへ`BentoSlideに変換して`と伝えます。
-7. Bentoの内容確認後、`この内容で確定`と伝えます。
-8. Workで`最終調整を開始して`と伝え、レイアウト・styleのみを仕上げます。
+7. Workへ`BentoSlideで編集を開始して`と伝え、人間とWorkでBentoを編集します。
+8. 必要な複雑slideだけを部分HTMLから追加・置換します。
+9. `内容を確定して`と伝え、内容・構造のreviewへ進みます。
+10. 承認時に`この内容で最終調整へ`と伝えます。
+11. `最終調整を開始して`と伝え、レイアウト・styleのみを仕上げます。
 
 ファイル名、section番号、状態更新、ログ、port、変換コマンドはエージェントが`deck.yaml`から判断します。`deck.yaml`はschema v2の唯一の機械状態です。Windowsでは`start_deck_workspace.cmd`がstageに応じてHTML previewまたはBento Work editorを起動し、URLだけをclipboardへコピーします。通常ブラウザーは開きません。
 

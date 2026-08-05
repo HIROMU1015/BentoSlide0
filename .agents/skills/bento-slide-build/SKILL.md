@@ -13,7 +13,9 @@ Work from the repository root. Read `START_HERE.md`, `deck.yaml`, and `python -m
 - `この方針で進めて`: approve the plan, author the first incomplete section in the single HTML/registry pair, start HTML preview, and request visual approval.
 - `次へ`: approve the current section digest and select the next; become conversion-ready only when all current digests pass.
 - `BentoSlideに変換して`: require conversion readiness, build and verify generated output, then enter `bento_authoring`; do not create final yet.
-- `この内容で確定`: enter content review, bind approval to current authoring document/registry revisions, then initialize final artifacts and both baselines transactionally.
+- `BentoSlideで編集を開始して`: require `bento_authoring` and start the shared authoring-mode Work editor without crossing an approval gate.
+- `内容を確定して`: validate authoring artifacts, enter `content_review`, and request content/structure approval; do not approve automatically.
+- `この内容で最終調整へ`: treat the phrase as approval of the currently reviewed two revisions, record their canonical digest, and initialize final artifacts and both baselines transactionally.
 - `最終調整を開始して`: require `bento_finalization`, use presentation-only final editing, save/reload, and complete final validation.
 
 Use `scripts.deck_workflow` for every state change. Recompute revision/digest validity rather than trusting chat history. Run `resume` after resolving a blocker. For schema v1, run `migrate --dry-run` before `migrate`; migration is stage-preserving and late-stage evidence must validate before any change.

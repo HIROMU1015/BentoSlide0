@@ -17,3 +17,5 @@ Work/Codexは自分で`deck.yaml`と`python -m scripts.deck_workflow status --js
 ユーザーが承認するのは、全体方針、各sectionの主要構図、Bento authoringの内容、完成finalの4種類です。承認は自動で通過しません。内容承認はauthoring documentとregistryのrevisionへ固定され、後続変更時は自動的にpendingへ戻ります。
 
 Windowsでは`start_deck_workspace.cmd`をダブルクリックすると、現在stageに合うHTML previewまたはWork editorが起動し、URLがclipboardへ入ります。既存finalのresetや通常ブラウザーの起動は行いません。
+
+通常の短文は、`この資料を作成して`、`この方針で進めて`、`次へ`、`BentoSlideに変換して`、`BentoSlideで編集を開始して`、`内容を確定して`、`この内容で最終調整へ`、`最終調整を開始して`です。`内容を確定して`はreview開始であり承認そのものではありません。ユーザーが`この内容で最終調整へ`と明示した時だけ、現在のdocument/registry revisionを承認してfinalizationへ進みます。
