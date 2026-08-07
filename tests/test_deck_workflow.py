@@ -402,6 +402,47 @@ class DeckWorkflowTests(unittest.TestCase):
         final_journal = next(item for item in journals if item["operation"] == "authoring-to-final-initialize")
         self.assertEqual(len(final_journal["artifacts"]), 6)
 
+    def test_v2_content_review_rejects_chart_without_registry_id(self) -> None:
+        state = self.ready_for_conversion()
+        command_migrate(self.root, state, dry_run=False, report_path=None)
+        self.prepare_output_bundle(self.state(), existing_final=False)
+        command_mark_converted(self.root, self.state())
+        command_begin_authoring(self.root, self.state())
+        storage = authoring_storage(self.root, self.state())
+        status = storage.status()
+        html = load_html(storage.target)
+        document = extract_bento_doc(html)
+        document["slides"][0]["elements"].append({
+            "id": "unregistered-chart", "type": "chart",
+            "x": 20, "y": 20, "w": 200, "h": 100, "preset": "bar", "option": {},
+        })
+        storage.save_serialized(
+            embed_bento_doc(html, document),
+            base_document_revision=status["documentRevision"],
+            base_registry_revision=status["registryRevision"],
+        )
+        with self.assertRaisesRegex(ValidationError, "chartId"):
+            command_begin_content_review(self.root, self.state())
+        self.assertEqual(self.state()["workflow"]["stage"], "bento_authoring")
+
+        status = storage.status()
+        html = storage.html_response()
+        document = extract_bento_doc(html)
+        chart = next(
+            element for slide in document["slides"] for element in slide["elements"]
+            if element["id"] == "unregistered-chart"
+        )
+        chart["chartId"] = "registered-chart"
+        registry = json.loads(storage.registry_path.read_text(encoding="utf-8"))
+        registry["charts"]["registered-chart"] = {"title": "Registered chart"}
+        storage.save_serialized(
+            embed_bento_doc(html, document), registry=registry,
+            base_document_revision=status["documentRevision"],
+            base_registry_revision=status["registryRevision"],
+        )
+        command_begin_content_review(self.root, self.state())
+        self.assertEqual(self.state()["workflow"]["stage"], "content_review")
+
     def test_explicit_full_reset_rebuilds_authoring_but_never_final(self) -> None:
         state = self.ready_for_conversion()
         command_migrate(self.root, state, dry_run=False, report_path=None)

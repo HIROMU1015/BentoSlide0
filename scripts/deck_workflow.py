@@ -1497,8 +1497,10 @@ def _pending_content_approval() -> dict[str, Any]:
     }
 
 
-def _current_authoring_status(root: Path, state: dict[str, Any]) -> dict[str, Any]:
-    status = authoring_storage(root, state).status()
+def _current_authoring_status(
+    root: Path, state: dict[str, Any], *, storage: AuthoringArtifactStorage | None = None,
+) -> dict[str, Any]:
+    status = (storage or authoring_storage(root, state)).status()
     approval = state["approvals"]["bentoContent"]
     if approval["status"] == "approved" and (
         approval["documentRevision"] != status["documentRevision"]
@@ -1508,11 +1510,22 @@ def _current_authoring_status(root: Path, state: dict[str, Any]) -> dict[str, An
     return status
 
 
+def _validated_content_review_status(root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    storage = authoring_storage(root, state)
+    storage.acquire_writer_lease()
+    try:
+        status = _current_authoring_status(root, state, storage=storage)
+        storage.content_review_snapshot()
+        return status
+    finally:
+        storage.release_writer_lease()
+
+
 def command_begin_content_review(root: Path, state: dict[str, Any]) -> None:
     if state.get("schemaVersion") != 2:
         raise WorkflowError("Bento content review requires deck schema v2")
     _require_stage(state, "bento_authoring")
-    _current_authoring_status(root, state)
+    _validated_content_review_status(root, state)
     state["handoff"]["readyForBentoAuthoring"] = False
     state["handoff"]["readyForContentReview"] = True
     state["handoff"]["readyForFinalEditing"] = False
@@ -1659,7 +1672,7 @@ def command_approve_content(root: Path, state: dict[str, Any]) -> None:
     if state.get("schemaVersion") != 2:
         raise WorkflowError("Bento content approval requires deck schema v2")
     _require_stage(state, "content_review")
-    status = _current_authoring_status(root, state)
+    status = _validated_content_review_status(root, state)
     document_revision_value = status["documentRevision"]
     registry_revision_value = status["registryRevision"]
     state["approvals"]["bentoContent"] = {
@@ -1679,7 +1692,7 @@ def _initialize_v2_finalization(root: Path, state: dict[str, Any]) -> None:
     storage = authoring_storage(root, state)
     storage.acquire_writer_lease()
     try:
-        authoring_html, authoring_document, authoring_registry = storage.artifact_snapshot()
+        authoring_html, authoring_document, authoring_registry = storage.content_review_snapshot()
         document_revision_value = document_revision(authoring_document)
         registry_revision_value = registry_revision(authoring_registry)
         approval = state["approvals"]["bentoContent"]

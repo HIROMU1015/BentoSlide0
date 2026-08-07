@@ -5,12 +5,19 @@ from __future__ import annotations
 import json
 import re
 import copy
+import threading
+from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .artifact_transaction import ArtifactTransactionStore
+from .artifact_transaction import (
+    ArtifactTransactionStore,
+    bytes_revision,
+    recover_repository_transactions,
+)
 from .bento_validator import validate_bento_doc
 from .errors import BentoConverterError, ValidationError, issue
 from .html_document import assert_runtime_integrity, embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
@@ -21,6 +28,27 @@ from .work_editor_storage import document_revision
 
 class AuthoringConflict(BentoConverterError):
     """Document or registry base revision is stale."""
+
+
+AUTHORING_BACKUP_FORMAT = "bento/authoring-revision-backup/v1"
+
+
+def _locked(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _write_locked(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock, self._writer_operation():
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 REFERENCE_FIELDS = {
@@ -195,6 +223,75 @@ def validate_authoring_document(
     return {"schemaWarnings": list(schema.warnings), "resourceScan": resource_scan, "referenceValidation": "pass"}
 
 
+def validate_content_provenance(
+    document: dict[str, Any], *, registry: dict[str, Any],
+) -> dict[str, Any]:
+    """Reject authoring-only provenance drafts at the content approval boundary."""
+
+    validate_authoring_document(document, current=document, registry=registry)
+    errors: list[str] = []
+    for slide, element in _elements(document):
+        slide_id = slide.get("id")
+        element_id = element.get("id")
+        element_type = element.get("type")
+        html = element.get("html")
+        is_equation = (
+            element_type == "equation"
+            or element.get("latexSource") is not None
+            or element.get("equationId") is not None
+            or (
+                isinstance(html, str)
+                and html.strip().startswith("$$")
+                and html.strip().endswith("$$")
+            )
+        )
+        if is_equation and not (
+            isinstance(element.get("equationId"), str) and element["equationId"].strip()
+        ):
+            errors.append(issue(
+                slide_id=slide_id, element_id=element_id, field="equationId", actual=None,
+                fix="Register the equation and set equationId before content approval.",
+            ))
+        if element_type == "chart" and not (
+            isinstance(element.get("chartId"), str) and element["chartId"].strip()
+        ):
+            errors.append(issue(
+                slide_id=slide_id, element_id=element_id, field="chartId", actual=None,
+                fix="Register the chart provenance and set chartId before content approval.",
+            ))
+        if element_type == "table" and not (
+            isinstance(element.get("tableId"), str) and element["tableId"].strip()
+        ):
+            errors.append(issue(
+                slide_id=slide_id, element_id=element_id, field="tableId", actual=None,
+                fix="Register the table provenance and set tableId before content approval.",
+            ))
+        source_backed_media = (
+            element_type in {"image", "svg"}
+            and (
+                any(_nested_source_ids(element))
+                or element.get("paperSource") is not None
+                or element.get("provenance") is not None
+            )
+        )
+        if source_backed_media and not any(
+            isinstance(element.get(field), str) and element[field].strip()
+            for field in ("figureId", "assetId")
+        ):
+            errors.append(issue(
+                slide_id=slide_id, element_id=element_id, field="figureId/assetId", actual=None,
+                fix="Register source-backed media as a figure or asset before content approval.",
+            ))
+        if element.get("unprovenancedDraft") is True:
+            errors.append(issue(
+                slide_id=slide_id, element_id=element_id, field="unprovenancedDraft", actual=True,
+                fix="Add registry-backed provenance or remove the draft claim before content approval.",
+            ))
+    if errors:
+        raise ValidationError(errors)
+    return {"provenanceValidation": "pass"}
+
+
 def _changed_ids(before: dict[str, Any], after: dict[str, Any]) -> dict[str, list[str]]:
     before_map = {slide["id"]: slide for slide in before.get("slides", [])}
     after_map = {slide["id"]: slide for slide in after.get("slides", [])}
@@ -229,6 +326,8 @@ class AuthoringArtifactStorage:
         reset_authoring: bool = False, state_path: str | Path | None = None,
     ) -> None:
         self.repository = Path(repository).resolve()
+        self._lock = threading.RLock()
+        self.backup_fault_injector = None
         self.editing_mode = "authoring"
         self.source = Path(source).resolve()
         self.source_registry = Path(source_registry).resolve()
@@ -276,6 +375,22 @@ class AuthoringArtifactStorage:
             raise BentoConverterError("Authoring HTML, JSON, and registry must all exist or all be absent")
         self._runtime = runtime_fingerprint(load_html(self.target))
         self._read_current()
+        with self._lock, self._writer_operation():
+            pass
+
+    @contextmanager
+    def _writer_operation(self):
+        acquired_here = not self.transactions.writer_lease.acquired
+        if acquired_here:
+            self.transactions.acquire_writer_lease()
+        try:
+            self.transactions.recover()
+            recover_repository_transactions(self.repository)
+            self._migrate_legacy_backups()
+            yield
+        finally:
+            if acquired_here:
+                self.transactions.release_writer_lease()
 
     def _load_workflow_state(self) -> tuple[bytes, dict[str, Any]]:
         if self.state_path is None:
@@ -332,8 +447,17 @@ class AuthoringArtifactStorage:
         return payload, raw, "pending"
 
     def acquire_writer_lease(self) -> None:
-        if not self.transactions.writer_lease.acquired:
+        acquired_here = not self.transactions.writer_lease.acquired
+        if acquired_here:
             self.transactions.acquire_writer_lease()
+        try:
+            self.transactions.recover()
+            recover_repository_transactions(self.repository)
+            self._migrate_legacy_backups()
+        except BaseException:
+            if acquired_here:
+                self.transactions.release_writer_lease()
+            raise
 
     def release_writer_lease(self) -> None:
         self.transactions.release_writer_lease()
@@ -353,6 +477,7 @@ class AuthoringArtifactStorage:
         validate_authoring_document(document, current=document, registry=registry)
         return html, document, registry
 
+    @_locked
     def status(self) -> dict[str, Any]:
         self.transactions.recover()
         _, document, registry = self._read_current()
@@ -376,6 +501,7 @@ class AuthoringArtifactStorage:
             "contentApprovalStatus": approval_status,
         }
 
+    @_locked
     def document_response(self) -> dict[str, Any]:
         html, document, registry = self._read_current()
         return {
@@ -384,11 +510,28 @@ class AuthoringArtifactStorage:
             "serializedHtml": html,
         }
 
+    @_locked
     def artifact_snapshot(self) -> tuple[str, dict[str, Any], dict[str, Any]]:
         """Return one transaction-lock-consistent authoring HTML/document/registry snapshot."""
 
         return self._read_current()
 
+    @_locked
+    def html_response(self) -> str:
+        """Return HTML from the same transaction-consistent snapshot used by the APIs."""
+
+        html, _, _ = self._read_current()
+        return html
+
+    @_locked
+    def content_review_snapshot(self) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        """Return a consistent artifact set only when approval provenance is complete."""
+
+        html, document, registry = self._read_current()
+        validate_content_provenance(document, registry=registry)
+        return html, document, registry
+
+    @_locked
     def validate_serialized(
         self, serialized_html: str, *, base_document_revision: str,
         base_registry_revision: str, registry: dict[str, Any] | None = None,
@@ -423,30 +566,156 @@ class AuthoringArtifactStorage:
         name = self.target.name
         return name[: -len(".bento.html")] if name.endswith(".bento.html") else self.target.stem
 
+    def _backup_paths(self, html_backup: Path) -> tuple[Path, Path, Path]:
+        stem = html_backup.name[: -len(".bento.html")]
+        return (
+            html_backup.parent / f"{stem}.bento.json",
+            html_backup.parent / f"{stem}.registry.json",
+            html_backup.parent / f"{stem}.manifest.json",
+        )
+
+    def _backup_manifest(self, html_backup: Path, payloads: dict[str, bytes]) -> dict[str, Any]:
+        document = extract_bento_doc(payloads["html"].decode("utf-8-sig"))
+        sidecar = json.loads(payloads["json"].decode("utf-8-sig"))
+        registry = json.loads(payloads["registry"].decode("utf-8-sig"))
+        if document != sidecar:
+            raise BentoConverterError("Authoring revision backup HTML and JSON differ")
+        validate_authoring_document(document, current=document, registry=registry)
+        json_backup, registry_backup, _ = self._backup_paths(html_backup)
+        return {
+            "format": AUTHORING_BACKUP_FORMAT,
+            "documentRevision": document_revision(document),
+            "registryRevision": registry_revision(registry),
+            "files": {
+                "html": {"name": html_backup.name, "revision": bytes_revision(payloads["html"])},
+                "json": {"name": json_backup.name, "revision": bytes_revision(payloads["json"])},
+                "registry": {"name": registry_backup.name, "revision": bytes_revision(payloads["registry"])},
+            },
+        }
+
+    def _valid_backup(self, html_backup: Path) -> bool:
+        json_backup, registry_backup, manifest_path = self._backup_paths(html_backup)
+        if not all(path.is_file() for path in (html_backup, json_backup, registry_backup, manifest_path)):
+            return False
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+            payloads = {
+                "html": html_backup.read_bytes(),
+                "json": json_backup.read_bytes(),
+                "registry": registry_backup.read_bytes(),
+            }
+            expected = self._backup_manifest(html_backup, payloads)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, BentoConverterError):
+            return False
+        return manifest == expected
+
+    def _legacy_backup_payloads(self, html_backup: Path) -> dict[str, bytes] | None:
+        json_backup, registry_backup, manifest_path = self._backup_paths(html_backup)
+        if manifest_path.exists() or not all(path.is_file() for path in (html_backup, json_backup, registry_backup)):
+            return None
+        payloads = {
+            "html": html_backup.read_bytes(),
+            "json": json_backup.read_bytes(),
+            "registry": registry_backup.read_bytes(),
+        }
+        try:
+            self._backup_manifest(html_backup, payloads)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, BentoConverterError):
+            return None
+        return payloads
+
+    def _migrate_legacy_backups(self) -> None:
+        if not self.revisions_dir.is_dir():
+            return
+        prefix = re.escape(self._backup_prefix())
+        pattern = re.compile(rf"^{prefix}\.rev-(\d{{6}})\.bento\.html$")
+        for html_backup in sorted(
+            path for path in self.revisions_dir.glob("*.bento.html") if pattern.match(path.name)
+        ):
+            payloads = self._legacy_backup_payloads(html_backup)
+            if payloads is None:
+                continue
+            _, _, manifest_path = self._backup_paths(html_backup)
+            manifest_payload = (
+                json.dumps(self._backup_manifest(html_backup, payloads), ensure_ascii=False, indent=2, allow_nan=False)
+                + "\n"
+            ).encode("utf-8")
+            ArtifactTransactionStore(self.repository, (manifest_path,)).commit(
+                {manifest_path: manifest_payload}, operation="authoring-revision-backup-manifest-migration",
+            )
+
     def _backups(self) -> list[Path]:
         prefix = re.escape(self._backup_prefix())
         pattern = re.compile(rf"^{prefix}\.rev-(\d{{6}})\.bento\.html$")
-        return sorted(path for path in self.revisions_dir.glob("*.bento.html") if pattern.match(path.name)) if self.revisions_dir.is_dir() else []
+        return sorted(
+            path for path in self.revisions_dir.glob("*.bento.html")
+            if pattern.match(path.name) and self._valid_backup(path)
+        ) if self.revisions_dir.is_dir() else []
+
+    def _next_backup_number(self) -> int:
+        if not self.revisions_dir.is_dir():
+            return 1
+        prefix = re.escape(self._backup_prefix())
+        pattern = re.compile(rf"^{prefix}\.rev-(\d{{6}})\.")
+        numbers = []
+        for path in self.revisions_dir.iterdir():
+            match = pattern.match(path.name)
+            if match:
+                numbers.append(int(match.group(1)))
+        return max(numbers, default=0) + 1
 
     def _create_backup(self) -> Path:
         snapshot = self.transactions.read_snapshot((self.target, self.sidecar, self.registry_path))
         if any(snapshot[path] is None for path in (self.target, self.sidecar, self.registry_path)):
             raise BentoConverterError("Cannot back up an incomplete authoring artifact set")
         self.revisions_dir.mkdir(parents=True, exist_ok=True)
-        backups = self._backups()
-        next_number = max((int(re.search(r"rev-(\d{6})", path.name).group(1)) for path in backups), default=0) + 1
+        next_number = self._next_backup_number()
         backup_stem = f"{self._backup_prefix()}.rev-{next_number:06d}"
         html_backup = self.revisions_dir / f"{backup_stem}.bento.html"
-        html_backup.write_bytes(snapshot[self.target])  # type: ignore[arg-type]
-        (self.revisions_dir / f"{backup_stem}.bento.json").write_bytes(snapshot[self.sidecar])  # type: ignore[arg-type]
-        (self.revisions_dir / f"{backup_stem}.registry.json").write_bytes(snapshot[self.registry_path])  # type: ignore[arg-type]
+        json_backup, registry_backup, manifest_path = self._backup_paths(html_backup)
+        backup_payloads = {
+            "html": snapshot[self.target],
+            "json": snapshot[self.sidecar],
+            "registry": snapshot[self.registry_path],
+        }
+        manifest_payload = (
+            json.dumps(
+                self._backup_manifest(html_backup, backup_payloads),
+                ensure_ascii=False, indent=2, allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        backup_store = ArtifactTransactionStore(
+            self.repository, (html_backup, json_backup, registry_backup, manifest_path),
+            fault_injector=self.backup_fault_injector,
+        )
+
+        def validate_backup() -> None:
+            if not self._valid_backup(html_backup):
+                raise BentoConverterError("Authoring revision backup validation failed")
+
+        manifest = json.loads(manifest_payload)
+        backup_store.commit(
+            {
+                html_backup: backup_payloads["html"],
+                json_backup: backup_payloads["json"],
+                registry_backup: backup_payloads["registry"],
+                manifest_path: manifest_payload,
+            },
+            operation="authoring-revision-backup",
+            target_document_revision=manifest["documentRevision"],
+            target_registry_revision=manifest["registryRevision"],
+            validate_committed=validate_backup,
+        )
         return html_backup
 
+    @_write_locked
     def create_revision_backup(self) -> Path:
         """Persist one recoverable HTML/JSON/registry authoring revision set."""
 
         return self._create_backup()
 
+    @_write_locked
     def save_serialized(
         self, serialized_html: str, *, base_document_revision: str,
         base_registry_revision: str, registry: dict[str, Any] | None = None,
@@ -549,6 +818,7 @@ class AuthoringArtifactStorage:
             "validation": "pass",
         }
 
+    @_write_locked
     def revert(self, *, base_document_revision: str, base_registry_revision: str) -> dict[str, Any]:
         current_html, current_document, current_registry = self._read_current()
         if (
@@ -605,6 +875,8 @@ class AuthoringArtifactStorage:
             target_registry_revision=result_registry_revision, validate_base=validate_base,
             report_path=self.report_path, report_payload=report,
         )
+        _, _, manifest_path = self._backup_paths(html_backup)
+        manifest_path.unlink(missing_ok=True)
         for path in (html_backup, json_backup, registry_backup):
             path.unlink(missing_ok=True)
         return {

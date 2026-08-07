@@ -64,6 +64,8 @@ State writes are atomic. Artifact-changing state transitions use the durable mul
 
 Every save checks both base revisions and validates HTML/JSON/registry, cross references, protected metadata, resources, and runtime before a three-artifact commit. A registry body can be omitted only when the supplied current registry revision is still current and the proposed document validates against that registry. Registry-requiring document changes without the corresponding definitions are rejected.
 
+Authoring may temporarily save provenance drafts. Content review rejects equations without `equationId`, charts without `chartId`, tables without `tableId`, source-backed image/SVG elements without `figureId` or `assetId`, and any element marked `unprovenancedDraft`. Referenced IDs must resolve in the current registry.
+
 Content approval stores current document revision, registry revision, time, and:
 
 ```text
@@ -90,7 +92,7 @@ In `html_review`, record the current digest and select the next incomplete secti
 
 ### BentoSlideに変換して
 
-Require `ready_for_conversion`; validate every approval digest; run the single-file HTML-first build to configured generated paths; inspect conversion, browser, screenshot, resource, runtime, and determinism evidence; call `mark-converted`, then `begin-authoring`; start the stage-aware authoring editor. Do not initialize final yet.
+Require `ready_for_conversion`; validate every approval digest; run the single-file HTML-first build to configured generated paths; inspect conversion, browser, screenshot, resource, runtime, and determinism evidence; call `mark-converted`, then `begin-authoring`; stop at `bento_authoring`. Do not start the editor until `BentoSlideで編集を開始して`, and do not initialize final yet.
 
 ### BentoSlideで編集を開始して
 

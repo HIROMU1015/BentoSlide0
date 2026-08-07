@@ -12,6 +12,8 @@ preparing -> prepared -> replacing -> committed
 
 The writer obtains an OS-level artifact-set lease and a short transaction lock, rechecks base revisions, validates the complete candidate, prepares same-directory backups and temporary files, flushes/fsyncs them, persists the journal, replaces each target while updating journal progress, and validates the installed set. State changes such as approval invalidation are included in the same artifact transaction.
 
+Authoring revision history uses a separate four-artifact transaction for backup HTML, JSON, registry, and a complete manifest written last. The manifest fixes each filename and byte revision plus the document and registry revisions. Number allocation and backup creation run under the authoring writer lease and in-process storage lock. Revert ignores incomplete or mismatched sets; complete legacy three-file backups receive a validated manifest before use.
+
 The operation report is post-commit evidence. If only report writing fails, the journal becomes `report_failed`, the validated new artifacts remain, and the command returns a warning/error. Recovery retries the report and then completes the journal; it does not roll back a sound commit.
 
 ## Recovery

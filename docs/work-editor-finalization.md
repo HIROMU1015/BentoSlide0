@@ -87,7 +87,7 @@ The response-only loader waits for Bento initialization, adds the toolbar dynami
 
 ## Storage guarantees
 
-Before serving requests, the server recovers unfinished journals and acquires the OS-level writer lease for its repository/artifact identity. Authoring commits HTML, JSON, registry, approval-invalidating `deck.yaml` state, backups, and evidence through the common journal transaction. Finalization commits the protected HTML/JSON pair with the frozen registry as validation input. Reads use a consistent snapshot and never see partial replacement. A second writer for the same set is refused; an unrelated deck does not conflict.
+Before serving requests, the server recovers unfinished journals and acquires the OS-level writer lease for its repository/artifact identity. Authoring commits HTML, JSON, registry, approval-invalidating `deck.yaml` state, backups, and evidence through the common journal transaction. Finalization commits the protected HTML/JSON pair with the frozen registry as validation input. `GET /`, status, and document responses use storage-level consistent snapshots and never see partial replacement. A second writer for the same set is refused; an unrelated deck does not conflict.
 
 The default revision retention limit is ten. Toolbar/loader/style/host identifiers exist only in the HTTP response and never in persisted HTML. Operation-report failure after validation retains committed artifacts in `report_failed` and is repaired by the next recovery rather than rolling them back.
 

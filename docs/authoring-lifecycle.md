@@ -15,7 +15,9 @@ HTML and generated registries remain historical evidence. Authoring saves never 
 
 The authoring API request carries `baseDocumentRevision`, `baseRegistryRevision`, `serializedHtml`, and optionally a complete `registry`. The response returns both result revisions, `contentApprovalInvalidated`, and `transactionId`. HTTP 409 indicates a stale document or registry revision. HTTP 422 indicates schema, registry, reference, resource, runtime, or protected-metadata failure.
 
-If registry is omitted, the base registry revision must still match and the document is validated against the current registry. New/changed equation, figure, chart, table, asset, provenance/source, LaTeX, data, or protected references therefore fail unless matching registry definitions are included in the same transaction.
+If registry is omitted, the base registry revision must still match and the document is validated against the current registry. New/changed registry references, provenance/source metadata, LaTeX linked to an equation ID, or protected references therefore fail unless matching registry definitions are included in the same transaction. A chart/table/equation without its provenance ID may exist only as an authoring draft; the content-review gate rejects it.
+
+Content review requires `equationId` for equation-like text, `chartId` for charts, `tableId` for tables, and `figureId` or `assetId` for source-backed images/SVG. It also rejects every element marked `unprovenancedDraft`. This keeps free authoring available without allowing an unregistered research claim or data object into approved final content.
 
 Authoring permits text/notes, slides/elements, data/media, and link/morph/state/connector changes. Changing an existing element's `id` or `type` in place is rejected; use an explicit slide replace. All persistence uses the API or common storage layer, never direct file writes.
 

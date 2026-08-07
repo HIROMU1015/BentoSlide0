@@ -53,6 +53,8 @@ Require browser round-trip evidence, outside-slide hash invariance, cross-slide 
 
 Content approval must match both current `sha256:` revisions and the canonical `bento/content-approval/v1` digest. Any authoring document/registry mutation invalidates it. Only approved current revisions may be copied to final HTML/JSON/registry plus document/registry baselines.
 
+Allow provenance drafts while authoring, but before content review require `equationId` for equations, `chartId` for charts, `tableId` for tables, and `figureId` or `assetId` for source-backed image/SVG elements. Reject `unprovenancedDraft` at that gate. Treat revision backups as complete only when their HTML/JSON/registry byte revisions match the transactionally written manifest.
+
 ## Finalization
 
 In finalization, final `#bento-doc`, frozen final registry, and immutable baselines are authoritative. Use the browser UI for judgment/direct manipulation. For exact geometry, style, theme, background, or z-order, read `docs/fast-final-editing.md`, batch all requested changes, dry-run if uncertain, then save once:

@@ -449,6 +449,13 @@ class WorkEditorStorage:
         return html, document
 
     @_locked
+    def html_response(self) -> str:
+        """Return final HTML from the transaction-consistent artifact snapshot."""
+
+        html, _ = self._current()
+        return html
+
+    @_locked
     def status(self) -> dict[str, Any]:
         self.transactions.recover()
         html, document = self._current()

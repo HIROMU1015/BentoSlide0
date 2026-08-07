@@ -252,6 +252,56 @@ class WorkEditorTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
+    def test_finalization_root_waits_for_consistent_transaction_snapshot(self) -> None:
+        storage = self.storage()
+        edited, revision, expected_document = self.edited_html(storage, delta=9)
+        replacement_started = threading.Event()
+        allow_commit = threading.Event()
+        save_errors: list[BaseException] = []
+        get_errors: list[BaseException] = []
+        response: list[str] = []
+
+        def pause(event: str, _journal: dict) -> None:
+            if event == "replaced:0":
+                replacement_started.set()
+                if not allow_commit.wait(timeout=10):
+                    raise RuntimeError("Timed out waiting to complete final transaction")
+
+        storage.transactions.fault_injector = pause
+        server, thread, base = self.running_server(storage)
+
+        def save() -> None:
+            try:
+                storage.save_serialized(edited, base_revision=revision)
+            except BaseException as exc:
+                save_errors.append(exc)
+
+        def get_root() -> None:
+            try:
+                response.append(self.get(base + "/")[1])
+            except BaseException as exc:
+                get_errors.append(exc)
+
+        save_thread = threading.Thread(target=save)
+        get_thread = threading.Thread(target=get_root)
+        try:
+            save_thread.start()
+            self.assertTrue(replacement_started.wait(timeout=10))
+            get_thread.start()
+            time.sleep(0.2)
+            self.assertTrue(get_thread.is_alive(), "GET / returned during a partial final replacement")
+            allow_commit.set()
+            save_thread.join(timeout=10)
+            get_thread.join(timeout=10)
+            self.assertEqual(save_errors, [])
+            self.assertEqual(get_errors, [])
+            self.assertEqual(extract_bento_doc(response[0]), expected_document)
+        finally:
+            allow_commit.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_non_loopback_bind_is_rejected(self) -> None:
         with self.assertRaises(BentoConverterError):
             create_work_editor_server(self.storage(), host="0.0.0.0", port=0)

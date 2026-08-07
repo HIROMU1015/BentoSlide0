@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 
 from .errors import BentoConverterError, ValidationError
 from .authoring_storage import AuthoringArtifactStorage, AuthoringConflict
-from .html_document import load_html
 from .work_editor_storage import WorkEditorConflict, WorkEditorStorage
 
 
@@ -198,7 +197,7 @@ def create_work_editor_server(
             path = urlparse(self.path).path
             try:
                 if path == "/":
-                    self._html(inject_work_toolbar(load_html(self.server.storage.target)))
+                    self._html(inject_work_toolbar(self.server.storage.html_response()))
                 elif path == "/api/status":
                     self._json(HTTPStatus.OK, self.server.storage.status())
                 elif path == "/api/document":

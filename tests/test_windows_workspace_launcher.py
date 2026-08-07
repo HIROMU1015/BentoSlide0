@@ -190,6 +190,14 @@ class WindowsWorkspaceLauncherTests(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=5)
 
+    def test_initialized_workspace_message_accepts_general_source_materials(self) -> None:
+        repository = self.copy_repository("Bento Initialized")
+        result = self.run_cmd(repository / "start_deck_workspace.cmd", "-NoClipboard")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("source materials under sources/private/", result.stdout)
+        self.assertIn("source manifest", result.stdout)
+        self.assertNotIn("primary PDF", result.stdout)
+
     def test_stage_workspace_launcher_supports_spaced_japanese_path(self) -> None:
         repository = self.copy_repository("Bento Workspace 論文 (Draft)")
         port = self.free_port()
