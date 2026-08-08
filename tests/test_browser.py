@@ -9,6 +9,7 @@ from pathlib import Path
 
 from bento_converter.browser_check import run_browser_check
 from bento_converter.converter import convert_design
+from bento_converter.errors import BrowserCheckError
 from bento_converter.html_document import write_embedded_document
 
 ROOT = Path(__file__).parent.parent
@@ -60,6 +61,28 @@ class BrowserIntegrationTests(unittest.TestCase):
         self.assertTrue(report.equation_id_preserved)
         self.assertTrue(report.latex_source_preserved)
         self.assertFalse(report.latex_source_auto_synced)
+
+    def test_generic_check_rejects_loopback_resource_requests(self):
+        design = json.loads(
+            (FIXTURES / "gpt_bento_design.demo.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "loopback-resource.bento.html"
+            write_embedded_document(
+                ROOT / "Bento_Slides.base.bento.html",
+                output_path,
+                convert_design(design).document,
+            )
+            html = output_path.read_text(encoding="utf-8")
+            output_path.write_text(
+                html.replace(
+                    "</body>",
+                    '<img alt="blocked" src="http://127.0.0.1:9/not-deterministic.png"></body>',
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(BrowserCheckError, "blocked remote"):
+                run_browser_check(output_path)
 
 
 if __name__ == "__main__":

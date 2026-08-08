@@ -40,6 +40,7 @@ class BrowserHarnessUnitTests(unittest.TestCase):
         environment = report["browserEnvironment"]
         self.assertEqual(environment["profiles"]["sourceLayout"]["viewport"]["width"], 1400)
         self.assertEqual(environment["profiles"]["bentoCheck"]["viewport"]["width"], 1600)
+        self.assertFalse(environment["networkPolicy"]["loopbackHttpAllowed"])
         self.assertTrue(environment["fonts"]["digest"].startswith("sha256:"))
         serialized = json.dumps(report)
         self.assertNotIn("hostname", serialized.lower())
@@ -59,11 +60,12 @@ class BrowserHarnessUnitTests(unittest.TestCase):
         self.assertNotEqual(first.profile_digest("sourceLayout"), second.profile_digest("sourceLayout"))
         self.assertEqual(canonical_digest({"b": 2, "a": 1}), canonical_digest({"a": 1, "b": 2}))
 
-    def test_network_policy_allows_self_contained_and_loopback_only(self) -> None:
-        self.assertTrue(BrowserHarness._request_allowed("file:///tmp/deck.html"))
-        self.assertTrue(BrowserHarness._request_allowed("data:image/png;base64,AA=="))
-        self.assertTrue(BrowserHarness._request_allowed("http://127.0.0.1:8765/api/status"))
-        self.assertFalse(BrowserHarness._request_allowed("https://example.com/font.woff2"))
+    def test_conversion_profiles_allow_only_self_contained_resources(self) -> None:
+        for profile in ("sourceLayout", "bentoCheck"):
+            self.assertTrue(BrowserHarness._request_allowed("file:///tmp/deck.html", profile))
+            self.assertTrue(BrowserHarness._request_allowed("data:image/png;base64,AA==", profile))
+            self.assertFalse(BrowserHarness._request_allowed("http://127.0.0.1:8765/api/status", profile))
+            self.assertFalse(BrowserHarness._request_allowed("https://example.com/font.woff2", profile))
 
     def test_incremental_cache_preserves_nested_insertion_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -72,6 +74,33 @@ class BrowserHarnessUnitTests(unittest.TestCase):
             IncrementalSlideCache._atomic_json(path, payload)
             restored = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(list(restored["option"]), ["xAxis", "yAxis", "series"])
+
+    def test_incremental_cache_rejects_mismatched_screenshot_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            screenshot = root / "input.png"
+            screenshot.write_bytes(b"first screenshot")
+            cache = IncrementalSlideCache(root / "cache", reuse=True)
+
+            cache.save_source("slide", "source-key", {"id": "slide"}, {}, screenshot)
+            source_record = json.loads(
+                (cache._directory("slide") / "source.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(source_record["screenshotRevision"].startswith("sha256:"))
+            (cache._directory("slide") / "source.png").write_bytes(b"torn source screenshot")
+            source_target = root / "source-target.png"
+            self.assertIsNone(cache.load_source("slide", "source-key", source_target))
+            self.assertFalse(source_target.exists())
+
+            cache.save_bento("slide", "bento-key", {"id": "slide"}, screenshot)
+            bento_record = json.loads(
+                (cache._directory("slide") / "bento.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(bento_record["screenshotRevision"].startswith("sha256:"))
+            (cache._directory("slide") / "bento.png").write_bytes(b"torn bento screenshot")
+            bento_target = root / "bento-target.png"
+            self.assertFalse(cache.load_bento("slide", "bento-key", bento_target))
+            self.assertFalse(bento_target.exists())
 
 
 if __name__ == "__main__":

@@ -19,14 +19,23 @@ ENVIRONMENT_FORMAT = "bento/browser-environment/v1"
 FONT_ENVIRONMENT_FORMAT = "bento/used-font-environment/v1"
 NETWORK_POLICY_FORMAT = "bento/local-only/v1"
 
+# The immutable Bento runtime probes its public release manifest after some UI
+# operations.  The request must remain blocked for deterministic/offline builds,
+# but the known failed probe is not evidence that deck content depends on it.
+EXPECTED_BLOCKED_REQUESTS = {
+    ("bentoCheck", "https", "bento.page", "/releases/slides/manifest.json", "fetch", "GET"),
+}
+
 PROFILE_CONFIGS: dict[str, dict[str, Any]] = {
     "sourceLayout": {
         "viewport": {"width": 1400, "height": 900},
         "deviceScaleFactor": 1,
+        "networkPolicy": {"allowedSchemes": ["file", "data", "blob", "about"]},
     },
     "bentoCheck": {
         "viewport": {"width": 1600, "height": 1000},
         "deviceScaleFactor": 1,
+        "networkPolicy": {"allowedSchemes": ["file", "data", "blob", "about"]},
     },
 }
 
@@ -176,23 +185,34 @@ class BrowserHarness:
                 self.playwright = None
 
     @staticmethod
-    def _request_allowed(url: str) -> bool:
+    def _request_allowed(url: str, profile: str) -> bool:
+        if profile not in PROFILE_CONFIGS:
+            return False
         parsed = urlsplit(url)
-        if parsed.scheme in {"file", "data", "blob", "about"}:
-            return True
-        if parsed.scheme in {"http", "https"}:
-            return (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
-        return False
+        allowed = set(PROFILE_CONFIGS[profile]["networkPolicy"]["allowedSchemes"])
+        return parsed.scheme in allowed
 
-    def _route(self, route: Any, request: Any) -> None:
-        if self._request_allowed(request.url):
+    def _route(self, profile: str, route: Any, request: Any) -> None:
+        if self._request_allowed(request.url, profile):
             route.continue_()
             return
         parsed = urlsplit(request.url)
+        key = (
+            profile,
+            parsed.scheme or "unknown",
+            parsed.hostname or "",
+            parsed.path or "/",
+            request.resource_type,
+            request.method,
+        )
         self._blocked_requests.append({
-            "scheme": parsed.scheme or "unknown",
-            "host": parsed.hostname or "",
+            "profile": profile,
+            "scheme": key[1],
+            "host": key[2],
+            "path": key[3],
             "resourceType": request.resource_type,
+            "method": request.method,
+            "expected": key in EXPECTED_BLOCKED_REQUESTS,
         })
         route.abort("blockedbyclient")
 
@@ -211,7 +231,7 @@ class BrowserHarness:
             locale="en-US",
             timezone_id="UTC",
         )
-        context.route("**/*", self._route)
+        context.route("**/*", lambda route, request: self._route(profile, route, request))
         context.add_init_script(_ANIMATION_GUARD_JS)
         page = context.new_page()
         try:
@@ -222,10 +242,14 @@ class BrowserHarness:
     def settle(self, page: Any) -> None:
         page.evaluate(_SETTLE_JS)
 
-    def assert_no_blocked_network(self) -> None:
-        if not self._blocked_requests:
+    def assert_no_blocked_network(self, profile: str | None = None) -> None:
+        blocked = [
+            item for item in self._blocked_requests
+            if (profile is None or item.get("profile") == profile) and not item.get("expected")
+        ]
+        if not blocked:
             return
-        requests = sorted({(item["scheme"], item["host"], item["resourceType"]) for item in self._blocked_requests})
+        requests = sorted({(item["scheme"], item["host"], item["resourceType"]) for item in blocked})
         summary = ", ".join(f"{scheme}://{host} ({kind})" for scheme, host, kind in requests)
         raise BrowserCheckError(
             "Deterministic conversion blocked remote or unsupported browser requests: " + summary
@@ -392,8 +416,12 @@ class BrowserHarness:
             "profiles": {name: value for name, value in sorted(self._profiles.items())},
             "networkPolicy": {
                 "format": NETWORK_POLICY_FORMAT,
-                "allowedSchemes": ["file", "data", "blob", "about"],
-                "loopbackHttpAllowed": True,
+                "profiles": {
+                    name: value["networkPolicy"]
+                    for name, value in sorted(PROFILE_CONFIGS.items())
+                },
+                "loopbackHttpAllowed": False,
+                "knownRuntimeProbesRemainBlocked": True,
                 "blockedRequests": sorted(
                     {tuple(sorted(item.items())) for item in self._blocked_requests}
                 ),

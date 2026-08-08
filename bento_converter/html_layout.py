@@ -316,7 +316,7 @@ def extract_computed_layout(
             for chapter in chapters:
                 page.goto(chapter.html_path.as_uri(), wait_until="load")
                 harness.settle(page)
-                harness.assert_no_blocked_network()
+                harness.assert_no_blocked_network("sourceLayout")
                 harness.record_page_environment("sourceLayout", page)
                 environment_digest = harness.profile_digest("sourceLayout")
                 chapter_inputs = [

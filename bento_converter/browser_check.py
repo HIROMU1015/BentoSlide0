@@ -219,6 +219,7 @@ def run_browser_check(
                 "window.bento && window.bento.doc && typeof window.bento.serialize === 'function'"
             )
             _settle_render(page, harness)
+            harness.assert_no_blocked_network("bentoCheck")
             _require(not page_errors, f"JavaScript page errors: {page_errors}")
             actionable_console_errors = [
                 message for message in console_errors if "ERR_BLOCKED_BY_CLIENT" not in message
@@ -507,6 +508,7 @@ def run_browser_check(
                 message for message in console_errors if "ERR_BLOCKED_BY_CLIENT" not in message
             ]
             _require(not actionable_console_errors, f"Browser console errors: {actionable_console_errors}")
+            harness.assert_no_blocked_network("bentoCheck")
     except BrowserCheckError:
         raise
     except Exception as exc:

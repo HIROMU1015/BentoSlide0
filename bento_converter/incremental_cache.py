@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
@@ -28,7 +27,7 @@ from .section_approval import (
 )
 
 
-CACHE_FORMAT = "bento/incremental-slide-cache/v1"
+CACHE_FORMAT = "bento/incremental-slide-cache/v2"
 CACHE_KEY_FORMAT = "bento/incremental-slide-key/v1"
 VISUAL_ALGORITHM_VERSION = "bento/visual-comparison/v2"
 CONVERTER_IMPLEMENTATION_FILES = (
@@ -183,6 +182,10 @@ def comparison_cache_key(source_key: str, bento_key: str, decisions: list[dict[s
     })
 
 
+def _byte_revision(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 class IncrementalSlideCache:
     """Read/write complete per-slide cache records without exposing partial files."""
 
@@ -247,11 +250,19 @@ class IncrementalSlideCache:
             directory / "source.json", slide_id=slide_id, fingerprint=fingerprint, kind="source-layout",
         ) if self.reuse else None
         screenshot = directory / "source.png"
-        if record is None or not screenshot.is_file() or not isinstance(record.get("layout"), dict):
+        try:
+            screenshot_payload = screenshot.read_bytes()
+        except OSError:
+            screenshot_payload = None
+        if (
+            record is None
+            or screenshot_payload is None
+            or record.get("screenshotRevision") != _byte_revision(screenshot_payload)
+            or not isinstance(record.get("layout"), dict)
+        ):
             self.stats["sourceMisses"] += 1
             return None
-        screenshot_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(screenshot, screenshot_target)
+        self._atomic_bytes(screenshot_target, screenshot_payload)
         self.stats["sourceHits"] += 1
         fallbacks = record.get("fallbacks", {})
         return record["layout"], fallbacks if isinstance(fallbacks, dict) else {}
@@ -261,12 +272,14 @@ class IncrementalSlideCache:
         fallbacks: dict[str, str], screenshot: Path,
     ) -> None:
         directory = self._directory(slide_id)
-        self._atomic_bytes(directory / "source.png", screenshot.read_bytes())
+        screenshot_payload = screenshot.read_bytes()
+        self._atomic_bytes(directory / "source.png", screenshot_payload)
         self._atomic_json(directory / "source.json", {
             "format": CACHE_FORMAT,
             "kind": "source-layout",
             "slideId": slide_id,
             "fingerprint": fingerprint,
+            "screenshotRevision": _byte_revision(screenshot_payload),
             "layout": layout,
             "fallbacks": fallbacks,
         })
@@ -277,11 +290,18 @@ class IncrementalSlideCache:
             directory / "bento.json", slide_id=slide_id, fingerprint=fingerprint, kind="bento-render",
         ) if self.reuse else None
         screenshot = directory / "bento.png"
-        if record is None or not screenshot.is_file():
+        try:
+            screenshot_payload = screenshot.read_bytes()
+        except OSError:
+            screenshot_payload = None
+        if (
+            record is None
+            or screenshot_payload is None
+            or record.get("screenshotRevision") != _byte_revision(screenshot_payload)
+        ):
             self.stats["bentoMisses"] += 1
             return False
-        screenshot_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(screenshot, screenshot_target)
+        self._atomic_bytes(screenshot_target, screenshot_payload)
         self.stats["bentoHits"] += 1
         return True
 
@@ -289,12 +309,14 @@ class IncrementalSlideCache:
         self, slide_id: str, fingerprint: str, slide: dict[str, Any], screenshot: Path,
     ) -> None:
         directory = self._directory(slide_id)
-        self._atomic_bytes(directory / "bento.png", screenshot.read_bytes())
+        screenshot_payload = screenshot.read_bytes()
+        self._atomic_bytes(directory / "bento.png", screenshot_payload)
         self._atomic_json(directory / "bento.json", {
             "format": CACHE_FORMAT,
             "kind": "bento-render",
             "slideId": slide_id,
             "fingerprint": fingerprint,
+            "screenshotRevision": _byte_revision(screenshot_payload),
             "slide": slide,
         })
 

@@ -41,7 +41,7 @@ jobs:
       - name: Run unit and non-browser integration tests
         run: |
           set -o pipefail
-          python -m unittest discover -v 2>&1 | tee ci-output/test-output.txt
+          python -m scripts.run_ci_test_group unit --verbosity 2 2>&1 | tee ci-output/test-output.txt
 
       - name: Upload unit evidence
         if: always()
@@ -89,18 +89,12 @@ jobs:
         run: |
           python -m scripts.check_work_editor --source ci-output/presentation.generated.bento.html --evidence-dir ci-output/work-editor-evidence --registry ci-output/diagnostics/merged-registry.json --output ci-output/work-editor-evidence/work-editor-report.json
 
-      - name: Run remaining browser contracts without rebuilding the feature matrix
+      - name: Run all classified browser contracts
         env:
           BENTO_BROWSER_TEST: "1"
         run: |
           set -o pipefail
-          python -m unittest -v \
-            tests.test_browser \
-            tests.test_fallback_capture_scope \
-            tests.test_work_editor.WorkEditorBrowserTests \
-            tests.test_html_first.HtmlFirstBrowserIntegrationTests.test_single_html_and_v2_registry_build \
-            tests.test_html_first.HtmlFirstBrowserIntegrationTests.test_local_resources_inside_svg_fallback_are_self_contained_and_deterministic \
-            2>&1 | tee ci-output/browser-test-output.txt
+          python -m scripts.run_ci_test_group browser --verbosity 2 2>&1 | tee ci-output/browser-test-output.txt
 
       - name: Upload browser integration evidence
         if: always()
@@ -149,6 +143,7 @@ jobs:
           mkdir -p ci-output
           python -m scripts.check_html_first_determinism --html-dir tests/fixtures/html_first --registry-dir tests/fixtures/html_first --base Bento_Slides.base.bento.html --report ci-output/determinism-report.json
           python -m scripts.check_html_first_determinism --html tests/fixtures/html_first/chapter-01.preview.html --registry tests/fixtures/html_first/chapter-01.registry.json --base Bento_Slides.base.bento.html --report ci-output/single-determinism-report.json
+          python -m scripts.run_ci_test_group determinism --verbosity 2 2>&1 | tee ci-output/determinism-test-output.txt
 
       - name: Upload determinism evidence
         if: always()
@@ -159,6 +154,7 @@ jobs:
           path: |
             ci-output/determinism-report.json
             ci-output/single-determinism-report.json
+            ci-output/determinism-test-output.txt
 
   evidence-summary:
     runs-on: ubuntu-latest
@@ -204,7 +200,7 @@ jobs:
         shell: pwsh
         run: |
           $env:BENTO_PYTHON = (Get-Command python.exe).Source
-          $testOutput = (& python -m unittest tests.test_windows_launcher tests.test_windows_workspace_launcher -v 2>&1 | Out-String)
+          $testOutput = (& python -m scripts.run_ci_test_group windows --verbosity 2 2>&1 | Out-String)
           $testExitCode = $LASTEXITCODE
           Write-Host $testOutput
           if ($testExitCode -ne 0) {
