@@ -42,10 +42,33 @@ def run(args: argparse.Namespace) -> int:
         )
         storage.acquire_writer_lease()
     else:
+        baseline_document = None
+        state_path = None
+        if args.repository is not None and (args.repository / "deck.yaml").is_file():
+            from scripts.deck_workflow import load_final_baseline, load_state, validate_output_bundle
+
+            try:
+                workflow_state = load_state(args.repository)
+                if workflow_state.get("schemaVersion") == 2:
+                    if workflow_state["workflow"]["stage"] != "bento_finalization":
+                        raise BentoConverterError(
+                            "Final Work editor can start only during the bento_finalization stage; "
+                            "use deck_workflow reopen-finalization for a completed deck"
+                        )
+                    bundle = validate_output_bundle(args.repository, workflow_state, require_final=True)
+                    baseline_document, _ = load_final_baseline(
+                        args.repository, workflow_state, bundle["generatedDocument"],
+                    )
+                    state_path = args.repository / "deck.yaml"
+            except RuntimeError as exc:
+                if isinstance(exc, BentoConverterError):
+                    raise
+                raise BentoConverterError(str(exc)) from exc
         storage = WorkEditorStorage(
             source=args.source, target=args.target, registry=args.registry, reset_final=args.reset_final,
             allow_content_edit=args.allow_content_edit, backup_limit=args.backup_limit,
             repository=args.repository, hold_writer_lease=True,
+            baseline_document=baseline_document, state_path=state_path,
         )
     server = create_work_editor_server(storage, host=args.host, port=args.port)
     host, port = server.server_address[:2]

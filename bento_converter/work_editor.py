@@ -92,16 +92,14 @@ TOOLBAR = r"""
       ? {baseDocumentRevision:revision,baseRegistryRevision:registryRevision}
       : {baseRevision:revision};
     document.getElementById('work-save').addEventListener('click', async () => {
-      try { const result = await post('/api/save', savePayload(await serialized())); if (result) message(`\u4fdd\u5b58\u3057\u307e\u3057\u305f\uff1arevision ${result.documentRevision || result.revision}`); }
+      try { const result = await post('/api/save', savePayload(await serialized())); if (result) message(result.noOp ? `\u5909\u66f4\u306f\u3042\u308a\u307e\u305b\u3093\uff1arevision ${result.documentRevision || result.revision}` : `\u4fdd\u5b58\u3057\u307e\u3057\u305f\uff1arevision ${result.documentRevision || result.revision}`); }
       catch (error) { message(error.message); }
     });
     document.getElementById('work-save-validate').addEventListener('click', async () => {
       try {
         const html = await serialized();
-        const checked = await post('/api/validate', savePayload(html));
-        if (!checked) return;
         const result = await post('/api/save', savePayload(html));
-        if (result) message(`\u4fdd\u5b58\u30fb\u691c\u8a3c\u3057\u307e\u3057\u305f\u3002revision ${result.documentRevision || result.revision}`);
+        if (result) message(result.noOp ? `\u691c\u8a3c\u6e08\u307f\u30fb\u5909\u66f4\u306a\u3057\u3002revision ${result.documentRevision || result.revision}` : `\u4fdd\u5b58\u30fb\u691c\u8a3c\u3057\u307e\u3057\u305f\u3002revision ${result.documentRevision || result.revision}`);
       } catch (error) { message(error.message); }
     });
     document.getElementById('work-revert').addEventListener('click', async () => {

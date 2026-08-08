@@ -14,6 +14,7 @@ At the start of every task, read `START_HERE.md`, `deck.yaml`, and `python -m sc
 - Preserve the Bento runtime, synchronous HTML-string `window.bento.serialize()` contract, resource/fallback rules, and legacy JSON-first behavior.
 - Update state only through `scripts.deck_workflow`. Respect plan, section/chapter visual, Bento content-revision, and final approval gates. On a resolved blocker, run `resume`; never repair YAML fields manually.
 - A content approval is valid only for the current authoring document and registry revisions. Recompute it on status and every relevant transition or mutation; stale approval is pending.
+- A final approval is valid only for the exact final document, HTML, registry, and runtime revisions. Stop the editor before approval; use `reopen-finalization` before any later edit.
 - Keep unregistered equations, charts, tables, source-backed media, and `unprovenancedDraft` elements in authoring only. Reject them at content review until their required registry IDs and provenance are complete.
 - Server writers hold the OS-level artifact lease for their lifetime. Offline writers must acquire the same lease or use a positively identified matching localhost API; otherwise refuse.
 - Recover unfinished transaction journals before serving reads or writes. A report-only failure keeps committed artifacts and is retried; unsafe recovery changes nothing.

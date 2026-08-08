@@ -23,7 +23,7 @@ from .errors import BentoConverterError, ValidationError, issue
 from .html_document import assert_runtime_integrity, embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
 from .registry_document import REGISTRY_COLLECTIONS, normalize_registry, registry_revision, validate_registry
 from .resource_embedding import scan_document_resources
-from .work_editor_storage import document_revision
+from .work_editor_storage import document_persistence_equal, document_revision
 
 
 class AuthoringConflict(BentoConverterError):
@@ -746,6 +746,20 @@ class AuthoringArtifactStorage:
         assert_runtime_integrity(current_html, updated_html)
         proposed_document_revision = document_revision(proposed_document)
         proposed_registry_revision = registry_revision(proposed_registry)
+        if (
+            operation == "authoring-save"
+            and report_path is None
+            and document_persistence_equal(proposed_document, current_document)
+            and proposed_registry == current_registry
+        ):
+            return {
+                "documentRevision": current_document_revision,
+                "registryRevision": current_registry_revision,
+                "contentApprovalInvalidated": False,
+                "transactionId": None,
+                "validation": "pass",
+                "noOp": True,
+            }
         state_payload, state_base, _ = self._state_invalidation_payload(
             proposed_document_revision, proposed_registry_revision,
         )
@@ -816,6 +830,7 @@ class AuthoringArtifactStorage:
             ),
             "transactionId": transaction["transactionId"],
             "validation": "pass",
+            "noOp": False,
         }
 
     @_write_locked

@@ -300,7 +300,10 @@ def apply_final_edits(
     if protected_content_fingerprint(before_document) != comparison_fingerprint:
         raise FinalEditError("Current final content/structure differs from its immutable finalization baseline")
 
-    storage = WorkEditorStorage(source=source, target=target, registry=registry)
+    storage = WorkEditorStorage(
+        source=source, target=target, registry=registry,
+        baseline_document=comparison_document,
+    )
     before = storage.document_response()
     expected_revision = patch.get("baseRevision")
     if expected_revision is not None:
@@ -382,9 +385,17 @@ def _paths(args: argparse.Namespace) -> FinalEditContext:
     else:
         state = load_state(root)
         stage = state["workflow"]["stage"]
-        if stage not in {"bento_finalization", "complete"}:
+        if stage != "bento_finalization":
             raise FinalEditError(
-                f"deck.yaml stage is {stage!r}; fast final editing requires 'bento_finalization' or 'complete'"
+                f"deck.yaml stage is {stage!r}; fast final editing requires 'bento_finalization'. "
+                "Run 'python -m scripts.deck_workflow reopen-finalization' before changing a completed deck"
+            )
+        final_approval = state["approvals"]["finalBento"]
+        approval_status = final_approval.get("status") if isinstance(final_approval, dict) else final_approval
+        if approval_status != "pending":
+            raise FinalEditError(
+                "Final approval is already recorded; run "
+                "'python -m scripts.deck_workflow reopen-finalization' before making more edits"
             )
         source_field = (
             "authoringHtml"

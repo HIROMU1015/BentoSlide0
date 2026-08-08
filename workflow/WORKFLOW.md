@@ -28,6 +28,7 @@ Expected owner/source and real artifacts are invariant checked. Approval stages 
 status [--json]                 consistent status; refresh stale content approval
 validate                        schema, path, stage, source, and artifact invariants
 migrate [--dry-run]             idempotent schema v1 -> v2 migration
+set-project --kind ... --title  schema v2 early-stage project metadata only
 discover-sources [--json]       resolve manifest/PDF candidates
 initialize                      initialized -> planning
 configure-sections ...          register single-file planned sections
@@ -47,10 +48,13 @@ reset-authoring-from-html       explicit full reset; authoring stage only
 begin-finalization              approved content -> final artifacts/baselines
 approve-final                   final technical check + human approval
 complete                        bento_finalization -> complete
+reopen-finalization             invalidate final approval and resume presentation edits
 block / resume                  preserve and revalidate the complete prior tuple
 ```
 
 State writes are atomic. Artifact-changing state transitions use the durable multi-artifact transaction layer where required. All repository-relative paths are traversal checked, generated/authoring/final paths are distinct, and sidecar paths must match their HTML names.
+
+`set-project` is an agent-facing setup command, not an additional user short phrase. It is limited to schema v2 `initialized`/`planning`, changes only `project.kind` and `project.title`, and leaves stage and approvals unchanged. Blocked workflows must use `resume` first. The kind must match `^[a-z][a-z0-9_-]*$`; the title must be a non-empty single line.
 
 ## Standard single-HTML route
 
@@ -75,6 +79,8 @@ sha256(UTF-8("bento/content-approval/v1\0" + documentRevision + "\0" + registryR
 Current revisions are recomputed on save, status, review, approval, final handoff, segment operations, offline transactions, and migrated-state validation. A mismatch makes the approval pending. Finalization refuses a stale approval.
 
 `begin-finalization` creates final HTML, JSON, final registry, baseline document, baseline registry, and updated state in one transaction. Existing mismatching final artifacts are not overwritten. Final mode freezes content, structure, IDs/types, data, references, and registry; only geometry, presentation style, theme/background, and z-order may change.
+
+Stop the final Work editor before `approve-final`; its lifetime writer lease deliberately prevents approval from racing a save. Final approval binds the document revision, final HTML byte revision, final registry revision, and runtime fingerprint. `complete` recomputes all four and refuses stale approval. Editing a completed or already-approved deck requires `reopen-finalization`, which validates the current bundle, returns to `bento_finalization`, and clears the old approval before any write.
 
 ## Short-command routing
 

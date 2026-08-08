@@ -180,40 +180,59 @@ class OsFileLock:
 
 
 class WriterLease:
-    """Long-lived exclusive writer identity for one repository/artifact set."""
+    """Long-lived exclusive writer identity for every artifact in a set.
+
+    A lease is acquired in canonical path order so two partially overlapping
+    artifact sets cannot write the shared file concurrently or deadlock while
+    acquiring their locks.
+    """
 
     def __init__(self, repository: str | Path, artifacts: Iterable[str | Path], *, state_root: str | Path | None = None):
         self.repository = Path(repository).resolve()
-        self.artifacts = tuple(Path(path).resolve() for path in artifacts)
+        self.artifacts = tuple(sorted(
+            {Path(path).resolve() for path in artifacts}, key=lambda path: str(path).casefold(),
+        ))
+        if not self.artifacts:
+            raise BentoConverterError("Writer lease requires at least one artifact")
         self.identity = _canonical_identity(self.repository, self.artifacts)
         root = Path(state_root).resolve() if state_root else self.repository / "output/.bento-transactions"
-        self.lock = OsFileLock(root / "leases" / f"writer-{self.identity}.lock")
+        self.locks = tuple(
+            OsFileLock(root / "leases" / f"artifact-{_canonical_identity(self.repository, (path,))}.lock")
+            for path in self.artifacts
+        )
         self.metadata_path = root / "leases" / f"writer-{self.identity}.json"
 
     @property
     def acquired(self) -> bool:
-        return self.lock.acquired
+        return all(lock.acquired for lock in self.locks)
 
     def acquire(self) -> None:
         if self.acquired:
             return
-        if not self.lock.acquire(blocking=False):
-            raise ArtifactLeaseConflict("Another process already owns the writer lease for this artifact set")
+        acquired: list[OsFileLock] = []
         try:
+            for lock in self.locks:
+                if not lock.acquire(blocking=False):
+                    raise ArtifactLeaseConflict(
+                        "Another process already owns a writer lease for an overlapping artifact set"
+                    )
+                acquired.append(lock)
             _write_json_fsync(self.metadata_path, {
                 "format": "bento/writer-lease/v1", "identity": self.identity,
                 "repository": str(self.repository), "artifacts": [str(path) for path in self.artifacts],
                 "pid": os.getpid(), "acquiredAt": utc_now(),
             })
         except BaseException:
-            self.lock.release()
+            for lock in reversed(acquired):
+                lock.release()
             raise
 
     def release(self) -> None:
         if not self.acquired:
             return
         self.metadata_path.unlink(missing_ok=True)
-        self.lock.release()
+        for lock in reversed(self.locks):
+            lock.release()
 
     def __enter__(self) -> "WriterLease":
         self.acquire()
@@ -233,6 +252,7 @@ class ArtifactTransactionStore:
         *,
         state_root: str | Path | None = None,
         fault_injector: Callable[[str, dict[str, Any]], None] | None = None,
+        inherited_writer_lease: WriterLease | None = None,
     ) -> None:
         self.repository = Path(repository).resolve()
         self.artifacts = tuple(Path(path).resolve() for path in artifacts)
@@ -249,6 +269,12 @@ class ArtifactTransactionStore:
         self.archive_dir = self.state_root / "archive" / self.identity
         self.transaction_lock = OsFileLock(self.state_root / "locks" / f"transaction-{self.identity}.lock")
         self.writer_lease = WriterLease(self.repository, self.artifacts, state_root=self.state_root)
+        self.inherited_writer_lease = inherited_writer_lease
+        if inherited_writer_lease is not None:
+            if inherited_writer_lease.repository != self.repository:
+                raise BentoConverterError("Inherited writer lease belongs to another repository")
+            if not set(inherited_writer_lease.artifacts).intersection(self.artifacts):
+                raise BentoConverterError("Inherited writer lease does not cover any transaction artifact")
         self.fault_injector = fault_injector
 
     @contextmanager
@@ -262,6 +288,22 @@ class ArtifactTransactionStore:
 
     @contextmanager
     def _writer_guard(self) -> Iterator[None]:
+        if self.inherited_writer_lease is not None:
+            if not self.inherited_writer_lease.acquired:
+                raise ArtifactLeaseConflict("Inherited writer lease is no longer held")
+            inherited = set(self.inherited_writer_lease.artifacts)
+            remaining = tuple(path for path in self.artifacts if path not in inherited)
+            supplemental = (
+                WriterLease(self.repository, remaining, state_root=self.state_root) if remaining else None
+            )
+            if supplemental is not None:
+                supplemental.acquire()
+            try:
+                yield
+            finally:
+                if supplemental is not None:
+                    supplemental.release()
+            return
         acquired_here = not self.writer_lease.acquired
         if acquired_here:
             self.writer_lease.acquire()

@@ -29,6 +29,6 @@ Reads use a consistent snapshot under the shared storage lock and cannot observe
 
 ## Writer ownership
 
-A Work editor server holds the OS-exclusive writer lease from startup to close. The lease identity includes canonical repository and artifact set, so another deck does not conflict while a second writer for the same set is refused. PID/session JSON is discovery evidence, not mutual exclusion.
+A Work editor server holds OS-exclusive per-artifact writer leases from startup to close. Locks are acquired in canonical path order. Disjoint artifact sets may proceed concurrently, while sets sharing even one target are refused; this prevents differently shaped HTML/JSON/registry/state transactions from bypassing one another. PID/session JSON is discovery evidence, not mutual exclusion.
 
 Offline CLIs first attempt the identical lease. If it is held, they may use only a localhost server whose `/api/status` proves the same repository, editing mode, and target artifacts. If that writer cannot be identified safely, the operation is refused. This closes the server-detection/offline-write race.

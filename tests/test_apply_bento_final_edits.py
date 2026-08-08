@@ -98,7 +98,7 @@ class FastFinalEditTests(unittest.TestCase):
             for path in (registry_path, authoring_registry, final_registry, registry_baseline):
                 path.write_text(registry_payload, encoding="utf-8")
 
-        state = yaml.safe_load((ROOT / "deck.yaml").read_text(encoding="utf-8"))
+        state = yaml.safe_load((ROOT / "tests/fixtures/deck_v2.initialized.yaml").read_text(encoding="utf-8"))
         owner_source = {
             "bento_validation": ("codex", "generated"),
             "bento_finalization": ("work", "final"),
@@ -305,7 +305,7 @@ class FastFinalEditTests(unittest.TestCase):
         before = context["target"].read_bytes()
         exit_code, error = self.run_standard_cli(context["patch"])
         self.assertEqual(exit_code, 2)
-        self.assertIn("requires 'bento_finalization' or 'complete'", error)
+        self.assertIn("requires 'bento_finalization'", error)
         self.assertEqual(context["target"].read_bytes(), before)
 
     def test_standard_path_rejects_missing_registry(self) -> None:

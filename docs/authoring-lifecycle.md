@@ -13,7 +13,7 @@ HTML and generated registries remain historical evidence. Authoring saves never 
 
 ## Authoring save contract
 
-The authoring API request carries `baseDocumentRevision`, `baseRegistryRevision`, `serializedHtml`, and optionally a complete `registry`. The response returns both result revisions, `contentApprovalInvalidated`, and `transactionId`. HTTP 409 indicates a stale document or registry revision. HTTP 422 indicates schema, registry, reference, resource, runtime, or protected-metadata failure.
+The authoring API request carries `baseDocumentRevision`, `baseRegistryRevision`, `serializedHtml`, and optionally a complete `registry`. The response returns both result revisions, `contentApprovalInvalidated`, and `transactionId`. HTTP 409 indicates a stale document or registry revision. HTTP 422 indicates schema, registry, reference, resource, runtime, or protected-metadata failure. A fully validated save whose document and registry are unchanged returns `noOp: true` and `transactionId: null`; it creates neither a backup nor a journal/report write.
 
 If registry is omitted, the base registry revision must still match and the document is validated against the current registry. New/changed registry references, provenance/source metadata, LaTeX linked to an equation ID, or protected references therefore fail unless matching registry definitions are included in the same transaction. A chart/table/equation without its provenance ID may exist only as an authoring draft; the content-review gate rejects it.
 
@@ -34,5 +34,7 @@ Authoring permits text/notes, slides/elements, data/media, and link/morph/state/
 - baseline revision/fingerprint metadata in `deck.yaml`.
 
 Finalization changes may affect only geometry, presentation style, theme/background, and z-order. Final validation compares against both baselines and rejects content, structure, identity, data, references, or registry changes.
+
+Final Work editor validation always compares the current/proposed final document with the immutable document baseline, never with the final itself. `approve-final` is run only after stopping the editor and records the exact document, HTML, registry, and runtime revisions. `complete` accepts only that unchanged revision tuple. Use `reopen-finalization` to clear approval before editing an approved or completed deck.
 
 An explicit full authoring reset requires `--confirm RESET-AUTHORING-FROM-HTML`, is allowed only in `bento_authoring`, creates a backup, rebuilds generated/authoring transactionally, invalidates content approval, and proves final artifacts were unchanged.

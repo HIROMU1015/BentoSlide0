@@ -16,7 +16,11 @@ from bento_converter.artifact_transaction import ArtifactLeaseConflict
 from bento_converter.browser_check import find_browser_executable
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint
 from bento_converter.work_editor import create_work_editor_server
-from bento_converter.work_editor_storage import WorkEditorConflict, WorkEditorStorage
+from bento_converter.work_editor_storage import (
+    WorkEditorConflict,
+    WorkEditorStorage,
+    protected_content_fingerprint,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +94,59 @@ class WorkEditorTests(unittest.TestCase):
         self.assertEqual(result["backupCount"], 1)
         self.assertTrue(storage.save_report_path.is_file())
         self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), self.source_hash)
+
+    def test_no_op_save_validates_without_backup_or_transaction(self) -> None:
+        storage = self.storage()
+        status = storage.status()
+        before = storage.target.read_bytes()
+        result = storage.save_serialized(load_html(storage.target), base_revision=status["revision"])
+        self.assertTrue(result["saved"])
+        self.assertTrue(result["noOp"])
+        self.assertIsNone(result["transactionId"])
+        self.assertEqual(result["backupCount"], 0)
+        self.assertEqual(storage.target.read_bytes(), before)
+        self.assertFalse(storage.save_report_path.exists())
+
+    def test_runtime_collab_only_save_is_a_no_op(self) -> None:
+        storage = self.storage()
+        status = storage.status()
+        html = load_html(storage.target)
+        document = extract_bento_doc(html)
+        document["collab"] = {"room": "wss://sync.bento.example/session", "sync": "client/1"}
+        result = storage.save_serialized(
+            embed_bento_doc(html, document), base_revision=status["revision"],
+        )
+        self.assertTrue(result["noOp"])
+        self.assertEqual(result["revision"], status["revision"])
+        self.assertEqual(storage.status()["backupCount"], 0)
+        self.assertNotIn("collab", storage.document_response()["document"])
+
+    def test_immutable_baseline_rejects_preexisting_content_drift(self) -> None:
+        initial = self.storage()
+        baseline = initial.document_response()["document"]
+        html = load_html(initial.target)
+        drifted = extract_bento_doc(html)
+        next(element for slide in drifted["slides"] for element in slide["elements"] if element["id"] == "slide-1-title")["html"] = "drifted"
+        initial.target.write_bytes(embed_bento_doc(html, drifted).encode("utf-8"))
+        initial.sidecar.write_text(json.dumps(drifted, ensure_ascii=False), encoding="utf-8")
+        with self.assertRaises(ValidationError):
+            self.storage(baseline_document=baseline)
+
+    def test_runtime_collab_metadata_is_excluded_from_content_fingerprint(self) -> None:
+        document = extract_bento_doc(load_html(self.source))
+        document["collab"] = {"room": "deck-room", "sync": "client/1"}
+        sync_changed = json.loads(json.dumps(document))
+        sync_changed["collab"]["sync"] = "client/2"
+        room_changed = json.loads(json.dumps(document))
+        room_changed["collab"]["room"] = "other-room"
+        self.assertEqual(
+            protected_content_fingerprint(document),
+            protected_content_fingerprint(sync_changed),
+        )
+        self.assertEqual(
+            protected_content_fingerprint(document),
+            protected_content_fingerprint(room_changed),
+        )
 
     def test_invalid_json_and_schema_failure_leave_target_unchanged(self) -> None:
         storage = self.storage()
@@ -477,9 +534,23 @@ class WorkEditorBrowserTests(unittest.TestCase):
                 page.reload(wait_until="load")
                 page.wait_for_function("window.bento && typeof window.bento.serialize === 'function'")
                 page.wait_for_function("document.querySelector('#work-save') && !document.querySelector('#work-save').disabled")
+                persisted_after_reload = page.evaluate(
+                    "window.bento.doc.slides.flatMap(s=>s.elements).find(e=>e.type==='shape').x"
+                )
 
+                page.evaluate("""() => {
+                  window.__workEditorRequestCounts = {save: 0, validate: 0};
+                  const originalFetch = window.fetch.bind(window);
+                  window.fetch = (...args) => {
+                    const url = String(args[0]);
+                    if (url.endsWith('/api/save')) window.__workEditorRequestCounts.save += 1;
+                    if (url.endsWith('/api/validate')) window.__workEditorRequestCounts.validate += 1;
+                    return originalFetch(...args);
+                  };
+                }""")
                 page.locator("#work-save-validate").click()
-                page.wait_for_function("document.querySelector('#bento-work-editor-status').textContent.includes('保存・検証しました')")
+                page.wait_for_function("document.querySelector('#bento-work-editor-status').textContent.includes('検証済み')")
+                request_counts = page.evaluate("window.__workEditorRequestCounts")
                 with page.expect_navigation(wait_until="load"):
                     page.locator("#work-reload").click()
                 page.wait_for_function("document.querySelector('#work-save') && !document.querySelector('#work-save').disabled")
@@ -511,19 +582,28 @@ class WorkEditorBrowserTests(unittest.TestCase):
                 "isString": True, "isPromise": False, "hasThen": False, "remainedDetached": True,
             })
             self.assertEqual(exception_contract["error"], "serialize-test-error")
+            self.assertEqual(request_counts, {"save": 1, "validate": 0})
             self.assertTrue(exception_contract["sameParent"])
             self.assertTrue(exception_contract["sameNextSibling"])
             self.assertTrue(exception_contract["connected"])
             self.assertTrue(exception_contract["visible"])
-            self.assertEqual(after, before + 2)
+            self.assertEqual(persisted_after_reload, before + 2)
+            self.assertEqual(after, before)
             for identifier in (
                 "bento-work-editor", "bento-work-editor-host",
                 "bento-work-editor-loader", "bento-work-editor-style",
             ):
                 self.assertNotIn(identifier, serialized)
-            self.assertEqual(extract_bento_doc(serialized), extract_bento_doc(load_html(storage.target)))
-            self.assertEqual(json.loads(storage.sidecar.read_text(encoding="utf-8")), extract_bento_doc(serialized))
-            self.assertNotEqual(storage.status()["revision"], revision_before)
+            serialized_document = extract_bento_doc(serialized)
+            stored_document = extract_bento_doc(load_html(storage.target))
+            serialized_document.pop("collab", None)
+            stored_document.pop("collab", None)
+            self.assertEqual(serialized_document, stored_document)
+            self.assertEqual(
+                json.loads(storage.sidecar.read_text(encoding="utf-8")),
+                extract_bento_doc(load_html(storage.target)),
+            )
+            self.assertEqual(storage.status()["revision"], revision_before)
             self.assertEqual(runtime_fingerprint(load_html(storage.target)), runtime_before)
             self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), generated_hash)
         finally:

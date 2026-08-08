@@ -86,7 +86,24 @@
             "approvedAt": {"type": ["string", "null"], "format": "date-time"}
           }
         },
-        "finalBento": {"enum": ["pending", "approved"]}
+        "finalBento": {
+          "oneOf": [
+            {"enum": ["pending", "approved"]},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status", "documentRevision", "htmlRevision", "registryRevision", "runtimeFingerprint", "approvedAt"],
+              "properties": {
+                "status": {"enum": ["pending", "approved"]},
+                "documentRevision": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+                "htmlRevision": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+                "registryRevision": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+                "runtimeFingerprint": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+                "approvedAt": {"type": ["string", "null"], "format": "date-time"}
+              }
+            }
+          ]
+        }
       }
     },
     "sections": {

@@ -84,6 +84,22 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
         self.assertEqual(report["transactionId"], result["transactionId"])
         self.assertIn("demo-slide-1", report["slides"]["changed"])
 
+    def test_no_op_save_does_not_create_backup_report_or_transaction(self) -> None:
+        storage = self.storage()
+        status = storage.status()
+        report_before = storage.report_path.read_bytes() if storage.report_path.exists() else None
+        result = storage.save_serialized(
+            load_html(self.target),
+            base_document_revision=status["documentRevision"],
+            base_registry_revision=status["registryRevision"],
+        )
+        self.assertTrue(result["noOp"])
+        self.assertIsNone(result["transactionId"])
+        self.assertFalse(result["contentApprovalInvalidated"])
+        self.assertEqual(storage._backups(), [])
+        report_after = storage.report_path.read_bytes() if storage.report_path.exists() else None
+        self.assertEqual(report_after, report_before)
+
     def test_document_and_registry_base_revisions_are_both_required(self) -> None:
         storage = self.storage()
         status = storage.status()

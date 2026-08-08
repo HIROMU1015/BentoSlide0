@@ -103,7 +103,7 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         for relative in ("workflow/deck.schema.json", "workflow/deck.v1.schema.json"):
             shutil.copy2(ROOT / relative, self.root / relative)
-        shutil.copy2(ROOT / "deck.yaml", self.root / "deck.yaml")
+        shutil.copy2(ROOT / "tests/fixtures/deck_v2.initialized.yaml", self.root / "deck.yaml")
         (self.root / "REQUEST.md").write_text("# Request\nCreate a research deck.\n", encoding="utf-8")
         (self.root / "sources/private/spec.md").write_text("evidence", encoding="utf-8")
         for filename in ("explanation-policy.md", "story-outline.md", "slide-plan.md"):

@@ -43,7 +43,7 @@ python -m scripts.apply_bento_final_edits --patch path/to/final-edit.json --dry-
 python -m scripts.apply_bento_final_edits --patch path/to/final-edit.json
 ```
 
-With default paths, the command reads lifecycle paths from `deck.yaml`, requires stage `bento_finalization` or `complete`, requires the frozen `outputs.finalRegistry`, and verifies the current and proposed final against `validation.finalBaseline` document and registry metadata. Migrated schema v1 compatibility continues to use its merged registry. For isolated tests only, pass `--source` and `--target` together. Add `--report path/to/report.json` when durable machine-readable evidence is useful.
+With default paths, the command reads lifecycle paths from `deck.yaml`, requires stage `bento_finalization` with final approval still pending, requires the frozen `outputs.finalRegistry`, and verifies the current and proposed final against `validation.finalBaseline` document and registry metadata. Run `python -m scripts.deck_workflow reopen-finalization` before changing an approved or completed schema v2 deck. Migrated schema v1 compatibility continues to use its merged registry. For isolated tests only, pass `--source` and `--target` together. Add `--report path/to/report.json` when durable machine-readable evidence is useful.
 
 Reports are installed atomically. A report cannot overwrite the patch, any generated/authoring/final lifecycle artifact, either immutable baseline, the Work editor save report, `deck.yaml`, or anything in the revisions directory. An existing file is replaceable only when it is already a fast-edit result report.
 

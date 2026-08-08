@@ -18,7 +18,11 @@ from typing import Any, Iterable
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
-from bento_converter.artifact_transaction import ArtifactTransactionStore, recover_repository_transactions
+from bento_converter.artifact_transaction import (
+    ArtifactTransactionStore,
+    file_revision,
+    recover_repository_transactions,
+)
 from bento_converter.authoring_storage import AuthoringArtifactStorage, validate_authoring_document
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError
@@ -46,6 +50,7 @@ LEGACY_SCHEMA_RELATIVE = Path("workflow/deck.v1.schema.json")
 STATE_RELATIVE = Path("deck.yaml")
 SOURCE_MANIFEST_FORMAT = 1
 CHAPTER_PATTERN = re.compile(r"^chapter-[0-9]{2,}$")
+PROJECT_KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
 PLAN_FILES = {
     "explanationPolicy": Path("planning/explanation-policy.md"),
     "storyOutline": Path("planning/story-outline.md"),
@@ -412,6 +417,17 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
             expected_digest = content_approval_digest(approval["documentRevision"], approval["registryRevision"])
             if approval["approvalDigest"] != expected_digest:
                 raise WorkflowError("Bento content approval digest does not match its revisions")
+        final_approval = state["approvals"]["finalBento"]
+        if isinstance(final_approval, dict):
+            revision_values = (
+                final_approval["documentRevision"], final_approval["htmlRevision"],
+                final_approval["registryRevision"], final_approval["runtimeFingerprint"],
+                final_approval["approvedAt"],
+            )
+            if final_approval["status"] == "pending" and any(value is not None for value in revision_values):
+                raise WorkflowError("Pending final Bento approval must not retain revision metadata")
+            if final_approval["status"] == "approved" and any(value is None for value in revision_values):
+                raise WorkflowError("Approved final Bento requires document, HTML, registry, runtime, and timestamp revisions")
     baseline = state["validation"].get("finalBaseline")
     if baseline is not None:
         document_field = "path" if version == 1 else "documentPath"
@@ -838,6 +854,9 @@ def validate_output_bundle(
     if runtime_fingerprint(final_html) != result["generatedRuntime"]:
         raise WorkflowError("Final Bento runtime differs from generated runtime")
     result["finalDocument"] = final_document
+    result["finalHtmlRevision"] = file_revision(final_html_path)
+    result["finalRegistryRevision"] = registry_revision(registry)
+    result["finalRuntimeFingerprint"] = "sha256:" + runtime_fingerprint(final_html)
     return result
 
 
@@ -1033,6 +1052,20 @@ def migrate_v1_state(
         ),
         "approvedAt": now if approved_content else None,
     }
+    final_approval = _pending_final_approval()
+    if late_stage and state["approvals"].get("finalBento") == "approved":
+        if registry_revision_value is None:
+            raise WorkflowError("Approved late-stage final cannot migrate without a registry revision")
+        final_html_path = _repo_path(root, outputs["finalHtml"], field="outputs.finalHtml")
+        final_html_value = load_html(final_html_path)
+        final_approval = {
+            "status": "approved",
+            "documentRevision": document_revision(extract_bento_doc(final_html_value)),
+            "htmlRevision": file_revision(final_html_path),
+            "registryRevision": registry_revision_value,
+            "runtimeFingerprint": "sha256:" + runtime_fingerprint(final_html_value),
+            "approvedAt": state["validation"].get("checkedAt") or now,
+        }
     migrated = {
         "schemaVersion": 2,
         "project": {
@@ -1051,6 +1084,7 @@ def migrate_v1_state(
         "approvals": {
             **state["approvals"],
             "bentoContent": bento_content,
+            "finalBento": final_approval,
         },
         "sections": _migration_sections(state),
         "chapters": copy.deepcopy(state["chapters"]),
@@ -1175,7 +1209,103 @@ def command_migrate(
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
+def _effective_state(root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    """Derive revision-bound approval status without mutating deck.yaml."""
+
+    effective = copy.deepcopy(state)
+    if state.get("schemaVersion") != 2:
+        return effective
+    outputs = state["outputs"]
+    content_approval = effective["approvals"]["bentoContent"]
+    if content_approval["status"] == "approved" and outputs.get("authoringHtml") and outputs.get("authoringRegistry"):
+        try:
+            authoring_document = extract_bento_doc(load_html(_repo_path(
+                root, outputs["authoringHtml"], field="outputs.authoringHtml",
+            )))
+            if authoring_document != _load_sidecar(_repo_path(
+                root, outputs["authoringJson"], field="outputs.authoringJson",
+            )):
+                raise WorkflowError("Authoring HTML and JSON sidecar differ")
+            authoring_registry = _read_json(_repo_path(
+                root, outputs["authoringRegistry"], field="outputs.authoringRegistry",
+            ), label="authoring registry")
+            if (
+                content_approval["documentRevision"] != document_revision(authoring_document)
+                or content_approval["registryRevision"] != registry_revision(authoring_registry)
+            ):
+                effective["approvals"]["bentoContent"] = _pending_content_approval()
+        except (BentoConverterError, WorkflowError, OSError):
+            effective["approvals"]["bentoContent"] = _pending_content_approval()
+
+    final_approval = effective["approvals"]["finalBento"]
+    if isinstance(final_approval, dict) and final_approval.get("status") == "approved":
+        try:
+            final_html_path = _repo_path(root, outputs["finalHtml"], field="outputs.finalHtml")
+            final_registry_path = _repo_path(root, outputs["finalRegistry"], field="outputs.finalRegistry")
+            final_html = load_html(final_html_path)
+            final_document = extract_bento_doc(final_html)
+            if final_document != _load_sidecar(_repo_path(
+                root, outputs["finalJson"], field="outputs.finalJson",
+            )):
+                raise WorkflowError("Final HTML and JSON sidecar differ")
+            current_values = {
+                "documentRevision": document_revision(final_document),
+                "htmlRevision": file_revision(final_html_path),
+                "registryRevision": registry_revision(_read_json(final_registry_path, label="final registry")),
+                "runtimeFingerprint": "sha256:" + runtime_fingerprint(final_html),
+            }
+            if any(final_approval.get(field) != value for field, value in current_values.items()):
+                effective["approvals"]["finalBento"] = _pending_final_approval()
+                effective["validation"]["finalStatus"] = "pending"
+                effective["validation"]["checkedAt"] = None
+        except (BentoConverterError, WorkflowError, OSError):
+            effective["approvals"]["finalBento"] = _pending_final_approval()
+            effective["validation"]["finalStatus"] = "pending"
+            effective["validation"]["checkedAt"] = None
+    return effective
+
+
+def validate_current_stage(root: Path, state: dict[str, Any]) -> None:
+    """Validate the artifacts promised by the current workflow stage."""
+
+    stage = state["workflow"]["stage"]
+    if stage in {"initialized", "planning", "blocked"}:
+        return
+    if stage == "awaiting_plan_approval":
+        validate_planning(root)
+        return
+    if stage in {"html_authoring", "html_review", "ready_for_conversion", "converting"}:
+        validate_html_authoring(
+            root, state, require_approved=stage in {"ready_for_conversion", "converting"},
+        )
+        return
+    if stage == "bento_validation":
+        validate_output_bundle(root, state, require_final=state.get("schemaVersion") == 1)
+        if state.get("schemaVersion") == 2:
+            authoring_storage(root, state).status()
+        return
+    if stage == "bento_authoring":
+        authoring_storage(root, state).status()
+        return
+    if stage == "content_review":
+        _validated_content_review_status(root, state)
+        return
+    if stage in {"bento_finalization", "complete"}:
+        bundle = validate_output_bundle(root, state, require_final=True)
+        if stage == "complete":
+            approval = state["approvals"]["finalBento"]
+            if not isinstance(approval, dict) or approval.get("status") != "approved":
+                raise WorkflowError("Completed schema v2 deck requires revision-bound final approval")
+            current = _final_approval_snapshot(bundle, approved_at=approval["approvedAt"])
+            for field in ("documentRevision", "htmlRevision", "registryRevision", "runtimeFingerprint"):
+                if approval.get(field) != current[field]:
+                    raise WorkflowError("Completed deck has stale final approval")
+        return
+    raise WorkflowError(f"Unsupported workflow stage: {stage}")
+
+
 def command_status(root: Path, state: dict[str, Any], *, as_json: bool) -> None:
+    state = _effective_state(root, state)
     if as_json:
         # ASCII-safe JSON survives Windows PowerShell 5 native-process decoding;
         # ConvertFrom-Json restores the original Unicode path strings.
@@ -1191,6 +1321,31 @@ def command_status(root: Path, state: dict[str, Any], *, as_json: bool) -> None:
         print(f"current section: {workflow['currentSection'] or '-'}")
     if workflow.get("blockingReason"):
         print(f"blocking reason: {workflow['blockingReason']}")
+    if state.get("schemaVersion") == 2:
+        print(f"content approval: {state['approvals']['bentoContent']['status']}")
+        print(f"final approval: {_final_approval_status(state['approvals']['finalBento'])}")
+
+
+def command_set_project(root: Path, state: dict[str, Any], *, kind: str, title: str) -> None:
+    if state.get("schemaVersion") != 2:
+        raise WorkflowError("set-project requires deck schema v2")
+    _require_stage(state, "initialized", "planning")
+    if not isinstance(kind, str) or not PROJECT_KIND_PATTERN.fullmatch(kind):
+        raise WorkflowError("project kind must match ^[a-z][a-z0-9_-]*$")
+    if (
+        not isinstance(title, str)
+        or not title
+        or title != title.strip()
+        or "\r" in title
+        or "\n" in title
+    ):
+        raise WorkflowError("project title must be a non-empty single line without outer whitespace")
+
+    next_state = copy.deepcopy(state)
+    next_state["project"]["kind"] = kind
+    next_state["project"]["title"] = title
+    atomic_write_state(root, next_state)
+    append_work_log(root, f"Set project metadata: kind={kind!r}, title={title!r}")
 
 
 def command_initialize(root: Path, state: dict[str, Any]) -> None:
@@ -1497,6 +1652,66 @@ def _pending_content_approval() -> dict[str, Any]:
     }
 
 
+def _pending_final_approval() -> dict[str, Any]:
+    return {
+        "status": "pending", "documentRevision": None, "htmlRevision": None,
+        "registryRevision": None, "runtimeFingerprint": None, "approvedAt": None,
+    }
+
+
+def _final_approval_status(approval: Any) -> str:
+    return str(approval.get("status")) if isinstance(approval, dict) else str(approval)
+
+
+def _final_approval_snapshot(bundle: dict[str, Any], *, approved_at: str | None = None) -> dict[str, Any]:
+    html_revision = bundle.get("finalHtmlRevision")
+    registry_revision_value = bundle.get("finalRegistryRevision")
+    runtime = bundle.get("finalRuntimeFingerprint")
+    if not all(isinstance(value, str) for value in (html_revision, registry_revision_value, runtime)):
+        raise WorkflowError("Final artifact revisions are unavailable")
+    return {
+        "status": "approved",
+        "documentRevision": document_revision(bundle["finalDocument"]),
+        "htmlRevision": html_revision,
+        "registryRevision": registry_revision_value,
+        "runtimeFingerprint": runtime,
+        "approvedAt": approved_at or utc_now(),
+    }
+
+
+def _final_artifact_store(root: Path, state: dict[str, Any]) -> ArtifactTransactionStore:
+    outputs = state["outputs"]
+    artifacts = [
+        _repo_path(root, outputs["finalHtml"], field="outputs.finalHtml"),
+        _repo_path(root, outputs["finalJson"], field="outputs.finalJson"),
+        root / STATE_RELATIVE,
+    ]
+    if state.get("schemaVersion") == 2 and outputs.get("finalRegistry"):
+        artifacts.append(_repo_path(root, outputs["finalRegistry"], field="outputs.finalRegistry"))
+    return ArtifactTransactionStore(root, artifacts)
+
+
+def _commit_final_state(
+    root: Path, store: ArtifactTransactionStore, before: bytes, state: dict[str, Any], *, operation: str,
+) -> None:
+    validate_state(root, state)
+    state_path = root / STATE_RELATIVE
+    payload = yaml.safe_dump(state, allow_unicode=True, sort_keys=False).encode("utf-8")
+
+    def validate_base() -> None:
+        if state_path.read_bytes() != before:
+            raise WorkflowError("deck.yaml changed before the final workflow transition")
+
+    def validate_committed() -> None:
+        installed = yaml.safe_load(state_path.read_text(encoding="utf-8-sig"))
+        validate_state(root, installed)
+
+    store.commit(
+        {state_path: payload}, operation=operation,
+        validate_base=validate_base, validate_committed=validate_committed,
+    )
+
+
 def _current_authoring_status(
     root: Path, state: dict[str, Any], *, storage: AuthoringArtifactStorage | None = None,
 ) -> dict[str, Any]:
@@ -1624,7 +1839,9 @@ def command_reset_authoring_from_html(
             payloads[state_path] = yaml.safe_dump(
                 next_state, allow_unicode=True, sort_keys=False,
             ).encode("utf-8")
-            transaction = ArtifactTransactionStore(root, payloads)
+            transaction = ArtifactTransactionStore(
+                root, payloads, inherited_writer_lease=storage.transactions.writer_lease,
+            )
 
             def validate_base() -> None:
                 if state_path.read_bytes() != state_base:
@@ -1745,12 +1962,17 @@ def _initialize_v2_finalization(root: Path, state: dict[str, Any]) -> None:
         next_state["handoff"]["readyForBentoAuthoring"] = False
         next_state["handoff"]["readyForContentReview"] = False
         next_state["handoff"]["readyForFinalEditing"] = True
+        next_state["approvals"]["finalBento"] = _pending_final_approval()
+        next_state["validation"]["finalStatus"] = "pending"
+        next_state["validation"]["checkedAt"] = None
         _transition(next_state, "bento_finalization", "in_progress")
         state_payload = yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8")
         state_path = root / STATE_RELATIVE
         base_state_payload = state_path.read_bytes()
         transaction_payloads = {**payloads, state_path: state_payload}
-        transaction = ArtifactTransactionStore(root, transaction_payloads)
+        transaction = ArtifactTransactionStore(
+            root, transaction_payloads, inherited_writer_lease=storage.transactions.writer_lease,
+        )
 
         def validate_base() -> None:
             _, current_document, current_registry = storage.artifact_snapshot()
@@ -1808,26 +2030,97 @@ def command_begin_finalization(root: Path, state: dict[str, Any]) -> None:
 
 def command_approve_final(root: Path, state: dict[str, Any]) -> None:
     _require_stage(state, "bento_finalization")
-    validate_output_bundle(root, state, require_final=True)
-    state["approvals"]["finalBento"] = "approved"
-    state["validation"]["finalStatus"] = "pass"
-    state["validation"]["checkedAt"] = utc_now()
-    state["workflow"]["status"] = "awaiting_approval"
-    atomic_write_state(root, state)
+    if state.get("schemaVersion") == 1:
+        validate_output_bundle(root, state, require_final=True)
+        state["approvals"]["finalBento"] = "approved"
+        state["validation"]["finalStatus"] = "pass"
+        state["validation"]["checkedAt"] = utc_now()
+        state["workflow"]["status"] = "ready"
+        atomic_write_state(root, state)
+        append_work_log(root, "Recorded final Bento approval after technical validation")
+        return
+    store = _final_artifact_store(root, state)
+    store.acquire_writer_lease()
+    try:
+        store.recover()
+        before = (root / STATE_RELATIVE).read_bytes()
+        bundle = validate_output_bundle(root, state, require_final=True)
+        next_state = copy.deepcopy(state)
+        next_state["approvals"]["finalBento"] = _final_approval_snapshot(bundle)
+        next_state["validation"]["finalStatus"] = "pass"
+        next_state["validation"]["checkedAt"] = utc_now()
+        next_state["workflow"]["status"] = "ready"
+        _commit_final_state(root, store, before, next_state, operation="approve-final-revisions")
+        state.clear()
+        state.update(next_state)
+    finally:
+        store.release_writer_lease()
     append_work_log(root, "Recorded final Bento approval after technical validation")
 
 
 def command_complete(root: Path, state: dict[str, Any]) -> None:
     _require_stage(state, "bento_finalization")
-    if state["approvals"]["finalBento"] != "approved":
+    approval = state["approvals"]["finalBento"]
+    if _final_approval_status(approval) != "approved":
         raise WorkflowError("Final Bento approval is still pending")
-    validate_output_bundle(root, state, require_final=True)
-    state["validation"]["finalStatus"] = "pass"
-    state["validation"]["checkedAt"] = utc_now()
-    state["handoff"]["readyForFinalEditing"] = False
-    _transition(state, "complete", "complete")
-    atomic_write_state(root, state)
+    if state.get("schemaVersion") == 1:
+        validate_output_bundle(root, state, require_final=True)
+        state["validation"]["finalStatus"] = "pass"
+        state["validation"]["checkedAt"] = utc_now()
+        state["handoff"]["readyForFinalEditing"] = False
+        _transition(state, "complete", "complete")
+        atomic_write_state(root, state)
+        append_work_log(root, "Completed final Bento validation")
+        return
+    if not isinstance(approval, dict):
+        raise WorkflowError("Legacy final approval is not revision-bound; run approve-final again")
+    store = _final_artifact_store(root, state)
+    store.acquire_writer_lease()
+    try:
+        store.recover()
+        before = (root / STATE_RELATIVE).read_bytes()
+        bundle = validate_output_bundle(root, state, require_final=True)
+        current = _final_approval_snapshot(bundle, approved_at=approval["approvedAt"])
+        revision_fields = (
+            "documentRevision", "htmlRevision", "registryRevision", "runtimeFingerprint",
+        )
+        if any(approval.get(field) != current[field] for field in revision_fields):
+            raise WorkflowError("Final Bento approval is stale; stop editing and run approve-final again")
+        next_state = copy.deepcopy(state)
+        next_state["validation"]["finalStatus"] = "pass"
+        next_state["validation"]["checkedAt"] = utc_now()
+        next_state["handoff"]["readyForFinalEditing"] = False
+        _transition(next_state, "complete", "complete")
+        _commit_final_state(root, store, before, next_state, operation="complete-final-revisions")
+        state.clear()
+        state.update(next_state)
+    finally:
+        store.release_writer_lease()
     append_work_log(root, "Completed final Bento validation")
+
+
+def command_reopen_finalization(root: Path, state: dict[str, Any]) -> None:
+    if state.get("schemaVersion") != 2:
+        raise WorkflowError("reopen-finalization requires deck schema v2")
+    _require_stage(state, "bento_finalization", "complete")
+    store = _final_artifact_store(root, state)
+    store.acquire_writer_lease()
+    try:
+        store.recover()
+        before = (root / STATE_RELATIVE).read_bytes()
+        validate_output_bundle(root, state, require_final=True)
+        next_state = copy.deepcopy(state)
+        next_state["approvals"]["finalBento"] = _pending_final_approval()
+        next_state["validation"]["finalStatus"] = "pending"
+        next_state["validation"]["checkedAt"] = None
+        next_state["handoff"]["readyForFinalEditing"] = True
+        _transition(next_state, "bento_finalization", "in_progress")
+        _commit_final_state(root, store, before, next_state, operation="reopen-finalization")
+        state.clear()
+        state.update(next_state)
+    finally:
+        store.release_writer_lease()
+    append_work_log(root, "Reopened finalization and invalidated the previous final approval")
 
 
 def command_block(root: Path, state: dict[str, Any], owner: str, reason: str) -> None:
@@ -1932,6 +2225,9 @@ def parser() -> argparse.ArgumentParser:
     migrate = commands.add_parser("migrate")
     migrate.add_argument("--dry-run", action="store_true")
     migrate.add_argument("--report", type=Path)
+    set_project = commands.add_parser("set-project")
+    set_project.add_argument("--kind", required=True)
+    set_project.add_argument("--title", required=True)
     commands.add_parser("initialize")
     configure = commands.add_parser("configure-chapters")
     configure.add_argument("chapters", nargs="+")
@@ -1959,6 +2255,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("begin-finalization")
     commands.add_parser("approve-final")
     commands.add_parser("complete")
+    commands.add_parser("reopen-finalization")
     discover = commands.add_parser("discover-sources")
     discover.add_argument("--json", action="store_true", dest="as_json")
     blocked = commands.add_parser("block")
@@ -1979,10 +2276,13 @@ def run(args: argparse.Namespace) -> int:
     if command == "status":
         command_status(root, state, as_json=args.as_json)
     elif command == "validate":
-        print("deck.yaml: PASS")
+        validate_current_stage(root, state)
+        print(f"deck.yaml + {state['workflow']['stage']} artifacts: PASS")
     elif command == "migrate":
         report_path = _repo_path(root, str(args.report), field="migration.report") if args.report else None
         command_migrate(root, state, dry_run=args.dry_run, report_path=report_path)
+    elif command == "set-project":
+        command_set_project(root, state, kind=args.kind, title=args.title)
     elif command == "discover-sources":
         selected, candidates = discover_source_candidates(root, state)
         payload = {"primarySource": selected.relative_to(root).as_posix() if selected else None, "candidates": [path.relative_to(root).as_posix() for path in candidates]}
@@ -2033,6 +2333,8 @@ def run(args: argparse.Namespace) -> int:
         command_approve_final(root, state)
     elif command == "complete":
         command_complete(root, state)
+    elif command == "reopen-finalization":
+        command_reopen_finalization(root, state)
     elif command == "block":
         command_block(root, state, args.owner, args.reason)
     elif command == "resume":

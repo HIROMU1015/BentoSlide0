@@ -123,7 +123,7 @@ class SingleHtmlPreviewTests(unittest.TestCase):
         (self.root / "workflow").mkdir(parents=True)
         (self.root / "sources").mkdir()
         (self.root / "deck/assets").mkdir(parents=True)
-        shutil.copy2(ROOT / "deck.yaml", self.root / "deck.yaml")
+        shutil.copy2(ROOT / "tests/fixtures/deck_v2.initialized.yaml", self.root / "deck.yaml")
         shutil.copy2(ROOT / "workflow/deck.schema.json", self.root / "workflow/deck.schema.json")
         shutil.copy2(ROOT / "workflow/deck.v1.schema.json", self.root / "workflow/deck.v1.schema.json")
         (self.root / "REQUEST.md").write_text("# Request\n", encoding="utf-8")

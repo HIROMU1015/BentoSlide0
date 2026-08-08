@@ -40,14 +40,17 @@ class ArtifactTransactionTests(unittest.TestCase):
     def store(self, fault=None) -> ArtifactTransactionStore:
         return ArtifactTransactionStore(self.root, self.artifacts, fault_injector=fault)
 
-    def test_writer_lease_conflicts_only_for_the_same_artifact_set(self) -> None:
+    def test_writer_lease_conflicts_for_overlapping_artifact_sets(self) -> None:
         first = WriterLease(self.root, self.artifacts)
         duplicate = WriterLease(self.root, reversed(self.artifacts))
+        overlapping = WriterLease(self.root, (self.second, self.root / "output/other.json"))
         independent = WriterLease(self.root, (self.root / "output/other.html",))
         first.acquire()
         try:
             with self.assertRaises(ArtifactLeaseConflict):
                 duplicate.acquire()
+            with self.assertRaises(ArtifactLeaseConflict):
+                overlapping.acquire()
             independent.acquire()
             independent.release()
             self.assertTrue(first.acquired)

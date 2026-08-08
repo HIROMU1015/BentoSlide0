@@ -443,6 +443,11 @@ def scan_document_resources(document: dict[str, object]) -> dict[str, object]:
             element_type = value.get("type") if path and path[-1] == "elements[]" else None
             for key, item in value.items():
                 field_path = ".".join((*path, str(key)))
+                if path == () and key == "collab":
+                    # Collaboration/session metadata is never a document
+                    # resource. In particular, runtime sync tokens may contain
+                    # slash-like text that must not be reported as a file path.
+                    continue
                 if path == () and key == "assets" and isinstance(item, dict):
                     for asset_id, asset_value in item.items():
                         if isinstance(asset_value, str):

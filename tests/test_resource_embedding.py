@@ -148,6 +148,18 @@ class ResourceEmbeddingTests(unittest.TestCase):
         self.assertTrue(scan["passed"])
         self.assertEqual(scan["unresolved"], [])
 
+    def test_recursive_scan_ignores_collaboration_session_metadata(self) -> None:
+        document = {
+            "collab": {"room": "team/deck", "sync": "client/session.json"},
+            "slides": [{"id": "s", "elements": [
+                {"id": "image", "type": "image", "src": "missing.png"},
+            ]}],
+        }
+        scan = scan_document_resources(document)
+        self.assertEqual(scan["unresolved"], [
+            {"slideId": "s", "elementId": "image", "field": "src", "value": "$LOCAL_RESOURCE"},
+        ])
+
     def test_chart_option_local_resources_are_embedded_recursively(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

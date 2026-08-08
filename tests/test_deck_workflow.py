@@ -13,8 +13,10 @@ from unittest import mock
 
 import yaml
 
+from bento_converter.artifact_transaction import ArtifactLeaseConflict
 from bento_converter.errors import ValidationError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, serialize_bento_doc
+from bento_converter.work_editor_storage import WorkEditorStorage
 from scripts.deck_workflow import (
     WorkflowError,
     atomic_write_state,
@@ -35,18 +37,120 @@ from scripts.deck_workflow import (
     command_migrate,
     command_prepare_conversion,
     command_reset_authoring_from_html,
+    command_reopen_finalization,
     command_resume,
+    command_set_project,
     command_submit_plan,
     authoring_storage,
     discover_source_candidates,
     load_state,
+    load_final_baseline,
+    parser,
+    run,
     validate_chapters,
+    validate_output_bundle,
     validate_state,
 )
 from scripts.bento_segment import run as run_segment
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class ProjectMetadataCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "日本語 workflow demo"
+        for directory in ("workflow", "sources", "planning"):
+            (self.root / directory).mkdir(parents=True, exist_ok=True)
+        for relative in (
+            "REQUEST.md", "workflow/deck.schema.json",
+            "workflow/deck.v1.schema.json", "sources/source-manifest.yaml",
+            "planning/work-log.md",
+        ):
+            destination = self.root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, destination)
+        shutil.copy2(ROOT / "tests/fixtures/deck_v2.initialized.yaml", self.root / "deck.yaml")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def state(self) -> dict:
+        return load_state(self.root)
+
+    def set_stage(self, stage: str, status: str, source: str) -> None:
+        state = self.state()
+        state["workflow"].update(stage=stage, status=status, owner="work", sourceOfTruth=source)
+        atomic_write_state(self.root, state)
+
+    def test_set_project_updates_only_metadata_in_initialized(self) -> None:
+        before = self.state()
+        expected = copy.deepcopy(before)
+        expected["project"].update(kind="workflow_explainer", title="BentoSlideができるまで")
+        real_replace = os.replace
+        with mock.patch("scripts.deck_workflow.os.replace", wraps=real_replace) as replace:
+            command_set_project(
+                self.root, before,
+                kind="workflow_explainer", title="BentoSlideができるまで",
+            )
+        replace.assert_called_once()
+        self.assertEqual(self.state(), expected)
+        self.assertFalse(list(self.root.glob(".deck.*.yaml.tmp")))
+        self.assertIn("workflow_explainer", (self.root / "planning/work-log.md").read_text(encoding="utf-8"))
+
+    def test_set_project_is_allowed_in_planning_without_changing_approvals(self) -> None:
+        self.set_stage("planning", "in_progress", "planning")
+        before = self.state()
+        command_set_project(self.root, before, kind="project_demo", title="Project Demo")
+        after = self.state()
+        self.assertEqual(after["workflow"], before["workflow"])
+        self.assertEqual(after["approvals"], before["approvals"])
+        self.assertEqual(after["project"]["kind"], "project_demo")
+
+    def test_set_project_rejects_invalid_metadata_without_writing(self) -> None:
+        invalid = (
+            ("", "Title"), ("Workflow", "Title"), ("1workflow", "Title"),
+            ("workflow demo", "Title"), ("workflow/demo", "Title"),
+            ("workflow_explainer", ""), ("workflow_explainer", "   "),
+            ("workflow_explainer", " Outer"), ("workflow_explainer", "Two\nLines"),
+        )
+        for kind, title in invalid:
+            with self.subTest(kind=kind, title=title):
+                before = (self.root / "deck.yaml").read_bytes()
+                with self.assertRaises(WorkflowError):
+                    command_set_project(self.root, self.state(), kind=kind, title=title)
+                self.assertEqual((self.root / "deck.yaml").read_bytes(), before)
+
+    def test_set_project_rejects_late_blocked_and_schema_v1_states(self) -> None:
+        self.set_stage("awaiting_plan_approval", "awaiting_approval", "planning")
+        with self.assertRaisesRegex(WorkflowError, "does not allow"):
+            command_set_project(self.root, self.state(), kind="workflow_explainer", title="Title")
+
+        self.set_stage("bento_authoring", "in_progress", "authoring")
+        with self.assertRaisesRegex(WorkflowError, "does not allow"):
+            command_set_project(self.root, self.state(), kind="workflow_explainer", title="Title")
+
+        self.set_stage("initialized", "pending", "sources")
+        command_block(self.root, self.state(), "work", "Resolve metadata source")
+        with self.assertRaisesRegex(WorkflowError, "does not allow"):
+            command_set_project(self.root, self.state(), kind="workflow_explainer", title="Title")
+
+        shutil.copy2(ROOT / "tests/fixtures/deck_v1.yaml", self.root / "deck.yaml")
+        before = (self.root / "deck.yaml").read_bytes()
+        with self.assertRaisesRegex(WorkflowError, "schema v2"):
+            command_set_project(self.root, self.state(), kind="workflow_explainer", title="Title")
+        self.assertEqual((self.root / "deck.yaml").read_bytes(), before)
+
+    def test_set_project_cli_dispatch(self) -> None:
+        args = parser().parse_args([
+            "--root", str(self.root), "set-project",
+            "--kind", "workflow_explainer", "--title", "BentoSlideができるまで",
+        ])
+        self.assertEqual(run(args), 0)
+        project = self.state()["project"]
+        self.assertEqual(project["kind"], "workflow_explainer")
+        self.assertEqual(project["title"], "BentoSlideができるまで")
 
 
 class DeckWorkflowTests(unittest.TestCase):
@@ -530,6 +634,71 @@ class DeckWorkflowTests(unittest.TestCase):
         self.assertEqual(completed["workflow"]["stage"], "complete")
         self.assertEqual(completed["validation"]["finalStatus"], "pass")
         self.assertFalse(completed["handoff"]["readyForFinalEditing"])
+
+    def test_final_approval_is_revision_bound_and_reopen_clears_it(self) -> None:
+        state = self.ready_for_conversion()
+        command_migrate(self.root, state, dry_run=False, report_path=None)
+        self.prepare_output_bundle(self.state(), existing_final=False)
+        command_mark_converted(self.root, self.state())
+        command_begin_authoring(self.root, self.state())
+        command_begin_content_review(self.root, self.state())
+        command_approve_content(self.root, self.state())
+        command_begin_finalization(self.root, self.state())
+        command_approve_final(self.root, self.state())
+        approved = self.state()["approvals"]["finalBento"]
+        self.assertEqual(approved["status"], "approved")
+        for field in ("documentRevision", "htmlRevision", "registryRevision", "runtimeFingerprint"):
+            self.assertRegex(approved[field], r"^sha256:[0-9a-f]{64}$")
+
+        final_html_path = self.root / "output/presentation.final.bento.html"
+        final_json_path = self.root / "output/presentation.final.bento.json"
+        html = load_html(final_html_path)
+        document = extract_bento_doc(html)
+        shape = next(element for slide in document["slides"] for element in slide["elements"] if element["type"] == "shape")
+        shape["x"] += 4
+        final_html_path.write_bytes(embed_bento_doc(html, document).encode("utf-8"))
+        final_json_path.write_text(serialize_bento_doc(document) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(WorkflowError, "stale"):
+            command_complete(self.root, self.state())
+
+        command_reopen_finalization(self.root, self.state())
+        reopened = self.state()
+        self.assertEqual(reopened["workflow"]["stage"], "bento_finalization")
+        self.assertEqual(reopened["approvals"]["finalBento"], {
+            "status": "pending", "documentRevision": None, "htmlRevision": None,
+            "registryRevision": None, "runtimeFingerprint": None, "approvedAt": None,
+        })
+        command_approve_final(self.root, reopened)
+        command_complete(self.root, self.state())
+
+    def test_final_approval_waits_for_the_editor_writer_lease(self) -> None:
+        state = self.ready_for_conversion()
+        command_migrate(self.root, state, dry_run=False, report_path=None)
+        self.prepare_output_bundle(self.state(), existing_final=False)
+        command_mark_converted(self.root, self.state())
+        command_begin_authoring(self.root, self.state())
+        command_begin_content_review(self.root, self.state())
+        command_approve_content(self.root, self.state())
+        command_begin_finalization(self.root, self.state())
+        finalizing = self.state()
+        bundle = validate_output_bundle(self.root, finalizing, require_final=True)
+        baseline, _ = load_final_baseline(self.root, finalizing, bundle["generatedDocument"])
+        outputs = finalizing["outputs"]
+        editor = WorkEditorStorage(
+            source=self.root / outputs["authoringHtml"],
+            target=self.root / outputs["finalHtml"],
+            registry=self.root / outputs["finalRegistry"],
+            repository=self.root,
+            hold_writer_lease=True,
+            baseline_document=baseline,
+            state_path=self.root / "deck.yaml",
+        )
+        try:
+            with self.assertRaises(ArtifactLeaseConflict):
+                command_approve_final(self.root, self.state())
+        finally:
+            editor.release_writer_lease()
+        command_approve_final(self.root, self.state())
 
     def test_final_validation_rejects_content_replacement_but_allows_layout(self) -> None:
         state = self.ready_for_conversion()

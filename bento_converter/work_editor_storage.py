@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import html as html_lib
 import json
@@ -13,6 +14,8 @@ from functools import wraps
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .artifact_transaction import ArtifactTransactionStore, file_revision
 from .bento_validator import validate_bento_doc
@@ -45,6 +48,15 @@ def _locked(method):
 def document_revision(document: dict[str, Any]) -> str:
     canonical = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def document_persistence_equal(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Compare authored state while ignoring Bento-owned session metadata."""
+
+    return (
+        {key: value for key, value in left.items() if key != "collab"}
+        == {key: value for key, value in right.items() if key != "collab"}
+    )
 
 
 def _sidecar_path(target: Path) -> Path:
@@ -136,8 +148,10 @@ def protected_content_projection(document: dict[str, Any]) -> dict[str, Any]:
 
     root = {
         key: value for key, value in document.items()
-        if key not in PRESENTATION_EDITABLE_ROOT_FIELDS | {"slides"}
+        if key not in PRESENTATION_EDITABLE_ROOT_FIELDS | {"slides", "collab"}
     }
+    # Bento owns the root collab object and may inject or refresh it at runtime.
+    # It is session bookkeeping, not author-authored presentation content.
     slides: list[dict[str, Any]] = []
     for slide in document.get("slides", []):
         if not isinstance(slide, dict):
@@ -272,12 +286,20 @@ class WorkEditorStorage:
         self, *, source: str | Path, target: str | Path, registry: str | Path | None = None,
         reset_final: bool = False, allow_content_edit: bool = False, backup_limit: int = 10,
         repository: str | Path | None = None, hold_writer_lease: bool = False,
+        baseline_document: dict[str, Any] | None = None,
+        state_path: str | Path | None = None,
     ) -> None:
         self.source = Path(source).resolve()
         self.target = Path(target).resolve()
         self.sidecar = _sidecar_path(self.target)
         self.registry_path = Path(registry).resolve() if registry else None
         self.allow_content_edit = allow_content_edit
+        self.baseline_document = copy.deepcopy(baseline_document) if baseline_document is not None else None
+        self.baseline_fingerprint = (
+            protected_content_fingerprint(self.baseline_document)
+            if self.baseline_document is not None else None
+        )
+        self.state_path = Path(state_path).resolve() if state_path is not None else None
         self.editing_mode = "finalization"
         self.backup_limit = max(1, backup_limit)
         self.revisions_dir = self.target.parent / "revisions"
@@ -304,6 +326,7 @@ class WorkEditorStorage:
             raise
 
     def _initialize(self, *, reset_final: bool) -> None:
+        self._assert_workflow_editable()
         self.transactions.recover()
         self.registry = self._load_registry()
         self.target.parent.mkdir(parents=True, exist_ok=True)
@@ -316,12 +339,55 @@ class WorkEditorStorage:
             self._install_pair(source_html, source_document)
         target_html = load_html(self.target)
         target_document = extract_bento_doc(target_html)
+        comparison = self.baseline_document or target_document
         validate_editor_document(
-            target_document, current=target_document, registry=self.registry,
+            target_document, current=comparison, registry=self.registry,
             allow_content_edit=self.allow_content_edit,
         )
+        self._assert_baseline(target_document)
         self._runtime = runtime_fingerprint(target_html)
         self._sync_sidecar(target_document)
+
+    def _assert_workflow_editable(self) -> None:
+        if self.state_path is None:
+            return
+        try:
+            state = yaml.safe_load(self.state_path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise BentoConverterError(f"Cannot verify finalization workflow state: {exc}") from exc
+        if not isinstance(state, dict) or state.get("schemaVersion") != 2:
+            raise BentoConverterError("Final Work editor workflow guard requires deck schema v2")
+        workflow = state.get("workflow", {})
+        if workflow.get("stage") != "bento_finalization":
+            raise BentoConverterError(
+                f"Final Work editor requires 'bento_finalization'; current stage is {workflow.get('stage')!r}"
+            )
+        approval = state.get("approvals", {}).get("finalBento")
+        approval_status = approval.get("status") if isinstance(approval, dict) else approval
+        if approval_status != "pending" or not state.get("handoff", {}).get("readyForFinalEditing"):
+            raise BentoConverterError("Final Work editor requires pending final approval and an active editing handoff")
+        outputs = state.get("outputs", {})
+        expected_source_value = outputs.get("authoringHtml") or outputs.get("generatedHtml")
+        expected = {
+            "source": (self.repository / expected_source_value).resolve() if isinstance(expected_source_value, str) else None,
+            "target": (self.repository / outputs["finalHtml"]).resolve() if isinstance(outputs.get("finalHtml"), str) else None,
+            "registry": (self.repository / outputs["finalRegistry"]).resolve() if isinstance(outputs.get("finalRegistry"), str) else None,
+        }
+        actual = {"source": self.source, "target": self.target, "registry": self.registry_path}
+        for field in expected:
+            if expected[field] != actual[field]:
+                raise BentoConverterError(f"Final Work editor {field} does not match deck.yaml outputs")
+
+    def _comparison_document(self, current: dict[str, Any]) -> dict[str, Any]:
+        return self.baseline_document or current
+
+    def _assert_baseline(self, document: dict[str, Any]) -> None:
+        if (
+            not self.allow_content_edit
+            and self.baseline_fingerprint is not None
+            and protected_content_fingerprint(document) != self.baseline_fingerprint
+        ):
+            raise ValidationError(["Final content/structure differs from its immutable finalization baseline"])
 
     def _infer_repository(self) -> Path:
         for parent in (self.target.parent, *self.target.parents):
@@ -431,6 +497,7 @@ class WorkEditorStorage:
         return html_backup
 
     def _current(self) -> tuple[str, dict[str, Any]]:
+        self._assert_workflow_editable()
         snapshot = self.transactions.read_snapshot((self.target, self.sidecar))
         html_payload = snapshot[self.target]
         sidecar_payload = snapshot[self.sidecar]
@@ -461,7 +528,11 @@ class WorkEditorStorage:
         html, document = self._current()
         validation = "pass"
         try:
-            validate_editor_document(document, current=document, registry=self.registry, allow_content_edit=self.allow_content_edit)
+            validate_editor_document(
+                document, current=self._comparison_document(document), registry=self.registry,
+                allow_content_edit=self.allow_content_edit,
+            )
+            self._assert_baseline(document)
         except BentoConverterError:
             validation = "fail"
         try:
@@ -487,8 +558,10 @@ class WorkEditorStorage:
         _, current = self._current()
         document = extract_bento_doc(serialized_html)
         validation = validate_editor_document(
-            document, current=current, registry=self.registry, allow_content_edit=self.allow_content_edit,
+            document, current=self._comparison_document(current), registry=self.registry,
+            allow_content_edit=self.allow_content_edit,
         )
+        self._assert_baseline(document)
         return {"revision": document_revision(current), "validation": "pass", **validation}
 
     @_locked
@@ -499,13 +572,22 @@ class WorkEditorStorage:
             raise WorkEditorConflict("Another edit has already been saved. Reload the latest final revision.")
         proposed = extract_bento_doc(serialized_html)
         validation = validate_editor_document(
-            proposed, current=current, registry=self.registry, allow_content_edit=self.allow_content_edit,
+            proposed, current=self._comparison_document(current), registry=self.registry,
+            allow_content_edit=self.allow_content_edit,
         )
+        self._assert_baseline(proposed)
         updated_html = embed_bento_doc(current_html, proposed)
         assert_runtime_integrity(current_html, updated_html)
+        if document_persistence_equal(proposed, current):
+            return {
+                "saved": True, "noOp": True, "revision": current_revision,
+                "runtimeFingerprint": "sha256:" + runtime_fingerprint(current_html),
+                "backupCount": len(self._backups()), "validation": "pass",
+                "transactionId": None, **validation,
+            }
         self._create_backup()
         result = {
-            "saved": True, "revision": document_revision(proposed),
+            "saved": True, "noOp": False, "revision": document_revision(proposed),
             "runtimeFingerprint": "sha256:" + runtime_fingerprint(updated_html),
             "backupCount": len(self._backups()), "validation": "pass", **validation,
         }
@@ -530,7 +612,11 @@ class WorkEditorStorage:
         backup_html = load_html(backup)
         assert_runtime_integrity(current_html, backup_html)
         document = extract_bento_doc(backup_html)
-        validate_editor_document(document, current=document, registry=self.registry, allow_content_edit=self.allow_content_edit)
+        validate_editor_document(
+            document, current=self._comparison_document(current), registry=self.registry,
+            allow_content_edit=self.allow_content_edit,
+        )
+        self._assert_baseline(document)
         reverted_html = embed_bento_doc(current_html, document)
         report = {
             "operation": "revert", "reverted": True, "revision": document_revision(document),

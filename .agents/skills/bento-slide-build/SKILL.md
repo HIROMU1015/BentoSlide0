@@ -20,6 +20,8 @@ Work from the repository root. Read `START_HERE.md`, `deck.yaml`, and `python -m
 
 Use `scripts.deck_workflow` for every state change. Recompute revision/digest validity rather than trusting chat history. Run `resume` after resolving a blocker. For schema v1, run `migrate --dry-run` before `migrate`; migration is stage-preserving and late-stage evidence must validate before any change.
 
+For schema v2 project metadata, use `python -m scripts.deck_workflow set-project --kind ... --title ...` only in `initialized` or `planning`. It is an agent-facing setup command rather than a ninth user short phrase; it changes neither workflow stage nor approvals.
+
 ## HTML authoring and conversion
 
 For schema v2 `single`/`imported`, use the paths in `authoring.entryHtml` and `authoring.registry`. Each slide is a 1280 x 720 `section.slide` with stable `data-slide-id` and `data-section-id`. Read `docs/html-first-authoring-contract.md`. Treat the pair as the pre-conversion source of truth; a section approval includes DOM, registry projection, asset hashes, and global CSS/theme.
@@ -41,6 +43,8 @@ python -m scripts.check_html_first_determinism --html deck/deck.preview.html --r
 After `mark-converted` and `begin-authoring`, use `start_deck_workspace.cmd`. Authoring mode may change content/structure and its registry, but every save must use the Work editor API or common storage transaction with both base revisions. Never overwrite authoring HTML/JSON/registry directly. Existing ID/type changes require explicit slide replacement.
 
 The server holds the artifact-set OS writer lease. An offline tool may write only after acquiring the same lease, or through a localhost API whose repository/mode/targets match exactly. Recover unfinished journals before reads/writes. Never roll back a valid commit because only its report failed.
+
+Writer exclusion is per canonical artifact, not merely per complete set: any overlapping target conflicts, while disjoint sets may proceed. Treat `noOp: true` saves as successful validation without a backup or transaction.
 
 For an added or targeted replacement slide during `bento_authoring`:
 
@@ -68,6 +72,8 @@ Do not use fast-final editing for text/equations, data/media, IDs/types, slides,
 The injected toolbar must preserve `window.bento.serialize()` as a synchronous HTML-string API. It is detached before serialization and restored in `finally`; toolbar/host/loader/style identifiers never persist. Describe `loadDoc()` mutation as API editing, not simulated typing/dragging.
 
 Final validation checks HTML/JSON equality, runtime fingerprint, recursive resources, references, frozen registry, both baselines, protected fingerprint, revisions/backups, serialize round-trip, and browser evidence.
+
+Before `approve-final`, stop the final Work editor so its lifetime lease is released. Approval is bound to the exact document, HTML, registry, and runtime revisions; `complete` must recompute them. If edits are needed after approval or completion, run `python -m scripts.deck_workflow reopen-finalization` first and never write while the old approval remains current.
 
 ## Static HTML import
 

@@ -174,6 +174,24 @@ def _default_screenshot_prefix(path: Path) -> str:
     return f"{name}-slide"
 
 
+def _settle_render(page: Any) -> None:
+    """Wait for fonts and two animation frames instead of fixed sleeps."""
+
+    page.wait_for_function("() => !document.fonts || document.fonts.status === 'loaded'")
+    page.evaluate(
+        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+    )
+
+
+def _activate_slide(page: Any, slide_index: int, slide_id: str) -> None:
+    page.locator(".ed-thumb").nth(slide_index).click()
+    page.wait_for_function(
+        "expected => document.querySelector('.ed-stage .bento-slide')?.dataset.slideId === expected",
+        arg=slide_id,
+    )
+    _settle_render(page)
+
+
 def run_browser_check(
     html_path: str | Path,
     *,
@@ -230,7 +248,7 @@ def run_browser_check(
             page.wait_for_function(
                 "window.bento && window.bento.doc && typeof window.bento.serialize === 'function'"
             )
-            page.wait_for_timeout(500)
+            _settle_render(page)
 
             _require(not page_errors, f"JavaScript page errors: {page_errors}")
             _require(not console_errors, f"Browser console errors: {console_errors}")
@@ -270,8 +288,7 @@ def run_browser_check(
 
             rendered_slide_count = 0
             for slide_index, slide in enumerate(original_document["slides"]):
-                page.locator(".ed-thumb").nth(slide_index).click()
-                page.wait_for_timeout(150)
+                _activate_slide(page, slide_index, slide["id"])
                 active_slide = page.locator(".ed-stage .bento-slide")
                 _require(active_slide.count() == 1, "The active Bento slide is missing.")
                 _require(
@@ -308,9 +325,8 @@ def run_browser_check(
             )
             ui_selection: bool | None = None
             if selection_target is not None:
-                slide_index, _, element_id = selection_target
-                page.locator(".ed-thumb").nth(slide_index).click()
-                page.wait_for_timeout(150)
+                slide_index, slide_id, element_id = selection_target
+                _activate_slide(page, slide_index, slide_id)
                 active_elements = page.locator(".ed-stage [data-el-id]")
                 active_ids = active_elements.evaluate_all(
                     "elements => elements.map(element => element.dataset.elId)"
@@ -322,6 +338,7 @@ def run_browser_check(
                 selectable = active_elements.nth(active_ids.index(element_id))
                 _require(selectable.count() == 1, f"Element {element_id!r} is not selectable.")
                 selectable.click(position={"x": 10, "y": 10})
+                _settle_render(page)
                 selection = page.evaluate("Array.from(window.bento.selection || [])")
                 ui_selection = element_id in selection
                 _require(ui_selection, f"UI selection failed: {selection!r}")
@@ -362,12 +379,15 @@ def run_browser_check(
                 json.dumps(edited_document, ensure_ascii=False),
             )
             _require(edit_result is True, "window.bento.loadDoc() rejected edited JSON.")
-            page.wait_for_timeout(300)
+            page.wait_for_function(
+                "expected => window.bento.doc.slides.length === expected",
+                arg=len(edited_document["slides"]),
+            )
+            _settle_render(page)
 
             if "latex" in targets:
-                slide_index, _, element_id = targets["latex"]
-                page.locator(".ed-thumb").nth(slide_index).click()
-                page.wait_for_timeout(300)
+                slide_index, slide_id, element_id = targets["latex"]
+                _activate_slide(page, slide_index, slide_id)
                 active_elements = page.locator(".ed-stage [data-el-id]")
                 active_ids = active_elements.evaluate_all(
                     "elements => elements.map(element => element.dataset.elId)"
@@ -440,14 +460,13 @@ def run_browser_check(
                 json.dumps(original_document, ensure_ascii=False),
             )
             _require(restored is True, "Could not restore the original document for screenshots.")
-            page.wait_for_timeout(200)
+            _settle_render(page)
 
             if screenshots_dir is not None:
                 output_dir = Path(screenshots_dir)
                 output_dir.mkdir(parents=True, exist_ok=True)
                 for index in range(slide_count):
-                    page.locator(".ed-thumb").nth(index).click()
-                    page.wait_for_timeout(200)
+                    _activate_slide(page, index, original_document["slides"][index]["id"])
                     page.evaluate(
                         """
                         () => {
