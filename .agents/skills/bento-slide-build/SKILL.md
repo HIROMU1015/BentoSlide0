@@ -9,6 +9,12 @@ Work from the repository root. Read `START_HERE.md`, `deck.yaml`, and `python -m
 
 ## Route the workflow
 
+Use natural conversation as the primary route. Translate the user's intent to one high-level operation (`advance`, `approve-current`, `promote-current-section`, `edit-current`, `finish-current-section`, `reopen-current-section`, or `review-whole-deck`) and stop at the next human decision. Do not expose internal stage names, IDs, revisions, registry mechanics, paths, or CLI syntax unless the user asks for diagnostics. Capture a new substantive brief with `capture-request --text`.
+
+For schema v2 single/imported decks, work one section at a time: planning -> HTML authoring -> HTML review -> Bento integration -> Bento authoring -> accepted. Record exactly one canonical source (`planning`, `html`, or `bento`). HTML approval authorizes promotion but is not Bento acceptance. Promotion uses a section-only registry projection, planning order, browser conversion, revision-checked authoring storage, and a state/artifact transaction; it never rebuilds unrelated authoring slides or changes generated/final. A promoted HTML section is historical, not automatically synchronized back. After every section is accepted, require whole-deck content review.
+
+The fixed phrases below are compatibility aliases.
+
 - `この資料を作成して`: discover sources, create planning artifacts, configure all sections, submit the plan, and request material approval.
 - `この方針で進めて`: approve the plan, author the first incomplete section in the single HTML/registry pair, start HTML preview, and request visual approval.
 - `次へ`: approve the current section digest and select the next; become conversion-ready only when all current digests pass.
@@ -46,11 +52,13 @@ The server holds the artifact-set OS writer lease. An offline tool may write onl
 
 Writer exclusion is per canonical artifact, not merely per complete set: any overlapping target conflicts, while disjoint sets may proceed. Treat `noOp: true` saves as successful validation without a backup or transaction.
 
-For an added or targeted replacement slide during `bento_authoring`:
+For an added, ordered, or targeted replacement segment during `bento_authoring`:
 
 ```powershell
 python -m scripts.bento_segment import --html scratch/segments/add.preview.html --registry scratch/segments/add.registry.json
 python -m scripts.bento_segment replace --html scratch/segments/replacement.preview.html --registry scratch/segments/replacement.registry.json --slide-id target-slide
+python -m scripts.bento_segment insert-before --html scratch/segments/add.preview.html --registry scratch/segments/add.registry.json --anchor-slide-id existing-slide
+python -m scripts.bento_segment replace-section --html scratch/segments/section.preview.html --registry scratch/segments/section.registry.json --target-slide-id first --target-slide-id second
 ```
 
 Require browser round-trip evidence, outside-slide hash invariance, cross-slide reference validity, and shared-registry safety. Do not change generated or final. A full HTML reset is exceptional and requires `reset-authoring-from-html --confirm RESET-AUTHORING-FROM-HTML` in authoring stage.
@@ -68,6 +76,8 @@ python -m scripts.apply_bento_final_edits --patch path/to/final-edit.json
 ```
 
 Do not use fast-final editing for text/equations, data/media, IDs/types, slides, notes, behavior, or references. Do not reconvert into final, use `--reset-final`, or relax content protection for an ordinary layout request.
+
+If the user requests content or structure during finalization or after completion, route to `reopen-current-section` and the authoring canonical artifact. Re-accept the affected section and repeat mandatory whole-deck content approval before attempting finalization again. Preserve the existing final and baselines until the newly approved handoff is explicitly initialized; never weaken final-mode validation.
 
 The injected toolbar must preserve `window.bento.serialize()` as a synchronous HTML-string API. It is detached before serialization and restored in `finally`; toolbar/host/loader/style identifiers never persist. Describe `loadDoc()` mutation as API editing, not simulated typing/dragging.
 

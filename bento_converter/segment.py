@@ -147,11 +147,16 @@ def _external_removed_element_references(
 def merge_segment(
     current_document: dict[str, Any], current_registry: dict[str, Any],
     segment_document: dict[str, Any], segment_registry: dict[str, Any],
-    *, operation: str, slide_id: str | None = None,
+    *, operation: str, slide_id: str | None = None, anchor_slide_id: str | None = None,
+    target_slide_ids: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Return a fully validated authoring document/registry merge and evidence report."""
 
-    if operation not in {"import", "replace"}:
+    aliases = {"import": "append", "replace": "replace-slide"}
+    normalized_operation = aliases.get(operation, operation)
+    if normalized_operation not in {
+        "append", "insert-before", "insert-after", "replace-slide", "replace-range", "replace-section",
+    }:
         raise BentoConverterError(f"Unsupported segment operation: {operation}")
     current = copy.deepcopy(current_document)
     segment_slides = [copy.deepcopy(slide) for slide in segment_document.get("slides", []) if isinstance(slide, dict)]
@@ -164,30 +169,48 @@ def merge_segment(
     before_hashes = slide_hashes(current)
     before_relationships: dict[str, Any] = {}
     replaced_ids: set[str] = set()
-    if operation == "import":
+    if normalized_operation in {"append", "insert-before", "insert-after"}:
         collisions = sorted(set(existing_ids) & set(incoming_ids))
         if collisions:
             raise BentoConverterError(f"Segment slide IDs already exist: {collisions}")
-        current.setdefault("slides", []).extend(segment_slides)
+        if normalized_operation == "append":
+            index = len(existing_ids)
+        else:
+            if not anchor_slide_id or anchor_slide_id not in existing_ids:
+                raise BentoConverterError("Ordered segment insertion requires an existing anchor slide ID")
+            index = existing_ids.index(anchor_slide_id)
+            if normalized_operation == "insert-after":
+                index += 1
+        current.setdefault("slides", [])[index:index] = segment_slides
     else:
-        if not slide_id:
-            raise BentoConverterError("Segment replace requires an explicit slide ID")
-        if slide_id not in existing_ids:
-            raise BentoConverterError(f"Replacement target slide does not exist: {slide_id}")
-        if len(segment_slides) != 1 or incoming_ids != [slide_id]:
-            raise BentoConverterError("Replacement segment must contain exactly the explicitly targeted slide ID")
-        external = _external_removed_element_references(
-            current, target_slide_id=slide_id, replacement=segment_slides[0],
-        )
-        if external:
-            raise BentoConverterError(
-                "Replacement removes elements referenced by other slides: "
-                + json.dumps(external, ensure_ascii=False, sort_keys=True)
+        targets = list(target_slide_ids or ([] if slide_id is None else [slide_id]))
+        if normalized_operation == "replace-slide":
+            if len(targets) != 1 or len(segment_slides) != 1 or incoming_ids != targets:
+                raise BentoConverterError("Replacement segment must preserve exactly the explicit slide ID")
+        if not targets or any(target not in existing_ids for target in targets):
+            raise BentoConverterError("Replacement targets must be existing slide IDs")
+        indexes = [existing_ids.index(target) for target in targets]
+        if indexes != list(range(indexes[0], indexes[0] + len(indexes))):
+            raise BentoConverterError("Range and section replacement targets must be contiguous and ordered")
+        if normalized_operation == "replace-range" and len(segment_slides) != len(targets):
+            raise BentoConverterError("Range replacement must keep the same number of slides")
+        if normalized_operation in {"replace-range", "replace-section"} and incoming_ids != targets:
+            raise BentoConverterError("Range and section replacement must preserve target slide IDs and order")
+        if set(incoming_ids) & (set(existing_ids) - set(targets)):
+            raise BentoConverterError("Replacement slide IDs collide with non-target slides")
+        if normalized_operation == "replace-slide":
+            external = _external_removed_element_references(
+                current, target_slide_id=targets[0], replacement=segment_slides[0],
             )
-        index = existing_ids.index(slide_id)
-        before_relationships[slide_id] = relationship_projection(current["slides"][index])
-        current["slides"][index] = segment_slides[0]
-        replaced_ids.add(slide_id)
+            if external:
+                raise BentoConverterError(
+                    "Replacement removes elements referenced by other slides: "
+                    + json.dumps(external, ensure_ascii=False, sort_keys=True)
+                )
+        for target in targets:
+            before_relationships[target] = relationship_projection(current["slides"][existing_ids.index(target)])
+        current["slides"][indexes[0]:indexes[-1] + 1] = segment_slides
+        replaced_ids.update(targets)
     merged_registry, registry_changes = _merge_registry(current_registry, segment_registry)
     references = _validate_references(current)
     validate_authoring_document(
@@ -204,13 +227,15 @@ def merge_segment(
         raise BentoConverterError(f"Segment changed non-target slides: {changed_unexpectedly}")
     report = {
         "format": "bento/segment-operation-report/v1",
-        "operation": f"segment-{operation}",
+        "operation": f"segment-{normalized_operation}",
         "baseDocumentRevision": document_revision(current_document),
         "baseRegistryRevision": registry_revision(current_registry),
         "resultDocumentRevision": document_revision(current),
         "resultRegistryRevision": registry_revision(merged_registry),
         "slideIds": incoming_ids,
         "targetSlideId": slide_id,
+        "anchorSlideId": anchor_slide_id,
+        "targetSlideIds": sorted(replaced_ids),
         "unaffectedSlideHashes": {identifier: after_hashes[identifier] for identifier in sorted(unaffected)},
         "registry": registry_changes,
         "relationships": {

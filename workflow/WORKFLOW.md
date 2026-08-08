@@ -22,10 +22,40 @@
 
 Expected owner/source and real artifacts are invariant checked. Approval stages are never crossed automatically.
 
+## Rolling section lifecycle (primary UX)
+
+New schema v2 single/imported decks are normally completed section by section:
+
+```text
+planned -> html_authoring -> html_review -> bento_integration -> bento_authoring -> accepted
+```
+
+`canonical` is exactly one of `planning`, `html`, or `bento`. HTML approval records the current section digest and authorizes `promote-current-section`; it does not accept the Bento result. Promotion converts only that section and inserts or replaces its slides in planning order. The promoted HTML becomes a historical snapshot; later Work editor changes stay Bento-canonical and are not synchronized back. `finish-current-section` accepts the current Bento revision and opens the next section. Accepted sections can be reopened through Bento or, for a deliberate redesign, through a fresh HTML candidate. After all sections are accepted, whole-deck `content_review` is mandatory.
+
+A content/structure request made in finalization or after completion reopens the affected authoring section. It invalidates whole-deck/final approval and requires section acceptance plus whole-deck approval again. It never enables content edits in final mode and never silently overwrites an existing final artifact set.
+
+Natural conversation is routed internally to the high-level operations below. `advance` performs safe mechanical work only and stops at human approval checkpoints.
+
+```text
+advance / approve-current / promote-current-section / edit-current
+finish-current-section / reopen-current-section / review-whole-deck
+capture-request / route / status [--json]
+```
+
 ## State commands
 
 ```text
 status [--json]                 consistent status; refresh stale content approval
+route [--json]                  deterministic primary-workspace route
+capture-request --text ...      persist the conversational brief in REQUEST.md
+advance                         move to the next human checkpoint, never approve
+approve-current                 approve only the displayed plan/HTML/content checkpoint
+promote-current-section         section-only conversion and authoring transaction
+promote-section --section ...   explicit-ID compatibility form of the same transaction
+edit-current                    resolve the current editable workspace
+finish-current-section          accept the current Bento section revision
+reopen-current-section          resume an accepted section via Bento or HTML
+review-whole-deck               mandatory review after every section is accepted
 validate                        schema, path, stage, source, and artifact invariants
 migrate [--dry-run]             idempotent schema v1 -> v2 migration
 set-project --kind ... --title  schema v2 early-stage project metadata only
@@ -118,7 +148,7 @@ Require `bento_finalization`, start finalization mode, and adjust layout/style o
 
 ## Segment and import routes
 
-During `bento_authoring`, `scripts.bento_segment import` adds converted slides and `replace --slide-id` replaces exactly one named slide. Both protect outside slide hashes and all cross-slide/registry references; generated/final remain unchanged. A running matching editor becomes the sole writer via localhost API. Otherwise the CLI must acquire the same OS lease.
+During `bento_authoring`, segment operations support append/import, insert before/after an anchor, single-slide replacement, contiguous range replacement, and section replacement. Targets remain explicit internally but are inferred from planning/current state for conversational use. Every operation protects outside slide hashes and cross-slide/registry references; generated/final remain unchanged. A running matching editor becomes the sole writer via localhost API. Otherwise the CLI must acquire the same OS lease.
 
 `scripts.import_html_deck` accepts only an original under `imports/`, never executes its scripts, blocks network, sanitizes active content, produces normalized static single HTML/registry, and updates source manifest/state transactionally. Ambiguous slide selection requires `--slide-selector`.
 

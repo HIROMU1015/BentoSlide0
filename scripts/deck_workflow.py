@@ -26,7 +26,8 @@ from bento_converter.artifact_transaction import (
 from bento_converter.authoring_storage import AuthoringArtifactStorage, validate_authoring_document
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError
-from bento_converter.html_document import extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
+from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
+from bento_converter.html_pipeline import build_from_html
 from bento_converter.html_source import REGISTRY_FORMAT
 from bento_converter.registry_document import (
     canonical_registry_json,
@@ -36,6 +37,8 @@ from bento_converter.registry_document import (
     validate_registry,
 )
 from bento_converter.section_approval import SectionApprovalEvidence, compute_section_approval_evidence
+from bento_converter.section_candidate import write_section_candidate
+from bento_converter.segment import canonical_projection_hash, merge_segment, slide_hashes
 from bento_converter.work_editor_storage import (
     WorkEditorStorage,
     document_revision,
@@ -374,10 +377,26 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                 if duplicates:
                     raise WorkflowError(f"Slide IDs are registered in multiple sections: {sorted(duplicates)}")
                 registered_slides.update(section["slideIds"])
-                if section["status"] == "approved" and section["approvalDigest"] is None:
-                    raise WorkflowError(f"Approved section has no approval digest: {section_id}")
-                if section["status"] != "approved" and section["approvalDigest"] is not None:
-                    raise WorkflowError(f"Unapproved section retains an approval digest: {section_id}")
+                canonical = section.get("canonical")
+                if canonical is not None:
+                    expected = {
+                        "planned": "planning", "html_authoring": "html", "html_review": "html",
+                        "bento_integration": "html", "bento_authoring": "bento", "accepted": "bento",
+                    }.get(section["status"])
+                    if expected is not None and canonical != expected:
+                        raise WorkflowError(f"Section {section_id} canonical must be {expected!r} while {section['status']!r}")
+                html_approved = section["status"] in {"approved", "bento_integration", "bento_authoring", "accepted"}
+                if html_approved and section["approvalDigest"] is None:
+                    raise WorkflowError(f"HTML-approved section has no approval digest: {section_id}")
+                if not html_approved and section["approvalDigest"] is not None:
+                    raise WorkflowError(f"Section retains an HTML approval digest before approval: {section_id}")
+                bento_values = [section.get(key) for key in (
+                    "bentoDocumentRevision", "bentoRegistryRevision", "bentoSectionDigest",
+                )]
+                if section["status"] in {"bento_authoring", "accepted"} and any(value is None for value in bento_values):
+                    raise WorkflowError(f"Bento section is missing revision binding: {section_id}")
+                if section["status"] == "accepted" and section.get("acceptedAt") is None:
+                    raise WorkflowError(f"Accepted section has no timestamp: {section_id}")
     resolved_outputs = {
         field: _repo_path(root, value, field=f"outputs.{field}")
         for field, value in state["outputs"].items() if value is not None
@@ -552,6 +571,41 @@ def discover_source_candidates(root: Path, state: dict[str, Any]) -> tuple[Path 
     raise WorkflowError(f"Multiple PDF sources found; set project.primarySource in deck.yaml: {display}")
 
 
+def ensure_source_manifest(root: Path, state: dict[str, Any]) -> None:
+    """Create the unambiguous first manifest entry without asking for mechanics."""
+
+    if state.get("schemaVersion") != 2:
+        return
+    manifest_path = _repo_path(root, state["sources"]["manifest"], field="sources.manifest")
+    manifest = load_source_manifest(root, state, require_exists=False)
+    if manifest.get("items"):
+        return
+    private = root / "sources/private"
+    supported = {".pdf", ".md", ".markdown", ".txt", ".html", ".htm", ".json", ".csv", ".tsv", ".png", ".jpg", ".jpeg", ".svg"}
+    candidates = sorted(
+        (path for path in private.rglob("*") if path.is_file() and path.suffix.lower() in supported),
+        key=lambda path: path.relative_to(root).as_posix().casefold(),
+    ) if private.is_dir() else []
+    if not candidates:
+        raise WorkflowError("No source material was found under sources/private/")
+    if len(candidates) != 1:
+        display = ", ".join(path.relative_to(root).as_posix() for path in candidates)
+        raise WorkflowError(f"Source authority is genuinely ambiguous; choose one primary source: {display}")
+    source = candidates[0]
+    identifier = re.sub(r"[^a-z0-9]+", "-", source.stem.lower()).strip("-") or "primary-source"
+    candidate_manifest = {
+        "schemaVersion": SOURCE_MANIFEST_FORMAT, "authorityMode": "single",
+        "items": [{
+            "id": identifier, "path": source.relative_to(root).as_posix(),
+            "type": _source_type(source.as_posix()), "role": "primary",
+        }],
+    }
+    payload = yaml.safe_dump(candidate_manifest, allow_unicode=True, sort_keys=False).encode("utf-8")
+    ArtifactTransactionStore(root, (manifest_path,)).commit(
+        {manifest_path: payload}, operation="auto-register-unambiguous-source",
+    )
+
+
 def _meaningful_markdown(path: Path) -> bool:
     if not path.is_file():
         return False
@@ -669,16 +723,16 @@ def validate_sections(root: Path, state: dict[str, Any], *, require_approved: bo
         )
     for section_id, entry in state["sections"].items():
         actual_slides = list(evidence[section_id].slide_ids)
-        if entry["slideIds"] != actual_slides:
+        if entry.get("canonical") != "bento" and entry["slideIds"] != actual_slides:
             raise WorkflowError(
                 f"Section {section_id!r} slideIds differ from HTML: "
                 f"state={entry['slideIds']}, HTML={actual_slides}"
             )
-        if entry["status"] == "approved" and entry["approvalDigest"] != evidence[section_id].digest:
+        if entry["status"] in {"approved", "bento_integration"} and entry["approvalDigest"] != evidence[section_id].digest:
             raise WorkflowError(
                 f"Approved section changed after approval: {section_id}; unlock and review it again"
             )
-        if require_approved and entry["status"] != "approved":
+        if require_approved and entry["status"] not in {"approved", "accepted"}:
             raise WorkflowError(f"Section is not approved: {section_id}")
     return evidence
 
@@ -879,11 +933,20 @@ def authoring_storage(root: Path, state: dict[str, Any]) -> AuthoringArtifactSto
     outputs = state["outputs"]
     if any(outputs[field] is None for field in ("authoringHtml", "authoringJson", "authoringRegistry")):
         raise WorkflowError("Migrated late-stage decks do not have authoring artifacts")
+    target = _repo_path(root, outputs["authoringHtml"], field="outputs.authoringHtml")
+    target_registry = _repo_path(root, outputs["authoringRegistry"], field="outputs.authoringRegistry")
+    generated = _repo_path(root, outputs["generatedHtml"], field="outputs.generatedHtml")
+    generated_registry = _repo_path(root, outputs["generatedRegistry"], field="outputs.generatedRegistry")
+    # Rolling section promotion may establish authoring before a whole-deck
+    # generated bundle exists. Once initialized, the target itself is a safe
+    # runtime/registry source for opening revision-checked authoring storage.
+    source = generated if generated.is_file() and generated_registry.is_file() else target
+    source_registry = generated_registry if generated.is_file() and generated_registry.is_file() else target_registry
     storage = AuthoringArtifactStorage(
-        source=_repo_path(root, outputs["generatedHtml"], field="outputs.generatedHtml"),
-        source_registry=_repo_path(root, outputs["generatedRegistry"], field="outputs.generatedRegistry"),
-        target=_repo_path(root, outputs["authoringHtml"], field="outputs.authoringHtml"),
-        target_registry=_repo_path(root, outputs["authoringRegistry"], field="outputs.authoringRegistry"),
+        source=source,
+        source_registry=source_registry,
+        target=target,
+        target_registry=target_registry,
         repository=root, state_path=root / STATE_RELATIVE,
     )
     expected_sidecar = _repo_path(root, outputs["authoringJson"], field="outputs.authoringJson")
@@ -1324,19 +1387,159 @@ def command_status(root: Path, state: dict[str, Any], *, as_json: bool) -> None:
         # ConvertFrom-Json restores the original Unicode path strings.
         print(json.dumps(state, ensure_ascii=True, indent=2))
         return
-    workflow = state["workflow"]
-    print(f"stage: {workflow['stage']}")
-    print(f"status: {workflow['status']}")
-    print(f"owner: {workflow['owner']}")
-    print(f"source of truth: {workflow['sourceOfTruth']}")
-    print(f"current chapter: {workflow['currentChapter'] or '-'}")
-    if state.get("schemaVersion") == 2:
-        print(f"current section: {workflow['currentSection'] or '-'}")
-    if workflow.get("blockingReason"):
-        print(f"blocking reason: {workflow['blockingReason']}")
-    if state.get("schemaVersion") == 2:
-        print(f"content approval: {state['approvals']['bentoContent']['status']}")
-        print(f"final approval: {_final_approval_status(state['approvals']['finalBento'])}")
+    summary = user_status_summary(state)
+    print(f"現在: {summary['current']}")
+    if summary.get("section"):
+        print(f"対象: {summary['section']}")
+    print(f"次: {summary['next']}")
+    print(f"開くもの: {summary['route']}")
+    if summary["validActions"]:
+        print("できること:")
+        for action in summary["validActions"]:
+            print(f"- {action}")
+    if summary.get("blockingReason"):
+        print(f"停止理由: {summary['blockingReason']}")
+
+
+def workspace_route(state: dict[str, Any]) -> str:
+    stage = state["workflow"]["stage"]
+    if stage in {"planning", "html_authoring", "html_review"}:
+        return "html-preview"
+    if stage in {"bento_authoring", "content_review"}:
+        return "authoring-editor"
+    if stage == "bento_finalization":
+        return "final-editor"
+    if stage == "complete":
+        return "final-viewer"
+    return "none"
+
+
+def user_status_summary(state: dict[str, Any]) -> dict[str, Any]:
+    stage = state["workflow"]["stage"]
+    labels = {
+        "initialized": ("資料の準備前", "依頼内容と参照資料を確認します"),
+        "planning": ("構成を作成中", "構成案を確認できる状態にします"),
+        "awaiting_plan_approval": ("構成案の確認待ち", "内容を確認して承認または修正を伝えてください"),
+        "html_authoring": ("現在のセクションをHTMLで作成中", "見た目を確認できる状態にします"),
+        "html_review": ("現在のセクションのHTML確認", "承認後にBentoへ取り込みます"),
+        "ready_for_conversion": ("従来方式の全体変換待ち", "BentoSlideへ変換します"),
+        "converting": ("BentoSlideへ変換中", "変換結果を検証します"),
+        "bento_validation": ("BentoSlideを検証中", "編集可能な状態へ進めます"),
+        "bento_authoring": ("現在のセクションをBentoSlideで編集中", "仕上がったらセクションを確定します"),
+        "content_review": ("資料全体の内容確認", "内容承認後に最終調整へ進みます"),
+        "bento_finalization": ("資料全体を最終調整中", "技術検証と最終承認を行います"),
+        "complete": ("資料は完成", "完成版を閲覧できます"),
+        "blocked": ("処理を停止中", "原因を解消して再開します"),
+    }
+    current, next_action = labels.get(stage, (stage, "状態を確認します"))
+    current_id = state["workflow"].get("currentSection") or state["workflow"].get("currentChapter")
+    section = state.get("sections", {}).get(current_id, {}).get("title") if current_id else None
+    return {
+        "current": current, "section": section or current_id, "next": next_action,
+        "route": workspace_route(state), "validActions": valid_actions(state),
+        "blockingReason": state["workflow"].get("blockingReason"),
+    }
+
+
+def valid_actions(state: dict[str, Any]) -> list[str]:
+    """Return deterministic high-level operations; user wording is resolved by the agent."""
+
+    stage = state["workflow"]["stage"]
+    if stage == "initialized":
+        return ["capture-request", "advance"]
+    if stage == "planning":
+        return ["edit-current", "advance"]
+    if stage == "awaiting_plan_approval":
+        return ["approve-current", "edit-current"]
+    if stage == "html_authoring":
+        return ["edit-current", "advance"]
+    if stage == "html_review":
+        current = state["workflow"].get("currentSection")
+        entry = state.get("sections", {}).get(current, {}) if current else {}
+        return (
+            ["advance", "promote-current-section", "edit-current"]
+            if entry.get("status") == "bento_integration"
+            else ["approve-current", "edit-current"]
+        )
+    if stage == "bento_authoring":
+        return ["edit-current", "finish-current-section", "reopen-current-section"]
+    if stage == "content_review":
+        return (
+            ["advance", "reopen-current-section"]
+            if state["approvals"]["bentoContent"]["status"] == "approved"
+            else ["approve-current", "edit-current", "reopen-current-section"]
+        )
+    if stage == "bento_finalization":
+        return (
+            ["advance", "reopen-current-section"]
+            if _final_approval_status(state["approvals"]["finalBento"]) == "approved"
+            else ["approve-current", "edit-current", "reopen-current-section"]
+        )
+    if stage == "complete":
+        return ["reopen-current-section", "reopen-finalization"]
+    if stage == "blocked":
+        return ["resume"]
+    return []
+
+
+def command_capture_request(root: Path, state: dict[str, Any], *, text: str) -> None:
+    cleaned = text.strip()
+    if not cleaned:
+        raise WorkflowError("Request text must not be blank")
+    destination = _repo_path(root, state["project"]["request"], field="project.request")
+    payload = (
+        "# Presentation request\n\n"
+        "This file is the persisted brief captured from the conversation.\n\n"
+        "## Request\n\n" + cleaned + "\n"
+    ).encode("utf-8")
+    ArtifactTransactionStore(root, (destination,)).commit(
+        {destination: payload}, operation="capture-presentation-request",
+    )
+    append_work_log(root, "Captured the current presentation request in REQUEST.md")
+
+
+def command_route(state: dict[str, Any], *, as_json: bool) -> None:
+    payload = {"route": workspace_route(state), **user_status_summary(state)}
+    print(json.dumps(payload, ensure_ascii=False, indent=2) if as_json else payload["route"])
+
+
+def command_advance(
+    root: Path, state: dict[str, Any], *, browser_executable: Path | None = None,
+    browser_check: bool = True,
+) -> None:
+    """Advance mechanical work only; never record an implicit human approval."""
+
+    stage = state["workflow"]["stage"]
+    if stage == "initialized":
+        command_initialize(root, state)
+        return
+    if stage == "planning":
+        command_submit_plan(root, state)
+        return
+    if stage == "html_authoring":
+        section_id, entry = _rolling_section(state)
+        if entry["status"] == "planned":
+            command_begin_section(root, state, section_id)
+            state = load_state(root)
+        command_complete_section(root, state, section_id)
+        return
+    if stage == "html_review":
+        _, entry = _rolling_section(state)
+        if entry["status"] == "bento_integration":
+            command_promote_current_section(
+                root, state, browser_executable=browser_executable, browser_check=browser_check,
+            )
+            return
+        raise WorkflowError("The current HTML still needs explicit approval")
+    if stage == "content_review" and state["approvals"]["bentoContent"]["status"] == "approved":
+        command_begin_finalization(root, state)
+        return
+    if stage == "bento_finalization" and _final_approval_status(state["approvals"]["finalBento"]) == "approved":
+        command_complete(root, state)
+        return
+    if stage in {"awaiting_plan_approval", "bento_authoring", "content_review", "bento_finalization"}:
+        raise WorkflowError("The workflow is at a human checkpoint; use approve-current or request a revision")
+    raise WorkflowError(f"advance has no safe automatic action in stage {stage!r}")
 
 
 def command_set_project(root: Path, state: dict[str, Any], *, kind: str, title: str) -> None:
@@ -1363,6 +1566,7 @@ def command_set_project(root: Path, state: dict[str, Any], *, kind: str, title: 
 
 def command_initialize(root: Path, state: dict[str, Any]) -> None:
     _require_stage(state, "initialized")
+    ensure_source_manifest(root, state)
     selected, _ = discover_source_candidates(root, state)
     state["project"]["primarySource"] = selected.relative_to(root).as_posix() if selected else None
     _transition(state, "planning", "in_progress")
@@ -1407,8 +1611,13 @@ def command_configure_sections(root: Path, state: dict[str, Any], section_ids: I
         section_id: state["sections"].get(section_id, {
             "title": section_id,
             "status": "planned",
+            "canonical": "planning",
             "slideIds": [],
             "approvalDigest": None,
+            "bentoDocumentRevision": None,
+            "bentoRegistryRevision": None,
+            "bentoSectionDigest": None,
+            "acceptedAt": None,
         })
         for section_id in values
     }
@@ -1437,6 +1646,8 @@ def command_approve_plan(root: Path, state: dict[str, Any]) -> None:
     for key in ("explanationPolicy", "storyOutline", "slidePlan"):
         state["approvals"][key] = "approved"
     first = next(iter(planned_units))
+    if single and state["sections"][first].get("canonical") is not None:
+        state["sections"][first].update({"status": "html_authoring", "canonical": "html"})
     _transition(state, "html_authoring", "in_progress", current=first)
     atomic_write_state(root, state)
     append_work_log(root, "Recorded plan approval and opened HTML authoring")
@@ -1448,10 +1659,10 @@ def _select_section(state: dict[str, Any], requested: str | None) -> str:
             raise WorkflowError(f"Section is not registered: {requested}")
         return requested
     current = state["workflow"].get("currentSection")
-    if current and state["sections"][current]["status"] != "approved":
+    if current and state["sections"][current]["status"] not in {"approved", "accepted"}:
         return current
     for section_id, entry in state["sections"].items():
-        if entry["status"] != "approved":
+        if entry["status"] not in {"approved", "accepted"}:
             return section_id
     raise WorkflowError("All registered sections are approved")
 
@@ -1460,9 +1671,11 @@ def command_begin_section(root: Path, state: dict[str, Any], requested: str | No
     _require_stage(state, "html_authoring")
     section_id = _select_section(state, requested)
     entry = state["sections"][section_id]
-    if entry["status"] not in {"planned", "authoring"}:
+    if entry["status"] not in {"planned", "authoring", "html_authoring"}:
         raise WorkflowError(f"Section cannot enter authoring from status {entry['status']!r}: {section_id}")
-    entry["status"] = "authoring"
+    entry["status"] = "html_authoring" if entry.get("canonical") is not None else "authoring"
+    if entry.get("canonical") is not None:
+        entry["canonical"] = "html"
     entry["approvalDigest"] = None
     _transition(state, "html_authoring", "in_progress", current=section_id)
     atomic_write_state(root, state)
@@ -1472,7 +1685,7 @@ def command_begin_section(root: Path, state: dict[str, Any], requested: str | No
 def command_complete_section(root: Path, state: dict[str, Any], requested: str | None) -> None:
     _require_stage(state, "html_authoring")
     section_id = _select_section(state, requested)
-    if state["sections"][section_id]["status"] != "authoring":
+    if state["sections"][section_id]["status"] not in {"authoring", "html_authoring"}:
         raise WorkflowError(f"Section is not in authoring: {section_id}")
     evidence = load_single_section_evidence(root, state)
     if set(evidence) != set(state["sections"]):
@@ -1480,7 +1693,7 @@ def command_complete_section(root: Path, state: dict[str, Any], requested: str |
     current = evidence[section_id]
     entry = state["sections"][section_id]
     entry["slideIds"] = list(current.slide_ids)
-    entry["status"] = "review"
+    entry["status"] = "html_review" if entry.get("canonical") is not None else "review"
     entry["approvalDigest"] = None
     _transition(state, "html_review", "awaiting_approval", current=section_id)
     atomic_write_state(root, state)
@@ -1493,7 +1706,7 @@ def command_approve_section(root: Path, state: dict[str, Any], requested: str | 
     if not section_id or section_id not in state["sections"]:
         raise WorkflowError("No current section is available for visual approval")
     entry = state["sections"][section_id]
-    if entry["status"] != "review":
+    if entry["status"] not in {"review", "html_review"}:
         raise WorkflowError(f"Section is not awaiting visual approval: {section_id}")
     evidence = load_single_section_evidence(root, state)
     if set(evidence) != set(state["sections"]):
@@ -1507,11 +1720,15 @@ def command_approve_section(root: Path, state: dict[str, Any], requested: str | 
         if approved["status"] == "approved" and approved["approvalDigest"] != evidence[approved_id].digest:
             raise WorkflowError(f"Approved section changed after approval: {approved_id}; unlock it first")
     entry["status"] = "approved"
+    if entry.get("canonical") is not None:
+        entry["canonical"] = "html"
     entry["approvalDigest"] = current.digest
     remaining = [key for key, value in state["sections"].items() if value["status"] != "approved"]
     if remaining:
         next_section = remaining[0]
         state["sections"][next_section]["status"] = "authoring"
+        if state["sections"][next_section].get("canonical") is not None:
+            state["sections"][next_section]["canonical"] = "html"
         _transition(state, "html_authoring", "in_progress", current=next_section)
     else:
         validate_sections(root, state, require_approved=True)
@@ -1534,6 +1751,273 @@ def command_unlock_section(root: Path, state: dict[str, Any], section_id: str) -
     _transition(state, "html_authoring", "in_progress", current=section_id)
     atomic_write_state(root, state)
     append_work_log(root, f"Unlocked section {section_id} for HTML authoring")
+
+
+def _section_digest(document: dict[str, Any], slide_ids: Iterable[str]) -> str:
+    wanted = set(slide_ids)
+    projection = [
+        slide for slide in document.get("slides", [])
+        if isinstance(slide, dict) and slide.get("id") in wanted
+    ]
+    if [slide.get("id") for slide in projection] != [value for value in slide_ids]:
+        raise WorkflowError("Authoring Bento does not contain the section slides in their registered order")
+    return canonical_projection_hash(projection)
+
+
+def _protected_output_hashes(root: Path, state: dict[str, Any]) -> dict[str, str | None]:
+    result: dict[str, str | None] = {}
+    for field in ("generatedHtml", "generatedJson", "generatedRegistry", "finalHtml", "finalJson", "finalRegistry"):
+        value = state["outputs"].get(field)
+        path = _repo_path(root, value, field=f"outputs.{field}") if isinstance(value, str) else None
+        result[field] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() if path and path.is_file() else None
+    return result
+
+
+def _rolling_section(state: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    section_id = state["workflow"].get("currentSection")
+    if not section_id or section_id not in state["sections"]:
+        raise WorkflowError("No current section is selected")
+    return section_id, state["sections"][section_id]
+
+
+def command_approve_current(root: Path, state: dict[str, Any]) -> None:
+    """Record only the approval that is explicitly awaiting the user now."""
+
+    stage = state["workflow"]["stage"]
+    if stage == "awaiting_plan_approval":
+        command_approve_plan(root, state)
+        return
+    if stage == "html_review" and state["authoring"]["mode"] in {"single", "imported"}:
+        section_id, entry = _rolling_section(state)
+        if entry["status"] not in {"html_review", "review"}:
+            raise WorkflowError(f"Current section is not awaiting HTML approval: {section_id}")
+        evidence = load_single_section_evidence(root, state)
+        if section_id not in evidence:
+            raise WorkflowError(f"Current section is absent from HTML: {section_id}")
+        current = evidence[section_id]
+        if entry["slideIds"] and entry["slideIds"] != list(current.slide_ids):
+            raise WorkflowError(f"Section slide membership changed during review: {section_id}")
+        next_state = copy.deepcopy(state)
+        current_entry = next_state["sections"][section_id]
+        current_entry.update({
+            "status": "bento_integration", "canonical": "html",
+            "slideIds": list(current.slide_ids), "approvalDigest": current.digest,
+        })
+        _transition(next_state, "html_review", "ready", current=section_id)
+        atomic_write_state(root, next_state)
+        append_work_log(root, f"Approved section {section_id} HTML for Bento promotion")
+        return
+    if stage == "content_review":
+        command_approve_content(root, state)
+        return
+    if stage == "bento_finalization":
+        command_approve_final(root, state)
+        return
+    raise WorkflowError("There is no current user approval checkpoint")
+
+
+def command_promote_current_section(
+    root: Path, state: dict[str, Any], *, browser_executable: Path | None, browser_check: bool,
+) -> None:
+    """Convert and transactionally promote one approved HTML section into authoring."""
+
+    _require_stage(state, "html_review")
+    if state.get("schemaVersion") != 2 or state["authoring"]["mode"] not in {"single", "imported"}:
+        raise WorkflowError("Rolling section promotion requires schema v2 single/imported authoring")
+    section_id, entry = _rolling_section(state)
+    if entry["status"] != "bento_integration" or entry.get("canonical") != "html":
+        raise WorkflowError("Approve the current section HTML before promoting it")
+    evidence = load_single_section_evidence(root, state)
+    if section_id not in evidence or entry["approvalDigest"] != evidence[section_id].digest:
+        raise WorkflowError("Current section HTML changed after approval; review it again")
+    before = _protected_output_hashes(root, state)
+    output_dir = root / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    html_path = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    registry_path = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    source_registry = _read_json(registry_path, label="single HTML registry")
+    base = root / "Bento_Slides.base.bento.html"
+    if not base.is_file():
+        raise WorkflowError("Bento runtime base is missing")
+    candidate_html_handle = tempfile.NamedTemporaryFile(
+        prefix=".section-promotion-", suffix=".preview.html", dir=html_path.parent, delete=False,
+    )
+    candidate_registry_handle = tempfile.NamedTemporaryFile(
+        prefix=".section-promotion-", suffix=".registry.json", dir=html_path.parent, delete=False,
+    )
+    candidate_html_handle.close()
+    candidate_registry_handle.close()
+    candidate_html_path = Path(candidate_html_handle.name)
+    candidate_registry_path = Path(candidate_registry_handle.name)
+    try:
+      with tempfile.TemporaryDirectory(prefix=".section-promotion-build-", dir=output_dir) as temporary:
+        work = Path(temporary)
+        candidate_html, candidate_registry, slide_ids = write_section_candidate(
+            html_path, source_registry, section_id=section_id,
+            output_html=candidate_html_path, output_registry=candidate_registry_path,
+        )
+        conversion = build_from_html(
+            html_path=candidate_html, registry_path=candidate_registry,
+            base_path=base, output_path=work / "section.bento.html",
+            browser_executable=browser_executable, browser_check=browser_check,
+        )
+        converted_registry = _read_json(work / "diagnostics/merged-registry.json", label="promoted registry")
+        outputs = state["outputs"]
+        target = _repo_path(root, outputs["authoringHtml"], field="outputs.authoringHtml")
+        target_registry = _repo_path(root, outputs["authoringRegistry"], field="outputs.authoringRegistry")
+        next_state = copy.deepcopy(state)
+        next_entry = next_state["sections"][section_id]
+        next_entry.update({
+            "status": "bento_authoring", "canonical": "bento", "slideIds": slide_ids,
+            "acceptedAt": None,
+        })
+        next_state["approvals"]["bentoContent"] = _pending_content_approval()
+        next_state["handoff"].update({
+            "readyForCodex": False, "readyForBentoAuthoring": True,
+            "readyForContentReview": False, "readyForFinalEditing": False,
+        })
+        _transition(next_state, "bento_authoring", "in_progress", current=section_id)
+        if not target.exists():
+            next_entry.update({
+                "bentoDocumentRevision": document_revision(conversion.document),
+                "bentoRegistryRevision": registry_revision(converted_registry),
+                "bentoSectionDigest": _section_digest(conversion.document, slide_ids),
+            })
+            validate_state(root, next_state)
+            AuthoringArtifactStorage(
+                source=conversion.html_path, source_registry=work / "diagnostics/merged-registry.json",
+                target=target, target_registry=target_registry, repository=root,
+                state_path=root / STATE_RELATIVE, initial_workflow_state=next_state,
+            )
+        else:
+            storage = authoring_storage(root, state)
+            storage.acquire_writer_lease()
+            try:
+                current_html, current_document, current_registry = storage.artifact_snapshot()
+                current_ids = [str(slide.get("id")) for slide in current_document.get("slides", [])]
+                if all(slide_id in current_ids for slide_id in slide_ids):
+                    operation = "replace-section"
+                    anchor = None
+                    targets = slide_ids
+                else:
+                    later_ids: list[str] = []
+                    seen_current = False
+                    for planned_id, planned in state["sections"].items():
+                        if planned_id == section_id:
+                            seen_current = True
+                            continue
+                        if seen_current and planned.get("canonical") == "bento":
+                            later_ids.extend(planned["slideIds"])
+                    anchor = next((value for value in later_ids if value in current_ids), None)
+                    operation = "insert-before" if anchor else "append"
+                    targets = None
+                merged_document, merged_registry, report = merge_segment(
+                    current_document, current_registry, conversion.document, converted_registry,
+                    operation=operation, anchor_slide_id=anchor, target_slide_ids=targets,
+                )
+                next_entry.update({
+                    "bentoDocumentRevision": document_revision(merged_document),
+                    "bentoRegistryRevision": registry_revision(merged_registry),
+                    "bentoSectionDigest": _section_digest(merged_document, slide_ids),
+                })
+                validate_state(root, next_state)
+                status = storage.status()
+                storage.save_serialized(
+                    embed_bento_doc(current_html, merged_document),
+                    base_document_revision=status["documentRevision"],
+                    base_registry_revision=status["registryRevision"], registry=merged_registry,
+                    replace_slide_ids=set(targets or ()), operation="promote-section",
+                    report_details={"sectionId": section_id, **report},
+                    report_path=output_dir / "section-promotion-report.json",
+                    workflow_state=next_state,
+                )
+            finally:
+                storage.release_writer_lease()
+    finally:
+        candidate_html_path.unlink(missing_ok=True)
+        candidate_registry_path.unlink(missing_ok=True)
+    if _protected_output_hashes(root, next_state) != before:
+        raise WorkflowError("Section promotion changed generated or final artifacts")
+    append_work_log(root, f"Promoted section {section_id} to Bento authoring without rebuilding unrelated sections")
+
+
+def _assert_accepted_sections_current(state: dict[str, Any], document: dict[str, Any]) -> None:
+    for section_id, entry in state["sections"].items():
+        if entry["status"] == "accepted" and entry.get("bentoSectionDigest") != _section_digest(document, entry["slideIds"]):
+            raise WorkflowError(f"Accepted section changed without being reopened: {section_id}")
+
+
+def command_finish_current_section(root: Path, state: dict[str, Any]) -> None:
+    _require_stage(state, "bento_authoring")
+    section_id, entry = _rolling_section(state)
+    if entry["status"] != "bento_authoring" or entry.get("canonical") != "bento":
+        raise WorkflowError("Current section is not in Bento authoring")
+    storage = authoring_storage(root, state)
+    _, document, registry = storage.artifact_snapshot()
+    _assert_accepted_sections_current(state, document)
+    next_state = copy.deepcopy(state)
+    accepted = next_state["sections"][section_id]
+    accepted.update({
+        "status": "accepted", "canonical": "bento",
+        "bentoDocumentRevision": document_revision(document),
+        "bentoRegistryRevision": registry_revision(registry),
+        "bentoSectionDigest": _section_digest(document, accepted["slideIds"]),
+        "acceptedAt": utc_now(),
+    })
+    remaining = [key for key, value in next_state["sections"].items() if value["status"] != "accepted"]
+    if remaining:
+        next_id = remaining[0]
+        next_entry = next_state["sections"][next_id]
+        if next_entry["status"] == "planned":
+            next_entry.update({"status": "html_authoring", "canonical": "html"})
+        _transition(next_state, "html_authoring", "in_progress", current=next_id)
+    else:
+        next_state["handoff"]["readyForContentReview"] = True
+        _transition(next_state, "content_review", "awaiting_approval")
+    atomic_write_state(root, next_state)
+    append_work_log(root, f"Accepted Bento section {section_id}; it remains reopenable")
+
+
+def command_reopen_current_section(root: Path, state: dict[str, Any], *, section_id: str | None, via: str) -> None:
+    _require_stage(state, "html_authoring", "html_review", "bento_authoring", "content_review", "bento_finalization", "complete")
+    selected = section_id or state["workflow"].get("currentSection")
+    if not selected:
+        selected = next((key for key, value in state["sections"].items() if value["status"] == "accepted"), None)
+    if not selected or selected not in state["sections"]:
+        raise WorkflowError("No section is available to reopen")
+    entry = state["sections"][selected]
+    if entry["status"] not in {"accepted", "bento_authoring", "bento_integration"}:
+        raise WorkflowError(f"Section is not reopenable from status {entry['status']!r}")
+    next_state = copy.deepcopy(state)
+    reopened = next_state["sections"][selected]
+    reopened["acceptedAt"] = None
+    next_state["approvals"]["bentoContent"] = _pending_content_approval()
+    next_state["approvals"]["finalBento"] = _pending_final_approval()
+    next_state["validation"].update({"finalStatus": "pending", "checkedAt": None})
+    if via == "html":
+        reopened.update({
+            "status": "html_authoring", "canonical": "html", "approvalDigest": None,
+            "bentoDocumentRevision": None, "bentoRegistryRevision": None, "bentoSectionDigest": None,
+        })
+        _transition(next_state, "html_authoring", "in_progress", current=selected)
+    else:
+        reopened.update({"status": "bento_authoring", "canonical": "bento"})
+        _transition(next_state, "bento_authoring", "in_progress", current=selected)
+    atomic_write_state(root, next_state)
+    append_work_log(root, f"Reopened section {selected} via {via}; final artifacts were not changed")
+
+
+def command_review_whole_deck(root: Path, state: dict[str, Any]) -> None:
+    if any(entry["status"] != "accepted" for entry in state["sections"].values()):
+        raise WorkflowError("Every section must be accepted before whole-deck content review")
+    _require_stage(state, "bento_authoring", "content_review")
+    storage = authoring_storage(root, state)
+    _, document, _ = storage.artifact_snapshot()
+    _assert_accepted_sections_current(state, document)
+    state["handoff"]["readyForContentReview"] = True
+    _transition(state, "content_review", "awaiting_approval")
+    atomic_write_state(root, state)
+    append_work_log(root, "Opened mandatory whole-deck content review")
 
 
 def _select_chapter(state: dict[str, Any], requested: str | None) -> str:
@@ -2235,6 +2719,10 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", dest="as_json")
+    route = commands.add_parser("route")
+    route.add_argument("--json", action="store_true", dest="as_json")
+    capture_request = commands.add_parser("capture-request")
+    capture_request.add_argument("--text", required=True)
     commands.add_parser("validate")
     migrate = commands.add_parser("migrate")
     migrate.add_argument("--dry-run", action="store_true")
@@ -2249,6 +2737,23 @@ def parser() -> argparse.ArgumentParser:
     configure_sections.add_argument("sections", nargs="+")
     commands.add_parser("submit-plan")
     commands.add_parser("approve-plan")
+    advance = commands.add_parser("advance")
+    advance.add_argument("--browser-executable", type=Path)
+    advance.add_argument("--skip-browser-check", action="store_true")
+    commands.add_parser("approve-current")
+    promote = commands.add_parser("promote-current-section")
+    promote.add_argument("--browser-executable", type=Path)
+    promote.add_argument("--skip-browser-check", action="store_true")
+    promote_explicit = commands.add_parser("promote-section")
+    promote_explicit.add_argument("--section", required=True)
+    promote_explicit.add_argument("--browser-executable", type=Path)
+    promote_explicit.add_argument("--skip-browser-check", action="store_true")
+    commands.add_parser("edit-current")
+    commands.add_parser("finish-current-section")
+    commands.add_parser("review-whole-deck")
+    reopen_current = commands.add_parser("reopen-current-section")
+    reopen_current.add_argument("--section")
+    reopen_current.add_argument("--via", choices=("bento", "html"), default="bento")
     for name in ("begin-chapter", "complete-chapter", "approve-chapter"):
         child = commands.add_parser(name)
         child.add_argument("--chapter")
@@ -2289,6 +2794,10 @@ def run(args: argparse.Namespace) -> int:
     command = args.command
     if command == "status":
         command_status(root, state, as_json=args.as_json)
+    elif command == "route":
+        command_route(state, as_json=args.as_json)
+    elif command == "capture-request":
+        command_capture_request(root, state, text=args.text)
     elif command == "validate":
         validate_current_stage(root, state)
         print(f"deck.yaml + {state['workflow']['stage']} artifacts: PASS")
@@ -2311,6 +2820,31 @@ def run(args: argparse.Namespace) -> int:
         command_submit_plan(root, state)
     elif command == "approve-plan":
         command_approve_plan(root, state)
+    elif command == "advance":
+        command_advance(
+            root, state, browser_executable=args.browser_executable,
+            browser_check=not args.skip_browser_check,
+        )
+    elif command == "approve-current":
+        command_approve_current(root, state)
+    elif command in {"promote-current-section", "promote-section"}:
+        if command == "promote-section" and args.section != state["workflow"].get("currentSection"):
+            raise WorkflowError("promote-section may target only the current reviewed section")
+        command_promote_current_section(
+            root, state, browser_executable=args.browser_executable,
+            browser_check=not args.skip_browser_check,
+        )
+    elif command == "edit-current":
+        route_value = workspace_route(state)
+        if route_value not in {"html-preview", "authoring-editor", "final-editor"}:
+            raise WorkflowError("The current stage has no editable workspace")
+        print(route_value)
+    elif command == "finish-current-section":
+        command_finish_current_section(root, state)
+    elif command == "review-whole-deck":
+        command_review_whole_deck(root, state)
+    elif command == "reopen-current-section":
+        command_reopen_current_section(root, state, section_id=args.section, via=args.via)
     elif command == "begin-chapter":
         command_begin_chapter(root, state, args.chapter)
     elif command == "complete-chapter":

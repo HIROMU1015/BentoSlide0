@@ -11,6 +11,10 @@
 
 HTML and generated registries remain historical evidence. Authoring saves never rewrite either. Finalization begins only by transactionally snapshotting the approved authoring artifacts.
 
+## Rolling section handoff
+
+The primary new-deck route repeats `HTML authoring -> HTML review -> promotion -> Bento authoring -> accepted` for each planned section. Promotion builds a section-only HTML/registry candidate, inserts or replaces it at the order implied by planning, and commits authoring HTML/JSON/registry with the workflow state. Unrelated slide hashes and generated/final artifacts must remain unchanged. HTML approval and Bento acceptance are distinct human decisions; neither is inferred by `advance`. Accepted sections may be reopened and are checked for unauthorized drift when another section is accepted. After the last section, the complete authoring document must pass whole-deck content review.
+
 ## Authoring save contract
 
 The authoring API request carries `baseDocumentRevision`, `baseRegistryRevision`, `serializedHtml`, and optionally a complete `registry`. The response returns both result revisions, `contentApprovalInvalidated`, and `transactionId`. HTTP 409 indicates a stale document or registry revision. HTTP 422 indicates schema, registry, reference, resource, runtime, or protected-metadata failure. A fully validated save whose document and registry are unchanged returns `noOp: true` and `transactionId: null`; it creates neither a backup nor a journal/report write.

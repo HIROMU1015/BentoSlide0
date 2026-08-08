@@ -10,6 +10,7 @@ At the start of every task, read `START_HERE.md`, `deck.yaml`, and `python -m sc
 - After conversion, generated artifacts are reproducible and read-only. During `bento_authoring`, authoring HTML/JSON/registry are authoritative. After content approval and final handoff, final `#bento-doc`, frozen final registry, and immutable baselines are authoritative.
 - Never write Bento HTML/JSON/registry directly. Use the revision-checked Work editor API or the common transaction/storage layer. Never expose a partially replaced artifact set.
 - Work editor authoring may change content and structure, but in-place existing `id`/`type` changes require explicit replacement. Finalization permits only geometry/presentation style/theme/background/z-order changes.
+- If a user asks for content or structure changes during finalization/complete, route back through `reopen-current-section`, edit the authoring canonical section, re-accept sections, and obtain a fresh whole-deck approval. Never relax finalization protection or edit final content in place.
 - Use `python -m scripts.apply_bento_final_edits` only in finalization. Never use it for content or structure. Never reconvert over final, automatically reset final, or use `--allow-content-edit` for ordinary final adjustment.
 - Preserve the Bento runtime, synchronous HTML-string `window.bento.serialize()` contract, resource/fallback rules, and legacy JSON-first behavior.
 - Update state only through `scripts.deck_workflow`. Respect plan, section/chapter visual, Bento content-revision, and final approval gates. On a resolved blocker, run `resume`; never repair YAML fields manually.
@@ -21,6 +22,12 @@ At the start of every task, read `START_HERE.md`, `deck.yaml`, and `python -m sc
 - Never mutate generated/final during segment import or targeted replacement. Treat imported HTML as untrusted and preview only sanitized static output.
 
 ## Short user instructions
+
+Natural conversation is the primary UX. Infer the matching high-level operation, stop at the next human checkpoint, and report the current section in user language. Never require a stage name, section/slide ID, revision, registry field, file path, or CLI command. Persist a substantive new brief with `capture-request`; use `advance`, `approve-current`, `promote-current-section`, `edit-current`, `finish-current-section`, `reopen-current-section`, and `review-whole-deck` internally. `advance` never records approval.
+
+For new schema v2 single/imported decks, use `planned -> html_authoring -> html_review -> bento_integration -> bento_authoring -> accepted`. Exactly one canonical source exists per section: planning, HTML, or Bento. Promotion converts only the approved section, preserves planning order, and leaves unrelated authoring slide hashes plus generated/final artifacts unchanged. Accepted sections remain reopenable. Require whole-deck content review after all sections are accepted.
+
+The phrases below remain backward-compatible aliases, not the preferred interaction model.
 
 - `この資料を作成して`: discover manifest sources, create planning artifacts, register all planned sections, submit the plan, and request only material approval.
 - `この方針で進めて`: approve the plan, author the first incomplete section in the single HTML/registry source, start HTML preview, and request visual approval.

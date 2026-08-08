@@ -47,6 +47,8 @@ CLASS_GROUPS = {
     "tests.test_windows_workspace_launcher.WindowsWorkspaceLauncherTests": "windows",
     "tests.test_work_editor.WorkEditorTests": "unit",
     "tests.test_work_editor.WorkEditorBrowserTests": "browser",
+    "tests.test_workflow_ux.WorkflowUxUnitTests": "unit",
+    "tests.test_workflow_ux.RollingSectionBrowserTests": "browser",
 }
 
 TEST_GROUP_OVERRIDES = {

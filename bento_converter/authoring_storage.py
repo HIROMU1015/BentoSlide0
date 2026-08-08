@@ -324,6 +324,7 @@ class AuthoringArtifactStorage:
         self, *, source: str | Path, source_registry: str | Path,
         target: str | Path, target_registry: str | Path, repository: str | Path,
         reset_authoring: bool = False, state_path: str | Path | None = None,
+        initial_workflow_state: dict[str, Any] | None = None,
     ) -> None:
         self.repository = Path(repository).resolve()
         self._lock = threading.RLock()
@@ -357,19 +358,44 @@ class AuthoringArtifactStorage:
         )
         validate_authoring_document(source_document, current=source_document, registry=source_registry_value)
         existing = [path.is_file() for path in (self.target, self.sidecar, self.registry_path)]
+        if initial_workflow_state is not None and any(existing) and not reset_authoring:
+            raise BentoConverterError("Initial workflow state is valid only while initializing authoring artifacts")
         if reset_authoring or not any(existing):
             registry_payload = (json.dumps(source_registry_value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
-            self.transactions.commit(
-                {
+            payloads = {
                     self.target: source_html.encode("utf-8"),
                     self.sidecar: (serialize_bento_doc(source_document) + "\n").encode("utf-8"),
                     self.registry_path: registry_payload,
-                },
+            }
+            if initial_workflow_state is not None:
+                if self.state_path is None:
+                    raise BentoConverterError("Initial workflow state requires state_path")
+                payloads[self.state_path] = yaml.safe_dump(
+                    initial_workflow_state, allow_unicode=True, sort_keys=False,
+                ).encode("utf-8")
+            def validate_initial_commit() -> None:
+                installed_html = load_html(self.target)
+                installed_document = extract_bento_doc(installed_html)
+                installed_sidecar = json.loads(self.sidecar.read_text(encoding="utf-8-sig"))
+                installed_registry = json.loads(self.registry_path.read_text(encoding="utf-8-sig"))
+                if installed_document != source_document or installed_sidecar != source_document:
+                    raise BentoConverterError("Initialized authoring HTML/JSON differ from the prepared document")
+                if installed_registry != source_registry_value:
+                    raise BentoConverterError("Initialized authoring registry differs from the prepared registry")
+                assert_runtime_integrity(source_html, installed_html)
+                if initial_workflow_state is not None and self.state_path is not None:
+                    installed_state = yaml.safe_load(self.state_path.read_text(encoding="utf-8-sig"))
+                    if installed_state != initial_workflow_state:
+                        raise BentoConverterError("Initialized workflow state differs from the prepared state")
+
+            self.transactions.commit(
+                payloads,
                 operation="authoring-initialize",
                 target_document_revision=document_revision(source_document),
                 target_registry_revision=registry_revision(source_registry_value),
                 report_path=self.report_path,
                 report_payload={"operation": "initialize", "validation": "pass", "rollback": False},
+                validate_committed=validate_initial_commit,
             )
         elif not all(existing):
             raise BentoConverterError("Authoring HTML, JSON, and registry must all exist or all be absent")
@@ -724,6 +750,7 @@ class AuthoringArtifactStorage:
         replace_slide_ids: set[str] | None = None,
         operation: str = "authoring-save", report_details: dict[str, Any] | None = None,
         report_path: str | Path | None = None,
+        workflow_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         current_html, current_document, current_registry = self._read_current()
         current_document_revision = document_revision(current_document)
@@ -762,9 +789,17 @@ class AuthoringArtifactStorage:
                 "validation": "pass",
                 "noOp": True,
             }
-        state_payload, state_base, _ = self._state_invalidation_payload(
-            proposed_document_revision, proposed_registry_revision,
-        )
+        if workflow_state is not None:
+            if self.state_path is None:
+                raise BentoConverterError("Workflow state update requires state_path")
+            state_base, _ = self._load_workflow_state()
+            state_payload = yaml.safe_dump(
+                workflow_state, allow_unicode=True, sort_keys=False,
+            ).encode("utf-8")
+        else:
+            state_payload, state_base, _ = self._state_invalidation_payload(
+                proposed_document_revision, proposed_registry_revision,
+            )
         report = {
             "operation": operation, "baseDocumentRevision": current_document_revision,
             "baseRegistryRevision": current_registry_revision, "resultDocumentRevision": proposed_document_revision,
@@ -803,8 +838,10 @@ class AuthoringArtifactStorage:
                 explicit_replace_slide_ids=replace_slide_ids,
             )
             if state_payload is not None:
-                _, installed_state = self._load_workflow_state()
-                if installed_state["approvals"]["bentoContent"]["status"] != "pending":
+                installed_raw, installed_state = self._load_workflow_state()
+                if installed_raw != state_payload:
+                    raise BentoConverterError("Authoring transaction installed different workflow state")
+                if workflow_state is None and installed_state["approvals"]["bentoContent"]["status"] != "pending":
                     raise BentoConverterError("Authoring save did not invalidate workflow content approval")
 
         payloads = {

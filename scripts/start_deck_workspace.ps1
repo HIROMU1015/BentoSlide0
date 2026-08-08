@@ -30,10 +30,18 @@ try {
             exit $LASTEXITCODE
         }
         { $_ -in @('bento_authoring', 'content_review') } {
-            $sourcePath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.generatedHtml)
             $targetPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.authoringHtml)
-            $sourceRegistryPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.generatedRegistry)
             $targetRegistryPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.authoringRegistry)
+            $generatedPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.generatedHtml)
+            $generatedRegistryPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.generatedRegistry)
+            if ((Test-Path -LiteralPath $generatedPath -PathType Leaf) -and (Test-Path -LiteralPath $generatedRegistryPath -PathType Leaf)) {
+                $sourcePath = $generatedPath
+                $sourceRegistryPath = $generatedRegistryPath
+            }
+            else {
+                $sourcePath = $targetPath
+                $sourceRegistryPath = $targetRegistryPath
+            }
             $editorArguments = @{
                 Mode = 'authoring'
                 Source = $sourcePath
@@ -92,7 +100,13 @@ try {
             exit 0
         }
         'complete' {
-            Write-Host 'The deck workflow is complete. No server was started.'
+            $finalPath = Resolve-BentoLauncherPath -Repository $repository -Value ([string]$deck.outputs.finalHtml)
+            if (-not (Test-Path -LiteralPath $finalPath -PathType Leaf)) {
+                throw "The completed final Bento file does not exist: $finalPath"
+            }
+            if (-not $NoClipboard) { Set-Clipboard -Value $finalPath }
+            Start-Process -FilePath $finalPath
+            Write-Host "Opened the completed BentoSlide: $finalPath"
             exit 0
         }
         'blocked' {

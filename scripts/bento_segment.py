@@ -1,4 +1,4 @@
-"""Import or explicitly replace converted HTML slides in the protected authoring Bento deck."""
+"""Insert, append, or explicitly replace converted HTML segments in protected authoring."""
 
 from __future__ import annotations
 
@@ -25,14 +25,18 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--root", type=Path, help="Repository root")
     commands = result.add_subparsers(dest="command", required=True)
-    for name in ("import", "replace"):
+    for name in ("import", "append", "insert-before", "insert-after", "replace", "replace-slide", "replace-range", "replace-section"):
         child = commands.add_parser(name)
         child.add_argument("--html", required=True, type=Path)
         child.add_argument("--registry", required=True, type=Path)
         child.add_argument("--browser-executable", type=Path)
         child.add_argument("--skip-browser-check", action="store_true", help="Testing-only: skip browser round-trip evidence")
-        if name == "replace":
+        if name in {"replace", "replace-slide"}:
             child.add_argument("--slide-id", required=True)
+        if name in {"insert-before", "insert-after"}:
+            child.add_argument("--anchor-slide-id", required=True)
+        if name in {"replace-range", "replace-section"}:
+            child.add_argument("--target-slide-id", action="append", required=True, dest="target_slide_ids")
     return result
 
 
@@ -58,7 +62,8 @@ def _protected_artifact_hashes(root: Path, state: dict[str, Any]) -> dict[str, s
 
 def _save_offline_or_api(
     root: Path, state: dict[str, Any], segment_document: dict[str, Any], segment_registry: dict[str, Any],
-    *, operation: str, slide_id: str | None, browser_check: bool, browser_executable: Path | None,
+    *, operation: str, slide_id: str | None, anchor_slide_id: str | None,
+    target_slide_ids: list[str] | None, browser_check: bool, browser_executable: Path | None,
     evidence_root: Path,
 ) -> dict[str, Any]:
     storage = None
@@ -85,7 +90,8 @@ def _save_offline_or_api(
     try:
         merged_document, merged_registry, report = merge_segment(
             current_document, current_registry, segment_document, segment_registry,
-            operation=operation, slide_id=slide_id,
+            operation=operation, slide_id=slide_id, anchor_slide_id=anchor_slide_id,
+            target_slide_ids=target_slide_ids,
         )
         merged_html = embed_bento_doc(current_html, merged_document)
         if browser_check:
@@ -101,7 +107,9 @@ def _save_offline_or_api(
         else:
             report["browserCheck"] = {"skipped": True}
         report_relative = (evidence_root / "operation-report.json").relative_to(root).as_posix()
-        replace_ids = {slide_id} if operation == "replace" and slide_id else set()
+        replace_ids = set(target_slide_ids or ())
+        if operation in {"replace", "replace-slide"} and slide_id:
+            replace_ids.add(slide_id)
         if client is not None:
             saved = client.post("/api/save", {
                 "baseDocumentRevision": status["documentRevision"],
@@ -158,6 +166,8 @@ def run(args: argparse.Namespace) -> int:
         result = _save_offline_or_api(
             root, state, converted.document, converted_registry,
             operation=args.command, slide_id=getattr(args, "slide_id", None),
+            anchor_slide_id=getattr(args, "anchor_slide_id", None),
+            target_slide_ids=getattr(args, "target_slide_ids", None),
             browser_check=not args.skip_browser_check,
             browser_executable=args.browser_executable, evidence_root=evidence_root,
         )

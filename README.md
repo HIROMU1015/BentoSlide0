@@ -5,18 +5,15 @@
 ## 最短の使い方
 
 1. このリポジトリを資料ごとに複製します。
-2. 一次資料を`sources/private/`へ置き、必要なら`REQUEST.md`を記入します。
-3. ChatGPT Workで`この資料を作成して`と伝えます。
-4. 構成確認後、`この方針で進めて`と伝えます。
-5. HTMLの見た目を確認し、`次へ`または修正内容だけを伝えます。
-6. Codexへ`BentoSlideに変換して`と伝えます。
-7. Workへ`BentoSlideで編集を開始して`と伝え、人間とWorkでBentoを編集します。
-8. 必要な複雑slideだけを部分HTMLから追加・置換します。
-9. `内容を確定して`と伝え、内容・構造のreviewへ進みます。
-10. 承認時に`この内容で最終調整へ`と伝えます。
-11. `最終調整を開始して`と伝え、レイアウト・styleのみを仕上げます。
+2. 一次資料を`sources/private/`へ置きます。
+3. ChatGPT Workへ、作りたい資料を普段の言葉で伝えます。
+4. Workが依頼を`REQUEST.md`へ保存し、曖昧でなければsource manifestも準備します。
+5. 構成を確認します。
+6. 各sectionをHTML確認、Bento昇格、Bento編集、section確定の順で仕上げます。
+7. 全section確定後に資料全体の内容を確認します。
+8. 最終調整ではレイアウト・styleだけを仕上げます。
 
-ファイル名、section番号、状態更新、ログ、port、変換コマンドはエージェントが`deck.yaml`から判断します。`deck.yaml`はschema v2の唯一の機械状態です。Windowsでは`start_deck_workspace.cmd`がstageに応じてHTML previewまたはBento Work editorを起動し、URLだけをclipboardへコピーします。通常ブラウザーは開きません。
+ファイル名、section番号、状態更新、ログ、port、変換コマンドはエージェントが`deck.yaml`から判断します。`deck.yaml`はschema v2の唯一の機械状態です。Windowsでは`start_deck_workspace.cmd`がstageに応じてHTML preview、authoring editor、final editor、完成版viewerを選びます。従来の短文コマンドも互換経路として維持しています。
 
 標準の正本は次の順に切り替わります。
 

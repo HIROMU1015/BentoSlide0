@@ -1,10 +1,8 @@
 # Start here
 
-このリポジトリは1資料分のローカルBentoSlide制作環境です。一次資料を`sources/private/`へ置き、必要なら`REQUEST.md`へ希望を書いたら、ChatGPT Workへ次だけ伝えて開始できます。
+このリポジトリは1資料分のローカルBentoSlide制作環境です。一次資料を`sources/private/`へ置き、ChatGPT Workへ作りたい資料を普段の言葉で伝えてください。依頼内容は`REQUEST.md`へ保存され、参照資料が1件ならmanifestへ自動登録されます。
 
-```text
-この資料を作成して
-```
+例えば「この資料を、初見の人にも分かる8枚の説明資料にして」「第2部の図を簡潔にして」のように依頼できます。従来の短文コマンドも互換経路として使えます。
 
 Work/Codexは自分で`deck.yaml`と`python -m scripts.deck_workflow status --json`を確認し、`workflow/WORKFLOW.md`の現在stageだけを実行します。ユーザーにYAML更新、ファイル名、section番号、registry更新、log、port、CLI操作を求めません。
 
@@ -14,8 +12,8 @@ Work/Codexは自分で`deck.yaml`と`python -m scripts.deck_workflow status --js
 - ChatGPT Workは資料理解、説明方針、story、single HTML/registry、視覚review、Bento内容編集、最終layout判断を担当します。
 - Codexは状態管理、HTML-first変換、diagnostics、browser evidence、transaction/recovery、launcher、技術検証を担当します。
 
-ユーザーが承認するのは、全体方針、各sectionの主要構図、Bento authoringの内容、完成finalの4種類です。承認は自動で通過しません。内容承認はauthoring documentとregistryのrevisionへ固定され、後続変更時は自動的にpendingへ戻ります。
+通常はsectionを1つずつ、`HTML作成→見た目確認→Bentoへ昇格→Bento編集→section確定`の順で仕上げます。人が判断するのは各sectionのHTML昇格可否とBento版の確定、最後の資料全体の内容、finalの仕上がりです。承認は自動で通過しません。
 
 Windowsでは`start_deck_workspace.cmd`をダブルクリックすると、現在stageに合うHTML previewまたはWork editorが起動し、URLがclipboardへ入ります。既存finalのresetや通常ブラウザーの起動は行いません。
 
-通常の短文は、`この資料を作成して`、`この方針で進めて`、`次へ`、`BentoSlideに変換して`、`BentoSlideで編集を開始して`、`内容を確定して`、`この内容で最終調整へ`、`最終調整を開始して`です。`内容を確定して`はreview開始であり承認そのものではありません。ユーザーが`この内容で最終調整へ`と明示した時だけ、現在のdocument/registry revisionを承認してfinalizationへ進みます。
+`start_deck_workspace.cmd`は現在位置に応じ、HTML preview、authoring editor、final editor、完成版viewerのどれかを自動選択します。内部ID、revision、registry、CLIは通常表示しません。必要な場合だけ`status --json`で完全な機械状態を確認できます。
