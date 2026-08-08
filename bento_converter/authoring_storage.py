@@ -21,7 +21,15 @@ from .artifact_transaction import (
 from .bento_validator import validate_bento_doc
 from .errors import BentoConverterError, ValidationError, issue
 from .html_document import assert_runtime_integrity, embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
-from .registry_document import REGISTRY_COLLECTIONS, normalize_registry, registry_revision, validate_registry
+from .registry_document import (
+    REGISTRY_COLLECTIONS,
+    content_digest,
+    data_uri_payload,
+    normalize_registry,
+    registry_revision,
+    validate_registry,
+    validate_source_original_transition,
+)
 from .resource_embedding import scan_document_resources
 from .work_editor_storage import document_persistence_equal, document_revision
 
@@ -157,6 +165,18 @@ def _requires_registry_update(current: dict[str, Any], proposed: dict[str, Any])
     return any(before[key] != after[key] for key in ("equations", "charts", "tables", "media", "protectedMetadata"))
 
 
+def _effective_asset(
+    element: dict[str, Any], registry: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    asset_id = element.get("assetId") if isinstance(element.get("assetId"), str) else None
+    figure_id = element.get("figureId")
+    figure = registry.get("figures", {}).get(figure_id) if isinstance(figure_id, str) else None
+    figure_asset_id = figure.get("assetId") if isinstance(figure, dict) and isinstance(figure.get("assetId"), str) else None
+    effective_id = asset_id or figure_asset_id
+    definition = registry.get("assets", {}).get(effective_id) if effective_id else None
+    return effective_id, definition if isinstance(definition, dict) else None
+
+
 def validate_authoring_document(
     document: dict[str, Any], *, current: dict[str, Any], registry: dict[str, Any],
     explicit_replace_slide_ids: set[str] | None = None,
@@ -179,6 +199,17 @@ def validate_authoring_document(
         for source_id in _nested_source_ids(element):
             if source_id not in sources:
                 errors.append(issue(slide_id=slide.get("id"), element_id=element.get("id"), field="sourceId", actual=source_id, fix="Define the source in registry.sources."))
+        figure_id = element.get("figureId")
+        figure = definitions["figures"].get(figure_id) if isinstance(figure_id, str) else None
+        if (
+            isinstance(figure, dict) and isinstance(figure.get("assetId"), str)
+            and isinstance(element.get("assetId"), str) and element["assetId"] != figure["assetId"]
+        ):
+            errors.append(issue(
+                slide_id=slide.get("id"), element_id=element.get("id"), field="assetId/figureId",
+                actual={"assetId": element["assetId"], "figureAssetId": figure["assetId"]},
+                fix="Reference the same registered asset from the element and figure.",
+            ))
 
     protected = registry.get("protected", {})
     slide_ids = {slide.get("id") for slide in document.get("slides", []) if isinstance(slide, dict)}
@@ -293,6 +324,27 @@ def validate_content_provenance(
                 slide_id=slide_id, element_id=element_id, field="unprovenancedDraft", actual=True,
                 fix="Add registry-backed provenance or remove the draft claim before content approval.",
             ))
+        asset_id, asset = _effective_asset(element, registry)
+        if asset_id and asset and isinstance(asset.get("origin"), dict) and element_type in {"image", "media"}:
+            expected = asset.get("contentDigest")
+            candidates = [("src", element.get("src"))]
+            document_asset = document.get("assets", {}).get(asset_id)
+            if document_asset is not None:
+                candidates.append((f"assets.{asset_id}", document_asset))
+            for resource_field, resource in candidates:
+                try:
+                    actual = content_digest(data_uri_payload(resource))
+                except BentoConverterError as exc:
+                    errors.append(issue(
+                        slide_id=slide_id, element_id=element_id, field=f"{resource_field}/contentDigest",
+                        actual=resource, fix=f"Embed the registered visual bytes for assets.{asset_id}: {exc}",
+                    ))
+                else:
+                    if actual != expected:
+                        errors.append(issue(
+                            slide_id=slide_id, element_id=element_id, field=f"{resource_field}/contentDigest",
+                            actual=actual, fix=f"Restore the bytes registered by assets.{asset_id} ({expected}).",
+                        ))
     if errors:
         raise ValidationError(errors)
     return {"provenanceValidation": "pass"}
@@ -582,6 +634,7 @@ class AuthoringArtifactStorage:
         proposed_registry = current_registry if registry is None else normalize_registry(
             registry, unit_id=str(registry.get("unitId") or "deck"),
         )
+        validate_source_original_transition(current_registry, proposed_registry)
         if registry_update_required and registry is None:
             raise ValidationError(["Authoring document change requires a registry update in the same transaction"])
         if registry_update_required and registry_revision(proposed_registry) == registry_revision(current_registry):
@@ -773,6 +826,8 @@ class AuthoringArtifactStorage:
             proposed_registry = normalize_registry(registry, unit_id=str(registry.get("unitId") or "deck"))
             if registry_update_required and registry_revision(proposed_registry) == current_registry_revision:
                 raise ValidationError(["Registry-sensitive authoring changes require a changed registry revision"])
+        if operation == "authoring-save":
+            validate_source_original_transition(current_registry, proposed_registry)
         validation = validate_authoring_document(
             proposed_document, current=current_document, registry=proposed_registry,
             explicit_replace_slide_ids=replace_slide_ids,

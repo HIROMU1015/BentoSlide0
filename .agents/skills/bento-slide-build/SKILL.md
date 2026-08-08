@@ -25,7 +25,7 @@ For every planned slide, decide whether prose is sufficient, a diagram improves 
 
 Prefer native HTML text/shape/connector diagrams. Use `source-original` only for the actual source figure with a registered source ID and precise locator. Use `source-derived` for a reconstruction based on one or more located source passages. Use `generated` for explanatory art that is not evidence and give it no source provenance. Never generate numerical data, experimental or measurement results, benchmark results, quantitative plots, or equations; use registered data and LaTeX/native equations instead.
 
-When present, author and validate `planning/visual-plan.yaml`. Register received/generated images and extract PDF figures with `scripts.register_visual_asset`; it selects `deck/assets/source`, `deck/assets/local`, or `deck/assets/generated` and updates the registry in one transaction. Images should carry both `data-asset-id` and `data-figure-id`. Read `docs/visual-workflow.md` before visual work. Visual creation and redesign remain inside the rolling section approval/promotion/acceptance lifecycle.
+When present, author and validate `planning/visual-plan.yaml`. Register received/generated images and extract PDF figures with `scripts.register_visual_asset`; it selects `deck/assets/source`, `deck/assets/local`, or `deck/assets/generated` and updates the file, SHA-256 `contentDigest`, and registry in one transaction. Images carry both `data-asset-id` and `data-figure-id`. For a source-derived native diagram, register one assetless figure and put its `data-figure-id` on every participating text/shape/connector. Read `docs/visual-workflow.md` before visual work. Visual creation and redesign remain inside the rolling section approval/promotion/acceptance lifecycle.
 
 ## HTML authoring and conversion
 
@@ -64,7 +64,7 @@ Require browser round-trip evidence, outside-slide hash invariance, cross-slide 
 
 Content approval must match both current `sha256:` revisions and the canonical `bento/content-approval/v1` digest. Any authoring document/registry mutation invalidates it. Only approved current revisions may be copied to final HTML/JSON/registry plus document/registry baselines.
 
-Allow provenance drafts while authoring, but before content review require `equationId` for equations, `chartId` for charts, `tableId` for tables, and `figureId` or `assetId` for source-backed image/SVG elements. Reject `unprovenancedDraft` at that gate. Treat revision backups as complete only when their HTML/JSON/registry byte revisions match the transactionally written manifest.
+Allow provenance drafts while authoring, but before content review require `equationId` for equations, `chartId` for charts, `tableId` for tables, and `figureId` or `assetId` for source-backed image/SVG elements. Require origin-bearing embedded image bytes to match the registry `contentDigest`, and reject ordinary Work editor attempts to add, relabel, or change `source-original` identity. Reject `unprovenancedDraft` at that gate. Treat revision backups as complete only when their HTML/JSON/registry byte revisions match the transactionally written manifest.
 
 ## Finalization
 

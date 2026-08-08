@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import BentoConverterError, JsonLoadError, ValidationError, issue
-from .registry_document import REGISTRY_V1, REGISTRY_V2, validate_registry
+from .registry_document import REGISTRY_V1, REGISTRY_V2, validate_registry, validate_registry_asset_content
 
 REGISTRY_FORMAT = REGISTRY_V1
 
@@ -78,6 +78,7 @@ def discover_source_unit(html: str | Path, registry: str | Path) -> SourceUnit:
     unit_id, errors = _validate_source_registry(document)
     if errors:
         raise ValidationError(errors)
+    validate_registry_asset_content(document, asset_base=registry_path.parent)
     assert unit_id is not None
     return SourceUnit(unit_id, html_path.resolve(), registry_path.resolve(), document)
 
@@ -109,6 +110,11 @@ def discover_chapters(html_dir: str | Path, registry_dir: str | Path) -> list[So
         registry = _load_json(registry_path)
         chapter_id, registry_errors = _validate_source_registry(registry)
         errors.extend(registry_errors)
+        if not registry_errors:
+            try:
+                validate_registry_asset_content(registry, asset_base=registry_path.parent)
+            except BentoConverterError as exc:
+                errors.append(str(exc))
         if registry.get("format") != REGISTRY_FORMAT:
             errors.append(issue(field="format", actual=registry.get("format"), fix=f"Use {REGISTRY_FORMAT!r} for modular chapter discovery."))
         if not chapter_id:

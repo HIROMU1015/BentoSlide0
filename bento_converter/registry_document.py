@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote_to_bytes
 
 from .errors import BentoConverterError
 
@@ -18,6 +21,87 @@ GENERATED_FORBIDDEN_ROLES = {
     "data", "experimental-result", "measurement", "benchmark",
     "quantitative-plot", "equation",
 }
+CONTENT_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+SOURCE_ORIGINAL_IDENTITY_FIELDS = {"path", "data", "contentDigest", "origin", "provenance"}
+
+
+def content_digest(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def data_uri_payload(value: str) -> bytes:
+    if not isinstance(value, str) or not value.startswith("data:") or "," not in value:
+        raise BentoConverterError("Visual asset must be an embedded data URI")
+    header, encoded = value.split(",", 1)
+    encoded = encoded.split("#", 1)[0]
+    try:
+        return base64.b64decode(encoded, validate=True) if ";base64" in header.lower() else unquote_to_bytes(encoded)
+    except (ValueError, TypeError) as exc:
+        raise BentoConverterError("Visual asset data URI payload is invalid") from exc
+
+
+def validate_registry_asset_content(registry: dict[str, Any], *, asset_base: str | Path) -> None:
+    """Bind origin-bearing registry assets to their local/data bytes before conversion."""
+
+    base = Path(asset_base).resolve()
+    for asset_id, definition in registry.get("assets", {}).items():
+        if not isinstance(definition, dict) or not isinstance(definition.get("origin"), dict):
+            continue
+        expected = definition.get("contentDigest")
+        if isinstance(definition.get("path"), str):
+            path = (base / definition["path"]).resolve()
+            if not path.is_file():
+                raise BentoConverterError(f"Registry visual asset {asset_id!r} does not exist: {path}")
+            payload = path.read_bytes()
+        elif isinstance(definition.get("data"), str):
+            payload = data_uri_payload(definition["data"])
+        else:
+            raise BentoConverterError(f"Registry visual asset {asset_id!r} requires path or data")
+        actual = content_digest(payload)
+        if actual != expected:
+            raise BentoConverterError(
+                f"Registry visual asset {asset_id!r} contentDigest mismatch: expected {expected!r}, got {actual!r}"
+            )
+
+
+def validate_source_original_transition(
+    current: dict[str, Any], proposed: dict[str, Any], *, allow_additions: bool = False,
+) -> None:
+    """Prevent an ordinary authoring save from relabeling source-original evidence."""
+
+    for collection in ("assets", "figures"):
+        before_definitions = current.get(collection, {})
+        after_definitions = proposed.get(collection, {})
+        for definition_id, after in after_definitions.items():
+            after_origin = after.get("origin") if isinstance(after, dict) else None
+            if not isinstance(after_origin, dict) or after_origin.get("kind") != "source-original":
+                continue
+            before = before_definitions.get(definition_id)
+            if before is None:
+                if not allow_additions:
+                    raise BentoConverterError(
+                        f"Ordinary authoring saves cannot add source-original {collection}.{definition_id}; "
+                        "use the registered HTML/segment asset workflow"
+                    )
+                continue
+            fields = SOURCE_ORIGINAL_IDENTITY_FIELDS if collection == "assets" else {"assetId", "origin", "provenance"}
+            changed = sorted(field for field in fields if before.get(field) != after.get(field))
+            if changed:
+                raise BentoConverterError(
+                    f"Ordinary authoring saves cannot change source-original {collection}.{definition_id} identity: {changed}"
+                )
+        for definition_id, before in before_definitions.items():
+            before_origin = before.get("origin") if isinstance(before, dict) else None
+            if not isinstance(before_origin, dict) or before_origin.get("kind") != "source-original":
+                continue
+            after = after_definitions.get(definition_id)
+            if after is None:
+                continue
+            after_origin = after.get("origin") if isinstance(after, dict) else None
+            if not isinstance(after_origin, dict) or after_origin.get("kind") != "source-original":
+                raise BentoConverterError(
+                    f"Ordinary authoring saves cannot relabel source-original {collection}.{definition_id}"
+                )
 
 
 def visual_origin_source_ids(definition: dict[str, Any]) -> set[str]:
@@ -145,6 +229,15 @@ def validate_registry(registry: dict[str, Any], *, allow_v1: bool = True) -> Non
                 raise BentoConverterError(f"Registry {collection} definitions must be objects keyed by stable IDs")
             if registry.get("format") == REGISTRY_V2:
                 _validate_visual_origin(registry, collection, definition_id, definition)
+                digest = definition.get("contentDigest")
+                if digest is not None and (not isinstance(digest, str) or not CONTENT_DIGEST_PATTERN.fullmatch(digest)):
+                    raise BentoConverterError(
+                        f"Registry {collection}.{definition_id}.contentDigest must be sha256 plus 64 lowercase hex digits"
+                    )
+                if collection == "assets" and definition.get("origin") is not None and digest is None:
+                    raise BentoConverterError(
+                        f"Registry assets.{definition_id} with visual origin requires contentDigest"
+                    )
             provenance = definition.get("provenance")
             if provenance is None:
                 continue

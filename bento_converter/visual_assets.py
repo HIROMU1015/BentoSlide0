@@ -14,6 +14,7 @@ from .errors import BentoConverterError
 from .registry_document import (
     GENERATED_FORBIDDEN_ROLES,
     canonical_registry_json,
+    content_digest,
     load_registry,
     normalize_registry,
     registry_revision,
@@ -132,11 +133,13 @@ def register_visual_asset(
     if destination.exists() and not replace and destination != source:
         raise BentoConverterError(f"Visual asset destination already exists: {destination}")
 
+    asset_payload = source.read_bytes()
     asset_definition: dict[str, Any] = {
         "path": relative_asset,
         "mimeType": mimetypes.guess_type(destination.name)[0] or "application/octet-stream",
         "role": role,
         "origin": origin,
+        "contentDigest": content_digest(asset_payload),
     }
     if description:
         asset_definition["description"] = description
@@ -160,7 +163,6 @@ def register_visual_asset(
     validate_registry(registry, allow_v1=False)
 
     registry_payload = (canonical_registry_json(registry) + "\n").encode("utf-8")
-    asset_payload = source.read_bytes()
     payloads = {registry_file: registry_payload, destination: asset_payload}
     store = ArtifactTransactionStore(root, payloads)
 
@@ -182,6 +184,7 @@ def register_visual_asset(
         "figureId": figure_id,
         "kind": kind,
         "path": destination.relative_to(root).as_posix(),
+        "contentDigest": asset_definition["contentDigest"],
     }
 
 
@@ -203,7 +206,7 @@ def extract_pdf_figure(
     """Render a PDF crop to PNG, then register it as source-original."""
 
     try:
-        import fitz  # type: ignore[import-not-found]
+        import pymupdf  # type: ignore[import-not-found]
     except ImportError as exc:
         raise BentoConverterError("PDF figure extraction requires PyMuPDF") from exc
     root = Path(repository).resolve()
@@ -227,11 +230,11 @@ def extract_pdf_figure(
     if dpi <= 0:
         raise BentoConverterError("PDF extraction dpi must be positive")
     try:
-        document = fitz.open(pdf_path)
+        document = pymupdf.open(pdf_path)
         if page > document.page_count:
             raise BentoConverterError(f"PDF page {page} exceeds page count {document.page_count}")
         pdf_page = document.load_page(page - 1)
-        clip = fitz.Rect(x0, y0, x1, y1)
+        clip = pymupdf.Rect(x0, y0, x1, y1)
         if not pdf_page.rect.contains(clip):
             raise BentoConverterError(f"PDF crop {list(crop)} is outside page bounds {list(pdf_page.rect)}")
         pixmap = pdf_page.get_pixmap(clip=clip, dpi=dpi, alpha=False)

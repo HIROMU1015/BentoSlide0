@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import tempfile
@@ -21,6 +22,7 @@ from bento_converter.authoring_storage import (
 )
 from bento_converter.errors import BentoConverterError, ValidationError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint
+from bento_converter.registry_document import content_digest
 from bento_converter.work_editor import create_work_editor_server
 from bento_converter.work_editor_client import discover_work_editor
 
@@ -314,6 +316,68 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
         message = str(raised.exception)
         for field in ("equationId", "chartId", "tableId", "figureId/assetId", "unprovenancedDraft"):
             self.assertIn(field, message)
+
+    def test_content_review_binds_origin_image_to_registered_bytes(self) -> None:
+        storage = self.storage()
+        document = extract_bento_doc(load_html(self.target))
+        expected = b"registered visual bytes"
+        embedded = "data:image/png;base64," + base64.b64encode(expected).decode("ascii")
+        image = {
+            "id": "registered-image", "type": "image", "x": 10, "y": 10, "w": 100, "h": 100,
+            "src": embedded, "fit": "contain", "radius": 0,
+            "assetId": "registered-asset", "figureId": "registered-figure",
+        }
+        document["slides"][0]["elements"].append(image)
+        document.setdefault("assets", {})["registered-asset"] = embedded
+        for kind in ("source-original", "generated"):
+            with self.subTest(kind=kind):
+                registry = json.loads(storage.registry_path.read_text(encoding="utf-8"))
+                if kind == "source-original":
+                    registry["sources"]["paper"] = {"path": "sources/paper.pdf", "type": "pdf"}
+                    origin = {"kind": kind, "sourceId": "paper", "locator": "Fig. 1"}
+                    provenance = {"sourceId": "paper", "locator": "Fig. 1"}
+                else:
+                    origin, provenance = {"kind": kind}, None
+                asset = {"data": embedded, "contentDigest": content_digest(expected), "origin": origin}
+                figure = {"assetId": "registered-asset", "origin": origin}
+                if provenance:
+                    asset["provenance"] = provenance
+                    figure["provenance"] = provenance
+                registry["assets"]["registered-asset"] = asset
+                registry["figures"]["registered-figure"] = figure
+                self.assertEqual(validate_content_provenance(document, registry=registry)["provenanceValidation"], "pass")
+                changed = copy.deepcopy(document)
+                changed_image = next(
+                    element for slide in changed["slides"] for element in slide["elements"]
+                    if element["id"] == "registered-image"
+                )
+                changed_image["src"] = "data:image/png;base64," + base64.b64encode(b"different").decode("ascii")
+                with self.assertRaisesRegex(ValidationError, "contentDigest"):
+                    validate_content_provenance(changed, registry=registry)
+
+    def test_authoring_api_cannot_change_source_original_identity(self) -> None:
+        registry = json.loads(self.generated_registry.read_text(encoding="utf-8"))
+        registry["sources"]["paper"] = {"path": "sources/paper.pdf", "type": "pdf"}
+        origin = {"kind": "source-original", "sourceId": "paper", "locator": "Fig. 1"}
+        registry["assets"]["original"] = {
+            "data": "data:image/png;base64,AA==", "contentDigest": content_digest(b"\x00"),
+            "origin": origin, "provenance": {"sourceId": "paper", "locator": "Fig. 1"},
+        }
+        registry["figures"]["original"] = {
+            "assetId": "original", "origin": origin,
+            "provenance": {"sourceId": "paper", "locator": "Fig. 1"},
+        }
+        self.generated_registry.write_text(json.dumps(registry), encoding="utf-8")
+        storage = self.storage()
+        status = storage.status()
+        proposed = json.loads(storage.registry_path.read_text(encoding="utf-8"))
+        proposed["assets"]["original"]["contentDigest"] = "sha256:" + "f" * 64
+        with self.assertRaisesRegex(BentoConverterError, "cannot change source-original"):
+            storage.validate_serialized(
+                load_html(storage.target), registry=proposed,
+                base_document_revision=status["documentRevision"],
+                base_registry_revision=status["registryRevision"],
+            )
 
     def test_save_invalidates_approved_deck_state_in_the_same_transaction(self) -> None:
         initial = self.storage()

@@ -12,7 +12,7 @@ from typing import Any, Iterable
 from urllib.parse import unquote, urlsplit
 
 from .errors import BentoConverterError
-from .registry_document import REGISTRY_V1, REGISTRY_V2, validate_registry
+from .registry_document import REGISTRY_V1, REGISTRY_V2, validate_registry, validate_registry_asset_content
 from .segment import registry_dependency_closure
 
 
@@ -243,6 +243,7 @@ def compute_section_approval_evidence(
     if not source.is_file():
         raise BentoConverterError(f"Single HTML source does not exist: {source}")
     validate_registry(registry, allow_v1=True)
+    validate_registry_asset_content(registry, asset_base=source.parent)
     parser = _DocumentParser()
     try:
         parser.feed(source.read_text(encoding="utf-8-sig"))

@@ -11,11 +11,12 @@ from pathlib import Path
 from PIL import Image
 
 from bento_converter.bento_validator import validate_bento_doc
-from bento_converter.errors import BrowserCheckError
+from bento_converter.errors import BentoConverterError, BrowserCheckError
 from bento_converter.html_converter import convert_html_layout
 from bento_converter.html_layout import LayoutResult
 from bento_converter.html_pipeline import build_from_html
 from bento_converter.html_source import SourceChapter, discover_chapters, discover_source_unit, merge_registries
+from bento_converter.registry_document import content_digest
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -75,6 +76,25 @@ class HtmlSourceTests(unittest.TestCase):
                     html_path="a.html", registry_path="a.json", html_dir="chapters", registry_dir="chapters",
                 )
             self.assertFalse(output.parent.exists())
+
+    def test_source_unit_rejects_visual_file_digest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "asset.png").write_bytes(b"changed bytes")
+            html_path = root / "deck.preview.html"
+            registry_path = root / "deck.registry.json"
+            html_path.write_text("<section class='slide' data-slide-id='one'></section>", encoding="utf-8")
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "deck", "sources": {},
+                "assets": {"image": {
+                    "path": "asset.png", "contentDigest": content_digest(b"original bytes"),
+                    "origin": {"kind": "generated"},
+                }},
+                "fonts": {}, "equations": {}, "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(BentoConverterError, "contentDigest mismatch"):
+                discover_source_unit(html_path, registry_path)
 
 
 class HtmlConversionTests(unittest.TestCase):
@@ -188,13 +208,13 @@ class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
                 "data-figure-id='original-figure' src='assets/source/original.png' style='left:60px;top:80px;width:200px;height:160px'>"
                 "<img class='item' data-bento-id='concept' data-bento-type='image' data-asset-id='concept-asset' "
                 "data-figure-id='concept-figure' src='assets/generated/concept.png' style='left:300px;top:80px;width:200px;height:160px'>"
-                "<div class='item node' data-bento-id='node-a' data-bento-type='shape' data-bento-shape='rect' "
+                "<div class='item node' data-bento-id='node-a' data-bento-type='shape' data-bento-shape='rect' data-figure-id='native-diagram' "
                 "style='left:120px;top:360px'></div>"
-                "<div class='item' data-bento-id='connector' data-bento-type='shape' data-bento-shape='line' "
+                "<div class='item' data-bento-id='connector' data-bento-type='shape' data-bento-shape='line' data-figure-id='native-diagram' "
                 "data-line-end='arrow' style='left:300px;top:400px;width:260px;height:8px;border-top:4px solid #334155'></div>"
-                "<div class='item node' data-bento-id='node-b' data-bento-type='shape' data-bento-shape='rect' "
+                "<div class='item node' data-bento-id='node-b' data-bento-type='shape' data-bento-shape='rect' data-figure-id='native-diagram' "
                 "style='left:560px;top:360px'></div>"
-                "<div class='item' data-bento-id='node-label' data-bento-type='text' "
+                "<div class='item' data-bento-id='node-label' data-bento-type='text' data-figure-id='native-diagram' "
                 "style='left:140px;top:390px;width:140px;height:40px'>Native flow</div>"
                 "</section>", encoding="utf-8",
             )
@@ -207,13 +227,18 @@ class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
                 "document": {"title": "Visual origins"},
                 "assets": {
                     "original-asset": {"path": "assets/source/original.png", "origin": origin,
+                                       "contentDigest": content_digest((root / "assets/source/original.png").read_bytes()),
                                        "provenance": {"sourceId": "paper", "locator": "Fig. 4, p. 8"}},
-                    "concept-asset": {"path": "assets/generated/concept.png", "role": "conceptual-illustration", "origin": generated},
+                    "concept-asset": {"path": "assets/generated/concept.png", "role": "conceptual-illustration", "origin": generated,
+                                      "contentDigest": content_digest((root / "assets/generated/concept.png").read_bytes())},
                 },
                 "figures": {
                     "original-figure": {"assetId": "original-asset", "origin": origin,
                                          "provenance": {"sourceId": "paper", "locator": "Fig. 4, p. 8"}},
                     "concept-figure": {"assetId": "concept-asset", "origin": generated},
+                    "native-diagram": {"role": "derived-diagram", "origin": {"kind": "source-derived", "sources": [
+                        {"sourceId": "paper", "locator": "Method flow, Sec. 3"},
+                    ]}},
                 },
                 "fonts": {}, "equations": {}, "tables": {}, "charts": {},
                 "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
@@ -235,11 +260,14 @@ class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
             self.assertEqual(by_id["node-a"]["type"], "shape")
             self.assertEqual(by_id["connector"]["type"], "shape")
             self.assertEqual(by_id["node-label"]["type"], "text")
+            for element_id in ("node-a", "connector", "node-b", "node-label"):
+                self.assertEqual(by_id[element_id]["figureId"], "native-diagram")
             self.assertTrue(result.report["resourceScan"]["passed"])
             self.assertEqual(result.report["summary"]["unresolvedLocalResourceReferences"], 0)
             merged = json.loads((root / "output/diagnostics/merged-registry.json").read_text(encoding="utf-8"))
             self.assertEqual(merged["assets"]["original-asset"]["origin"], origin)
             self.assertEqual(merged["assets"]["concept-asset"]["origin"], generated)
+            self.assertEqual(merged["figures"]["native-diagram"]["origin"]["kind"], "source-derived")
 
     def test_incremental_build_reuses_only_unchanged_slides(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

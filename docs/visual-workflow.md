@@ -49,19 +49,21 @@ Registry v2 assets and figures may carry one of three origins:
 - `source-derived`: an explanatory reconstruction. It requires one or more `{sourceId, locator}` entries in `sources` and must not be described as original.
 - `generated`: explanatory visual not present in the source. It must not carry `sourceId`, `sources`, `locator`, or source provenance.
 
-For backward compatibility, registry definitions without `origin` remain valid. New visual work records it. When a figure links to an asset with `assetId`, both origin objects must match. `source-original` also mirrors the same single reference into the existing `provenance` field so older content-review logic and tooling keep their meaning.
+For backward compatibility, registry definitions without `origin` remain valid. New visual work records it. Every origin-bearing asset also records `contentDigest` as `sha256:` plus the SHA-256 of its decoded bytes. When a figure links to an asset with `assetId`, both origin objects must match. `source-original` also mirrors the same single reference into the existing `provenance` field so older content-review logic and tooling keep their meaning.
 
 ```json
 {
   "assets": {
     "paper-fig-3": {
       "path": "assets/source/paper-fig-3.png",
+      "contentDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "role": "source-figure",
       "origin": {"kind":"source-original","sourceId":"paper","locator":"Fig. 3, p. 7"},
       "provenance": {"sourceId":"paper","locator":"Fig. 3, p. 7"}
     },
     "method-concept": {
       "path": "assets/generated/method-concept.png",
+      "contentDigest": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
       "role": "conceptual-illustration",
       "origin": {"kind":"generated"}
     }
@@ -71,7 +73,7 @@ For backward compatibility, registry definitions without `origin` remain valid. 
 
 ## Asset and PDF figure flow
 
-The internal registration command copies an image and updates asset and figure definitions in the same crash-recoverable transaction. Destinations are selected by origin:
+The internal registration command copies an image, computes its `contentDigest`, and updates asset and figure definitions in the same crash-recoverable transaction. Destinations are selected by origin:
 
 ```text
 deck/assets/source/      source-original
@@ -95,10 +97,22 @@ python -m scripts.register_visual_asset --root . --registry deck/deck.registry.j
   --locator "Fig. 3, p. 7" --figure-number "Fig. 3" --caption "Method overview"
 ```
 
-PDF extraction records the one-based page, figure number, caption, crop rectangle in PDF points, and render DPI. It resolves the PDF from the registered repository-relative source path and needs no manual user crop. `--replace` is explicit; ID/path collisions otherwise fail. PyMuPDF is used only for PDF rendering.
+PDF extraction records the one-based page, figure number, caption, crop rectangle in PDF points, and render DPI. It resolves the PDF from the registered repository-relative source path and needs no manual user crop. `--replace` is explicit; ID/path collisions otherwise fail. The supported `pymupdf` module is used only for PDF rendering.
 
 ## HTML, Bento, and rolling sections
 
-Native diagrams are authored as stable-ID text/shape/connector elements in HTML and pass through Chromium computed layout to editable Bento elements. Images reference both `data-asset-id` and `data-figure-id`; their local bytes become data URIs, while those stable IDs remain on the Bento image element. The merged registry retains complete origin metadata. Remote resources remain prohibited and generated Bento stays self-contained.
+Native diagrams are authored as stable-ID text/shape/connector elements in HTML and pass through Chromium computed layout to editable Bento elements. A source-derived native diagram uses one assetless registry figure with `origin.kind: source-derived`; every text, shape, and connector that belongs to it carries the same `data-figure-id`. This keeps the diagram editable while making its source closure explicit.
+
+```html
+<div data-bento-id="step-a" data-bento-type="shape" data-figure-id="method-flow"></div>
+<div data-bento-id="arrow" data-bento-type="shape" data-bento-shape="connector" data-figure-id="method-flow"></div>
+<div data-bento-id="label" data-bento-type="text" data-figure-id="method-flow">Method</div>
+```
+
+```json
+{"figures":{"method-flow":{"role":"derived-diagram","origin":{"kind":"source-derived","sources":[{"sourceId":"paper","locator":"Sec. 3 method flow"}]}}}}
+```
+
+Images reference both `data-asset-id` and `data-figure-id`; their local bytes become data URIs, while those stable IDs remain on the Bento image element. Before conversion, the registry digest is checked against the local/data asset. At content review, the embedded image bytes are checked again against the immutable digest. An ordinary Work editor save cannot add, relabel, or change the identity fields of `source-original` assets/figures; use the registered HTML/segment asset workflow for that change. The merged registry retains complete origin metadata. Remote resources remain prohibited and generated Bento stays self-contained.
 
 Visual changes follow the normal rolling lifecycle: section HTML authoring, visual review, promotion, Bento authoring, and acceptance. Position or size changes of a native/image element can be made in Bento. A substantial redesign uses a temporary HTML candidate and targeted section replacement. The section digest includes the referenced visual definitions, transitive figure-to-asset dependencies, source/origin metadata, and asset bytes. Changing a referenced locator or generated description invalidates that section; adding an unrelated visual does not.

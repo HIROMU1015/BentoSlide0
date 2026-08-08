@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from bento_converter.html_document import extract_bento_doc, load_html
+from bento_converter.registry_document import content_digest
 from bento_converter.section_candidate import section_candidate
 from bento_converter.segment import merge_segment, slide_hashes
 from scripts.deck_workflow import (
@@ -60,6 +61,7 @@ class WorkflowUxUnitTests(unittest.TestCase):
             "sources": {"paper": {"path": "sources/private/paper.pdf", "type": "pdf"}},
             "assets": {"visual-asset": {
                 "path": "assets/source/visual.png",
+                "contentDigest": "sha256:" + "1" * 64,
                 "origin": {"kind": "source-original", "sourceId": "paper", "locator": "Fig. 4"},
                 "provenance": {"sourceId": "paper", "locator": "Fig. 4"},
             }},
@@ -80,12 +82,14 @@ class WorkflowUxUnitTests(unittest.TestCase):
         generated = json.loads(json.dumps(registry))
         generated["assets"]["unused"] = {
             "path": "assets/generated/unused.png", "description": "Changed explanation",
+            "contentDigest": "sha256:" + "2" * 64,
             "origin": {"kind": "generated"},
         }
         self.assertEqual(_section_digest(document, generated, ["visual-slide"]), baseline)
         referenced_generated = json.loads(json.dumps(registry))
         referenced_generated["assets"]["visual-asset"] = {
             "path": "assets/generated/visual.png", "description": "Concept A",
+            "contentDigest": "sha256:" + "3" * 64,
             "origin": {"kind": "generated"},
         }
         referenced_generated["figures"]["visual-figure"] = {
@@ -264,6 +268,11 @@ class RollingSectionBrowserTests(unittest.TestCase):
         }, sort_keys=False), encoding="utf-8")
         deck_html = sample_html().replace("assets/図 表.png", "assets/fixture.svg")
         (self.root / "deck/deck.preview.html").write_text(deck_html, encoding="utf-8")
+        fixture_svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">'
+            '<rect width="40" height="40" fill="blue"/></svg>'
+        )
+        (self.root / "deck/assets/fixture.svg").write_text(fixture_svg, encoding="utf-8")
         registry_value = sample_registry()
         registry_value["assets"]["plot"]["path"] = "assets/fixture.svg"
         registry_value["sources"]["spec"] = {
@@ -271,6 +280,7 @@ class RollingSectionBrowserTests(unittest.TestCase):
         }
         registry_value["assets"]["plot"].update({
             "description": "Derived explanation metadata",
+            "contentDigest": content_digest((self.root / "deck/assets/fixture.svg").read_bytes()),
             "origin": {"kind": "source-derived", "sources": [
                 {"sourceId": "spec", "locator": "method overview"},
             ]},
@@ -281,10 +291,6 @@ class RollingSectionBrowserTests(unittest.TestCase):
         }
         (self.root / "deck/deck.registry.json").write_text(
             json.dumps(registry_value, ensure_ascii=False), encoding="utf-8",
-        )
-        (self.root / "deck/assets/fixture.svg").write_text(
-            '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="blue"/></svg>',
-            encoding="utf-8",
         )
         state = load_state(self.root)
         state["workflow"].update(stage="planning", status="in_progress", owner="work", sourceOfTruth="planning")
