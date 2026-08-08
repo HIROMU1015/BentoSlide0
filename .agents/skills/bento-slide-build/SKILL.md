@@ -32,7 +32,7 @@ Build the configured single pair:
 python -m scripts.build_bento_from_html --html deck/deck.preview.html --registry deck/deck.registry.json --base Bento_Slides.base.bento.html --output output/presentation.generated.bento.html
 ```
 
-Migrated modular decks instead use `--html-dir chapters/ --registry-dir chapters/`. Preserve native semantic elements and localize fallback to the smallest block. Inspect conversion report, computed layout, resource scan, browser check, screenshots, native/fallback classes, crop results, reference/protected checks, serialize round-trip, and runtime fingerprint. For reproducibility:
+Migrated modular decks instead use `--html-dir chapters/ --registry-dir chapters/`. Preserve native semantic elements and localize fallback to the smallest block. Inspect conversion report, computed layout, resource scan, browser check, browser-environment fingerprint, screenshots, native/fallback classes, crop results, reference/protected checks, serialize round-trip, and runtime fingerprint. Browser conversion uses one shared Chromium with isolated deterministic contexts and blocks remote network. For interactive iteration only, `--incremental` may reuse slide evidence from `output/.bento-cache/`; never use it at conversion, content/final approval, or completion gates, which require full build/full validation. The cache is neither source of truth nor approval evidence. For reproducibility:
 
 ```powershell
 python -m scripts.check_html_first_determinism --html deck/deck.preview.html --registry deck/deck.registry.json --base Bento_Slides.base.bento.html --report output/determinism-report.json

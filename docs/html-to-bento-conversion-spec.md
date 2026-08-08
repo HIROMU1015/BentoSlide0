@@ -17,7 +17,9 @@ single deck HTML + registry JSON (or migrated sorted modular pairs)
 → paired source/Bento screenshots and report
 ```
 
-HTML layout is measured by Chromium, not inferred from CSS source text. DOM order plus computed `z-index` determines stable element order. Coordinates are rounded to three decimal places. Animations, transitions, and carets are disabled before measurement. The document id is UUIDv5 over canonical merged registry and computed layout JSON. `document.modified` comes from the registry; absent values use the deterministic epoch value rather than current time.
+HTML layout is measured by Chromium, not inferred from CSS source text. DOM order plus computed `z-index` determines stable element order. Coordinates are rounded to three decimal places. One BrowserHarness owns a single headless Chromium process and creates isolated `sourceLayout` and `bentoCheck` contexts. Reduced motion and animation/transition/caret guards are installed before page scripts. Readiness is event-based: fonts, image decode, then two animation frames; fixed sleeps are prohibited. The document id is UUIDv5 over canonical merged registry and computed layout JSON. `document.modified` comes from the registry; absent values use the deterministic epoch value rather than current time.
+
+Deterministic contexts allow only `file:`, `data:`, `blob:`, `about:`, and loopback HTTP(S). A remote request from source HTML is a conversion error; optional remote requests attempted by the embedded Bento runtime are blocked and recorded without granting network access. Remote resources must first be registered and embedded locally.
 
 ## Conversion boundary
 
@@ -59,7 +61,11 @@ Whole-slide warning thresholds are pHash ≥ 10, pixel difference ≥ 0.075, col
 
 Critical crop failures escalate the owning slide to `fail`, even when the whole-slide image passes. Non-critical crop failures contribute a slide warning. Crop classification uses relaxed localized fail thresholds (pixel 0.45, color 0.75, edge 0.35, or combined pixel 0.30 with edge 0.16/pHash 32) to avoid treating renderer detail as missing content.
 
-`conversion-report.json` records every element's source/result type, compatibility class/reasons, strategy/reason, role, critical flag/reason, status contribution, logical layout group, source/Bento frames and bounding frames, corrections, diagnostics, registry coverage, embedded asset resolutions, resource scan, runtime integrity, browser check, whole-slide metrics, prioritized crop metrics, and aggregate visual/critical pass-warning-fail values. `diagnostics/resource-scan.json` is a standalone CI artifact.
+`conversion-report.json` records every element's source/result type, compatibility class/reasons, strategy/reason, role, critical flag/reason, status contribution, logical layout group, source/Bento frames and bounding frames, corrections, diagnostics, registry coverage, embedded asset resolutions, resource scan, runtime integrity, browser check, whole-slide metrics, prioritized crop metrics, incremental-cache hit/miss counts, and aggregate visual/critical pass-warning-fail values. `diagnostics/resource-scan.json` is a standalone CI artifact.
+
+`diagnostics/browser-environment.json` uses `bento/browser-environment/v1` and records Playwright/Chromium versions, privacy-safe OS identity, the separate source/Bento viewport profiles, DPR, locale/timezone, render/network policy, declared/computed fonts, Chromium-observed platform font families, embedded font asset hashes, and canonical environment/font digests. It never records hostname, username, browser executable paths, or font file paths. It is observational evidence: it is uploaded by CI and may be used in incremental cache keys, but is never embedded in `#bento-doc`, the Bento JSON sidecar, registry, runtime fingerprint, document revision, content approval, or final approval.
+
+Interactive builds may opt into `--incremental`. Each slide cache key covers canonical slide DOM, relevant registry projection, referenced asset hashes, global DOM/CSS/theme, converter cache format, Bento runtime fingerprint, and the profile environment digest. A cache hit may reuse computed layout, fallback captures, source/Bento screenshots, and visual comparison evidence. Cache writes are atomic and corrupt/incomplete records are misses. Global CSS/theme or runtime/environment changes invalidate the affected cache keys. Normal builds and every workflow conversion/approval gate ignore reuse and run a full build/full validation; `output/.bento-cache/` is never authoritative.
 
 ## Determinism evidence
 

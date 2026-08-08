@@ -784,6 +784,7 @@ def validate_output_bundle(
         registry_output,
         output_root / "diagnostics/resource-scan.json",
         output_root / "diagnostics/browser-check.json",
+        output_root / "diagnostics/browser-environment.json",
     ]
     missing = [str(path.relative_to(root)) for path in required if not path.is_file()]
     if missing:
@@ -791,6 +792,7 @@ def validate_output_bundle(
     report = _read_json(required[0], label="conversion report")
     resource_scan = _read_json(required[3], label="resource scan")
     browser_check = _read_json(required[4], label="browser check")
+    browser_environment = _read_json(required[5], label="browser environment")
     summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
     if summary.get("criticalElementFail", 0) != 0:
         raise WorkflowError("Conversion report contains critical visual failures")
@@ -800,6 +802,17 @@ def validate_output_bundle(
         raise WorkflowError("Recursive resource scan did not pass")
     if browser_check.get("serialize_roundtrip") is not True:
         raise WorkflowError("Bento browser serialize round-trip did not pass")
+    environment_value = browser_environment.get("browserEnvironment")
+    profiles = environment_value.get("profiles", {}) if isinstance(environment_value, dict) else {}
+    if (
+        browser_environment.get("format") != "bento/browser-environment/v1"
+        or not isinstance(browser_environment.get("environmentDigest"), str)
+        or not browser_environment["environmentDigest"].startswith("sha256:")
+        or not isinstance(profiles, dict)
+        or "sourceLayout" not in profiles
+        or "bentoCheck" not in profiles
+    ):
+        raise WorkflowError("Browser environment evidence is missing required profiles or digest")
 
     result = {
         "generatedDocument": generated_document,
@@ -1816,6 +1829,7 @@ def command_reset_authoring_from_html(
                 generated_root / "conversion-report.json": build_root / "conversion-report.json",
                 generated_root / "diagnostics/computed-layout.json": build_root / "diagnostics/computed-layout.json",
                 generated_root / "diagnostics/resource-scan.json": build_root / "diagnostics/resource-scan.json",
+                generated_root / "diagnostics/browser-environment.json": build_root / "diagnostics/browser-environment.json",
             }
             browser_source = build_root / "diagnostics/browser-check.json"
             payloads: dict[Path, bytes] = {

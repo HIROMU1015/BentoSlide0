@@ -524,8 +524,12 @@ class WorkEditorStorage:
 
     @_locked
     def status(self) -> dict[str, Any]:
-        self.transactions.recover()
-        html, document = self._current()
+        # A running server owns the writer lease for its lifetime, so no other
+        # conforming writer can create a journal between requests. Offline
+        # callers without that lease retain the conservative recovery scan.
+        if not self.writer_lease_acquired:
+            self.transactions.recover()
+        _, document = self._current()
         validation = "pass"
         try:
             validate_editor_document(
@@ -539,10 +543,11 @@ class WorkEditorStorage:
             display_target = self.target.relative_to(Path.cwd().resolve()).as_posix()
         except ValueError:
             display_target = self.target.name
+        revision = document_revision(document)
         return {
-            "target": display_target, "revision": document_revision(document),
-            "documentRevision": document_revision(document),
-            "runtimeFingerprint": "sha256:" + runtime_fingerprint(html),
+            "target": display_target, "revision": revision,
+            "documentRevision": revision,
+            "runtimeFingerprint": "sha256:" + self._runtime,
             "backupCount": len(self._backups()), "validation": validation,
             "editingMode": self.editing_mode, "sourceOfTruth": display_target,
             "repository": str(self.repository),
@@ -551,7 +556,8 @@ class WorkEditorStorage:
     @_locked
     def document_response(self) -> dict[str, Any]:
         _, document = self._current()
-        return {"revision": document_revision(document), "documentRevision": document_revision(document), "document": document}
+        revision = document_revision(document)
+        return {"revision": revision, "documentRevision": revision, "document": document}
 
     @_locked
     def validate_serialized(self, serialized_html: str) -> dict[str, Any]:

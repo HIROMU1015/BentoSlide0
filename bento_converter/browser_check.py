@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import json
-import os
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
 from .bento_validator import validate_bento_doc, validate_conversion
+from .browser_harness import BrowserHarness, find_browser_executable
 from .design_loader import load_design
 from .design_validator import validate_design
 from .errors import BrowserCheckError
-from .html_document import extract_bento_doc
+from .html_document import extract_bento_doc, load_html, runtime_fingerprint
+from .incremental_cache import IncrementalSlideCache, bento_cache_key
 
 Frame = dict[str, float]
 ElementLocation = tuple[int, str, str]
@@ -38,6 +39,9 @@ class BrowserCheckReport:
     latex_source_auto_synced: bool | None
     metadata_source_of_truth: str
     screenshots: tuple[str, ...]
+    fresh_rendered_slide_count: int = 0
+    cached_rendered_slide_count: int = 0
+    slide_fingerprints: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -50,31 +54,6 @@ def _fail(message: str) -> None:
 def _require(condition: bool, message: str) -> None:
     if not condition:
         _fail(message)
-
-
-def _chrome_candidates(explicit: str | Path | None) -> list[Path]:
-    candidates: list[Path] = []
-    if explicit:
-        candidates.append(Path(explicit))
-    configured = os.environ.get("BENTO_CHROME_PATH")
-    if configured:
-        candidates.append(Path(configured))
-    candidates.extend(
-        [
-            Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-            Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-            Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-            Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-        ]
-    )
-    return candidates
-
-
-def find_browser_executable(explicit: str | Path | None = None) -> Path | None:
-    for candidate in _chrome_candidates(explicit):
-        if candidate.is_file():
-            return candidate
-    return None
 
 
 def _key(slide_id: str, element_id: str) -> str:
@@ -174,22 +153,19 @@ def _default_screenshot_prefix(path: Path) -> str:
     return f"{name}-slide"
 
 
-def _settle_render(page: Any) -> None:
-    """Wait for fonts and two animation frames instead of fixed sleeps."""
+def _settle_render(page: Any, harness: BrowserHarness) -> None:
+    """Wait for fonts, image decode, and two animation frames."""
 
-    page.wait_for_function("() => !document.fonts || document.fonts.status === 'loaded'")
-    page.evaluate(
-        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
-    )
+    harness.settle(page)
 
 
-def _activate_slide(page: Any, slide_index: int, slide_id: str) -> None:
+def _activate_slide(page: Any, slide_index: int, slide_id: str, harness: BrowserHarness) -> None:
     page.locator(".ed-thumb").nth(slide_index).click()
     page.wait_for_function(
         "expected => document.querySelector('.ed-stage .bento-slide')?.dataset.slideId === expected",
         arg=slide_id,
     )
-    _settle_render(page)
+    _settle_render(page, harness)
 
 
 def run_browser_check(
@@ -199,16 +175,23 @@ def run_browser_check(
     screenshots_dir: str | Path | None = None,
     screenshot_prefix: str | None = None,
     browser_executable: str | Path | None = None,
+    harness: BrowserHarness | None = None,
+    cache: IncrementalSlideCache | None = None,
+    runtime_revision: str | None = None,
 ) -> BrowserCheckReport:
     """Verify UI startup, all slides/elements, API edits, save round-trip, and captures."""
 
-    try:
-        from playwright.sync_api import Error as PlaywrightError
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise BrowserCheckError(
-            "Playwright is not installed. Run: python -m pip install -r requirements-browser.txt"
-        ) from exc
+    if harness is None:
+        with BrowserHarness(browser_executable) as owned_harness:
+            return run_browser_check(
+                html_path,
+                design_path=design_path,
+                screenshots_dir=screenshots_dir,
+                screenshot_prefix=screenshot_prefix,
+                harness=owned_harness,
+                cache=cache,
+                runtime_revision=runtime_revision,
+            )
 
     path = Path(html_path).resolve()
     if not path.is_file():
@@ -216,25 +199,12 @@ def run_browser_check(
     design = load_design(design_path) if design_path is not None else None
     if design is not None:
         validate_design(design)
-    executable = find_browser_executable(browser_executable)
     screenshots: list[str] = []
     prefix = screenshot_prefix or _default_screenshot_prefix(path)
+    runtime_revision = runtime_revision or ("sha256:" + runtime_fingerprint(load_html(path)))
 
     try:
-        with sync_playwright() as playwright:
-            launch_options: dict[str, Any] = {
-                "headless": True,
-                "args": ["--allow-file-access-from-files"],
-            }
-            browser_name = "Playwright Chromium"
-            if executable is not None:
-                launch_options["executable_path"] = str(executable)
-                browser_name = executable.name
-            browser = playwright.chromium.launch(**launch_options)
-            page = browser.new_page(
-                viewport={"width": 1600, "height": 1000},
-                device_scale_factor=1,
-            )
+        with harness.page("bentoCheck") as page:
             page_errors: list[str] = []
             console_errors: list[str] = []
             page.on("pageerror", lambda error: page_errors.append(str(error)))
@@ -248,16 +218,21 @@ def run_browser_check(
             page.wait_for_function(
                 "window.bento && window.bento.doc && typeof window.bento.serialize === 'function'"
             )
-            _settle_render(page)
-
+            _settle_render(page, harness)
             _require(not page_errors, f"JavaScript page errors: {page_errors}")
-            _require(not console_errors, f"Browser console errors: {console_errors}")
+            actionable_console_errors = [
+                message for message in console_errors if "ERR_BLOCKED_BY_CLIENT" not in message
+            ]
+            _require(not actionable_console_errors, f"Browser console errors: {actionable_console_errors}")
             _require(page.locator(".ed-root").count() == 1, "Bento editor UI did not start.")
 
             original_document = page.evaluate(
                 "JSON.parse(JSON.stringify(window.bento.doc))"
             )
             validate_bento_doc(original_document)
+            harness.record_embedded_fonts(original_document)
+            harness.record_page_environment("bentoCheck", page)
+            environment_digest = harness.profile_digest("bentoCheck")
             if design is not None:
                 validate_conversion(design, original_document)
                 expected_slide_ids = [slide["id"] for slide in design["slides"]]
@@ -286,9 +261,27 @@ def run_browser_check(
                 )
             targets, detected_types = _targets(original_document, design)
 
-            rendered_slide_count = 0
+            bento_fingerprints: dict[str, str] = {}
+            cached_slide_ids: set[str] = set()
+            output_dir = Path(screenshots_dir) if screenshots_dir is not None else None
+            if output_dir is not None:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                for index, slide in enumerate(original_document["slides"]):
+                    key = bento_cache_key(
+                        slide,
+                        environment_digest=environment_digest,
+                        runtime_fingerprint=runtime_revision,
+                    )
+                    bento_fingerprints[slide["id"]] = key
+                    target = output_dir / f"{prefix}-{index + 1}.png"
+                    if cache and cache.load_bento(slide["id"], key, target):
+                        cached_slide_ids.add(slide["id"])
+
+            fresh_rendered_slide_count = 0
             for slide_index, slide in enumerate(original_document["slides"]):
-                _activate_slide(page, slide_index, slide["id"])
+                if slide["id"] in cached_slide_ids:
+                    continue
+                _activate_slide(page, slide_index, slide["id"], harness)
                 active_slide = page.locator(".ed-stage .bento-slide")
                 _require(active_slide.count() == 1, "The active Bento slide is missing.")
                 _require(
@@ -318,7 +311,8 @@ def run_browser_check(
                             locator.locator("math").count() >= 1,
                             f"Equation {slide['id']}/{element['id']} was not rendered.",
                         )
-                rendered_slide_count += 1
+                fresh_rendered_slide_count += 1
+            rendered_slide_count = fresh_rendered_slide_count + len(cached_slide_ids)
 
             selection_target = (
                 targets.get("text") or targets.get("shape") or targets.get("latex")
@@ -326,7 +320,7 @@ def run_browser_check(
             ui_selection: bool | None = None
             if selection_target is not None:
                 slide_index, slide_id, element_id = selection_target
-                _activate_slide(page, slide_index, slide_id)
+                _activate_slide(page, slide_index, slide_id, harness)
                 active_elements = page.locator(".ed-stage [data-el-id]")
                 active_ids = active_elements.evaluate_all(
                     "elements => elements.map(element => element.dataset.elId)"
@@ -338,7 +332,7 @@ def run_browser_check(
                 selectable = active_elements.nth(active_ids.index(element_id))
                 _require(selectable.count() == 1, f"Element {element_id!r} is not selectable.")
                 selectable.click(position={"x": 10, "y": 10})
-                _settle_render(page)
+                _settle_render(page, harness)
                 selection = page.evaluate("Array.from(window.bento.selection || [])")
                 ui_selection = element_id in selection
                 _require(ui_selection, f"UI selection failed: {selection!r}")
@@ -383,11 +377,11 @@ def run_browser_check(
                 "expected => window.bento.doc.slides.length === expected",
                 arg=len(edited_document["slides"]),
             )
-            _settle_render(page)
+            _settle_render(page, harness)
 
             if "latex" in targets:
                 slide_index, slide_id, element_id = targets["latex"]
-                _activate_slide(page, slide_index, slide_id)
+                _activate_slide(page, slide_index, slide_id, harness)
                 active_elements = page.locator(".ed-stage [data-el-id]")
                 active_ids = active_elements.evaluate_all(
                     "elements => elements.map(element => element.dataset.elId)"
@@ -460,13 +454,16 @@ def run_browser_check(
                 json.dumps(original_document, ensure_ascii=False),
             )
             _require(restored is True, "Could not restore the original document for screenshots.")
-            _settle_render(page)
+            _settle_render(page, harness)
 
-            if screenshots_dir is not None:
-                output_dir = Path(screenshots_dir)
-                output_dir.mkdir(parents=True, exist_ok=True)
+            if output_dir is not None:
                 for index in range(slide_count):
-                    _activate_slide(page, index, original_document["slides"][index]["id"])
+                    slide_document = original_document["slides"][index]
+                    output = output_dir / f"{prefix}-{index + 1}.png"
+                    if slide_document["id"] in cached_slide_ids:
+                        screenshots.append(str(output.resolve()))
+                        continue
+                    _activate_slide(page, index, slide_document["id"], harness)
                     page.evaluate(
                         """
                         () => {
@@ -492,23 +489,31 @@ def run_browser_check(
                         and round(box["height"]) == expected_size["height"],
                         f"Screenshot surface size differs from canvas: {box!r}",
                     )
-                    output = output_dir / f"{prefix}-{index + 1}.png"
                     slide.screenshot(path=str(output))
                     screenshots.append(str(output.resolve()))
+                    if cache:
+                        cache.save_bento(
+                            slide_document["id"],
+                            bento_fingerprints[slide_document["id"]],
+                            slide_document,
+                            output,
+                        )
                     page.evaluate(
                         "document.querySelector('#bento-check-screenshot')?.remove()"
                     )
 
             _require(not page_errors, f"JavaScript page errors: {page_errors}")
-            _require(not console_errors, f"Browser console errors: {console_errors}")
-            browser.close()
+            actionable_console_errors = [
+                message for message in console_errors if "ERR_BLOCKED_BY_CLIENT" not in message
+            ]
+            _require(not actionable_console_errors, f"Browser console errors: {actionable_console_errors}")
     except BrowserCheckError:
         raise
-    except PlaywrightError as exc:
+    except Exception as exc:
         raise BrowserCheckError(f"Playwright browser check failed: {exc}") from exc
 
     return BrowserCheckReport(
-        browser=browser_name,
+        browser=harness.browser_label,
         slide_count=slide_count,
         rendered_slide_count=rendered_slide_count,
         element_count=element_count,
@@ -525,4 +530,7 @@ def run_browser_check(
         latex_source_auto_synced=latex_source_auto_synced,
         metadata_source_of_truth="html" if "latex" in targets else "not-applicable",
         screenshots=tuple(screenshots),
+        fresh_rendered_slide_count=fresh_rendered_slide_count,
+        cached_rendered_slide_count=len(cached_slide_ids),
+        slide_fingerprints=bento_fingerprints,
     )

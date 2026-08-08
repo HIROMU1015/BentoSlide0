@@ -18,6 +18,7 @@ from urllib.request import urlopen
 import yaml
 
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html
+from tests.finalization_fixture import prepare_finalization_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -258,6 +259,48 @@ class WindowsWorkspaceLauncherTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), target_hash)
         stopped = self.run_cmd(repository / "stop_deck_workspace.cmd")
         self.assertEqual(stopped.returncode, 0, stopped.stdout)
+
+    def test_v2_finalization_fixture_satisfies_stage_guard(self) -> None:
+        repository = self.copy_repository("Bento Finalization 日本語 path")
+        port = self.free_port()
+        state = prepare_finalization_fixture(
+            repository, bento_port=port, confirm_disposable=True,
+        )
+        outputs = state["outputs"]
+        protected_paths = [repository / outputs[field] for field in (
+            "generatedHtml", "authoringHtml", "finalHtml", "finalRegistry",
+        )]
+        protected_hashes = {
+            path: hashlib.sha256(path.read_bytes()).hexdigest() for path in protected_paths
+        }
+        arguments = (
+            "-Mode", "finalization",
+            "-Source", outputs["authoringHtml"],
+            "-Target", outputs["finalHtml"],
+            "-Registry", outputs["finalRegistry"],
+            "-Port", str(port),
+            "-NoClipboard",
+        )
+
+        started = self.run_cmd(repository / "start_bento_editor.cmd", *arguments)
+        self.assertEqual(started.returncode, 0, started.stdout)
+        status = self.wait_status(port)
+        self.assertEqual(status["editingMode"], "finalization")
+        self.assertEqual(status["target"], outputs["finalHtml"])
+        first_pid = json.loads(
+            (repository / "output/work-editor-session.json").read_text(encoding="utf-8-sig")
+        )["pid"]
+        duplicate = self.run_cmd(repository / "start_bento_editor.cmd", *arguments)
+        self.assertEqual(duplicate.returncode, 0, duplicate.stdout)
+        self.assertEqual(json.loads(
+            (repository / "output/work-editor-session.json").read_text(encoding="utf-8-sig")
+        )["pid"], first_pid)
+        stopped = self.run_cmd(repository / "stop_bento_editor.cmd")
+        self.assertEqual(stopped.returncode, 0, stopped.stdout)
+        self.assertEqual(
+            {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in protected_paths},
+            protected_hashes,
+        )
 
     def test_bento_authoring_dispatch_uses_v2_custom_artifact_paths(self) -> None:
         repository = self.copy_repository("Bento Authoring 日本語")

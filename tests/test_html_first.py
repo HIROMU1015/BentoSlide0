@@ -11,6 +11,7 @@ from pathlib import Path
 from PIL import Image
 
 from bento_converter.bento_validator import validate_bento_doc
+from bento_converter.errors import BrowserCheckError
 from bento_converter.html_converter import convert_html_layout
 from bento_converter.html_layout import LayoutResult
 from bento_converter.html_pipeline import build_from_html
@@ -171,6 +172,99 @@ class HtmlConversionTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("BENTO_BROWSER_TEST") == "1", "Set BENTO_BROWSER_TEST=1 for Chromium HTML-first integration.")
 class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
+    def test_incremental_build_reuses_only_unchanged_slides(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "deck.preview.html"
+            registry_path = root / "deck.registry.json"
+            output = root / "output/presentation.generated.bento.html"
+
+            def write_source(second_color: str) -> None:
+                source.write_text(
+                    "<!doctype html><style>body{margin:0}.slide{position:relative;width:1280px;height:720px;background:#fff}"
+                    ".block{position:absolute;left:180px;top:160px;width:920px;height:400px}</style>"
+                    "<section class='slide' data-slide-id='one'><div class='block' data-bento-id='one-block' "
+                    "data-bento-type='shape' data-bento-shape='rect' style='background:#2563eb'></div></section>"
+                    "<section class='slide' data-slide-id='two'><div class='block' data-bento-id='two-block' "
+                    f"data-bento-type='shape' data-bento-shape='rect' style='background:{second_color}'></div></section>",
+                    encoding="utf-8",
+                )
+
+            write_source("#7c3aed")
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "deck", "sources": {},
+                "document": {"title": "Incremental"}, "assets": {}, "fonts": {}, "equations": {},
+                "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }), encoding="utf-8")
+
+            full = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html", output_path=output,
+            )
+            full_bytes = full.html_path.read_bytes()
+            self.assertEqual(full.report["incrementalCache"]["sourceHits"], 0)
+            self.assertEqual(full.report["incrementalCache"]["bentoHits"], 0)
+
+            unchanged = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html", output_path=output,
+                incremental=True,
+            )
+            self.assertEqual(unchanged.html_path.read_bytes(), full_bytes)
+            self.assertEqual(unchanged.report["incrementalCache"]["sourceHits"], 2)
+            self.assertEqual(unchanged.report["incrementalCache"]["bentoHits"], 2)
+            self.assertEqual(unchanged.report["incrementalCache"]["comparisonHits"], 2)
+
+            write_source("#059669")
+            changed = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html", output_path=output,
+                incremental=True,
+            )
+            self.assertEqual(changed.report["incrementalCache"]["sourceHits"], 1)
+            self.assertEqual(changed.report["incrementalCache"]["sourceMisses"], 1)
+            self.assertEqual(changed.report["incrementalCache"]["bentoHits"], 1)
+            self.assertEqual(changed.report["incrementalCache"]["bentoMisses"], 1)
+
+            environment = json.loads(
+                (output.parent / "diagnostics/browser-environment.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(environment["format"], "bento/browser-environment/v1")
+            self.assertEqual(
+                set(environment["browserEnvironment"]["profiles"]),
+                {"sourceLayout", "bentoCheck"},
+            )
+            self.assertNotIn("browserEnvironment", changed.document)
+
+    def test_remote_source_resource_is_blocked_before_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "remote.preview.html"
+            source.write_text(
+                "<!doctype html><style>.slide{position:relative;width:1280px;height:720px}</style>"
+                "<section class='slide' data-slide-id='remote'>"
+                "<img data-bento-id='remote-image' src='https://example.invalid/remote.png'>"
+                "</section>",
+                encoding="utf-8",
+            )
+            registry = root / "remote.registry.json"
+            registry.write_text(json.dumps({
+                "format": "bento/html-registry/v1", "chapterId": "remote",
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(BrowserCheckError, "blocked remote"):
+                build_from_html(
+                    html_dir=root, registry_dir=root,
+                    base_path=ROOT / "Bento_Slides.base.bento.html",
+                    output_path=root / "output/presentation.bento.html",
+                    browser_check=False,
+                )
+            environment = json.loads(
+                (root / "output/diagnostics/browser-environment.json").read_text(encoding="utf-8")
+            )
+            blocked = environment["browserEnvironment"]["networkPolicy"]["blockedRequests"]
+            self.assertTrue(any(item["host"] == "example.invalid" for item in blocked))
+
     def test_single_html_and_v2_registry_build(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "日本語 deck"

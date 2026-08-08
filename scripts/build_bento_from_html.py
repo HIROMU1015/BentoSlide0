@@ -20,6 +20,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--output", required=True, type=Path, help="Output presentation.bento.html")
     result.add_argument("--browser-executable", type=Path, help="Optional Chrome/Edge executable")
     result.add_argument("--skip-bento-browser-check", action="store_true", help="Skip final Bento UI/round-trip screenshots (computed layout still requires Chromium)")
+    result.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Reuse valid per-slide browser/layout evidence for interactive iteration; approval gates still run full builds",
+    )
     return result
 
 
@@ -41,6 +46,7 @@ def run(args: argparse.Namespace) -> int:
         output_path=args.output,
         browser_executable=args.browser_executable,
         browser_check=not args.skip_bento_browser_check,
+        incremental=args.incremental,
     )
     print(f"Built: {result.html_path}")
     print(f"Native JSON: {result.json_path}")

@@ -479,7 +479,8 @@ class AuthoringArtifactStorage:
 
     @_locked
     def status(self) -> dict[str, Any]:
-        self.transactions.recover()
+        if not self.transactions.writer_lease.acquired:
+            self.transactions.recover()
         _, document, registry = self._read_current()
         document_revision_value = document_revision(document)
         registry_revision_value = registry_revision(registry)
@@ -504,9 +505,10 @@ class AuthoringArtifactStorage:
     @_locked
     def document_response(self) -> dict[str, Any]:
         html, document, registry = self._read_current()
+        document_revision_value = document_revision(document)
         return {
-            "documentRevision": document_revision(document), "registryRevision": registry_revision(registry),
-            "revision": document_revision(document), "document": document, "registry": registry,
+            "documentRevision": document_revision_value, "registryRevision": registry_revision(registry),
+            "revision": document_revision_value, "document": document, "registry": registry,
             "serializedHtml": html,
         }
 

@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import URLError
@@ -98,6 +99,21 @@ class WindowsLauncherTests(unittest.TestCase):
     @staticmethod
     def read_session(repository: Path) -> dict:
         return json.loads((repository / "output" / "work-editor-session.json").read_text(encoding="utf-8-sig"))
+
+    def test_explicit_bento_python_bypasses_candidate_probe(self) -> None:
+        repository = self.copy_repository("Explicit Python 日本語")
+        common = repository / "scripts/bento_editor_launcher.common.ps1"
+        command = [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            f". '{common}'; $value = Find-BentoLauncherPython -Repository '{repository}' "
+            "-RequiredImports @('definitely_missing_bento_module'); "
+            "Write-Output ($value.DetectedBy + '|' + $value.Executable)",
+        ]
+        with mock.patch.dict(os.environ, {"BENTO_PYTHON": sys.executable}):
+            result = self.run_without_pipes(command, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("BENTO_PYTHON|", result.stdout)
+        self.assertIn(str(Path(sys.executable).resolve()), result.stdout)
 
     def test_cmd_start_duplicate_stop_and_existing_final_protection(self) -> None:
         repository = self.copy_repository("Bento Slide")

@@ -15,5 +15,6 @@ output/html-preview.pid
 output/html-preview-session.json
 output/html-preview-launcher.lock
 output/html-preview*.log
+output/.bento-cache/
 sources/private/*
 !sources/private/.gitkeep

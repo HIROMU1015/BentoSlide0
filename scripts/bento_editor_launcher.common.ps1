@@ -245,6 +245,18 @@ function Find-BentoLauncherPython {
         [string[]]$RequiredImports = @('bento_converter')
     )
 
+    if (-not [string]::IsNullOrWhiteSpace([string]$env:BENTO_PYTHON)) {
+        $configured = [Environment]::ExpandEnvironmentVariables([string]$env:BENTO_PYTHON)
+        if (-not [System.IO.Path]::IsPathRooted($configured)) {
+            $configured = Join-Path $Repository $configured
+        }
+        $configured = [System.IO.Path]::GetFullPath($configured)
+        if (-not (Test-Path -LiteralPath $configured -PathType Leaf)) {
+            throw "BENTO_PYTHON does not point to a Python executable file: $configured"
+        }
+        return [pscustomobject]@{ Executable = $configured; DetectedBy = 'BENTO_PYTHON' }
+    }
+
     $candidates = New-Object System.Collections.Generic.List[object]
     foreach ($relative in @('.venv\Scripts\python.exe', 'venv\Scripts\python.exe', 'env\Scripts\python.exe')) {
         $path = Join-Path $Repository $relative

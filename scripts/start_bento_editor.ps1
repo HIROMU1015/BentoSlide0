@@ -26,51 +26,6 @@ $errorLogPath = Join-Path $stateDirectory 'work-editor.error.log'
 $lockHandle = $null
 $startedProcess = $null
 
-function Find-BentoPython {
-    param([Parameter(Mandatory = $true)][string]$Repository)
-
-    $candidates = New-Object System.Collections.Generic.List[object]
-    foreach ($relative in @('.venv\Scripts\python.exe', 'venv\Scripts\python.exe', 'env\Scripts\python.exe')) {
-        $path = Join-Path $Repository $relative
-        if (Test-Path -LiteralPath $path -PathType Leaf) {
-            $candidates.Add([pscustomobject]@{ Command = $path; Prefix = @(); Label = $path })
-        }
-    }
-    $py = Get-Command py.exe -ErrorAction SilentlyContinue
-    if ($null -ne $py) {
-        $candidates.Add([pscustomobject]@{ Command = $py.Source; Prefix = @('-3'); Label = ($py.Source + ' -3') })
-    }
-    $python = Get-Command python.exe -ErrorAction SilentlyContinue
-    if ($null -ne $python) {
-        $candidates.Add([pscustomobject]@{ Command = $python.Source; Prefix = @(); Label = $python.Source })
-    }
-
-    $attempts = New-Object System.Collections.Generic.List[string]
-    foreach ($candidate in $candidates) {
-        Push-Location $Repository
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            $output = & $candidate.Command @($candidate.Prefix) -c "import bento_converter, sys; print(sys.executable)" 2>&1
-            $exitCode = $LASTEXITCODE
-        }
-        finally {
-            $ErrorActionPreference = $previousErrorActionPreference
-            Pop-Location
-        }
-        if ($exitCode -eq 0) {
-            $executable = [string]($output | Select-Object -Last 1)
-            if (Test-Path -LiteralPath $executable -PathType Leaf) {
-                return [pscustomobject]@{ Executable = [System.IO.Path]::GetFullPath($executable); DetectedBy = $candidate.Label }
-            }
-        }
-        $attempts.Add(("{0}: {1}" -f $candidate.Label, (($output | ForEach-Object { [string]$_ }) -join ' ')))
-    }
-
-    $details = if ($attempts.Count -gt 0) { $attempts -join "`n" } else { 'Python候補が見つかりませんでした。' }
-    throw "Bento Work editorを起動できるPython 3が見つかりません。`nimport bento_converter が成功する環境を用意してください。`n`n$details"
-}
-
 function Add-LauncherLog {
     param([Parameter(Mandatory = $true)][string[]]$Lines)
     Add-Content -LiteralPath $logPath -Value $Lines -Encoding utf8
@@ -170,7 +125,7 @@ try {
         Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
     }
 
-    $python = Find-BentoPython -Repository $repository
+    $python = Find-BentoLauncherPython -Repository $repository -RequiredImports @('bento_converter', 'yaml', 'jsonschema')
     foreach ($current in @($logPath, $stdoutLogPath, $errorLogPath)) {
         $previous = $current.Substring(0, $current.Length - 4) + '.previous.log'
         if (Test-Path -LiteralPath $current -PathType Leaf) {

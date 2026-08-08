@@ -61,7 +61,9 @@ python -m scripts.build_bento_from_html `
   --output output/presentation.generated.bento.html
 ```
 
-移行済みのmodular資料では従来の`--html-dir chapters/ --registry-dir chapters/`を使えます。生成物にはHTML/JSON、registry、conversion report、computed layout、resource scan、browser check、source/Bento screenshotsが含まれます。ローカルresourceはdata URI化され、未解決resource、参照不整合、runtime変化、critical crop失敗、serialize失敗はbuildを失敗させます。
+移行済みのmodular資料では従来の`--html-dir chapters/ --registry-dir chapters/`を使えます。生成物にはHTML/JSON、registry、conversion report、computed layout、resource scan、browser check、`diagnostics/browser-environment.json`、source/Bento screenshotsが含まれます。ローカルresourceはdata URI化され、未解決resource、参照不整合、runtime変化、critical crop失敗、serialize失敗はbuildを失敗させます。source計測とBento確認は1つのChromium process内の分離contextで実行され、remote networkは遮断されます。
+
+編集反復では同じ出力先へ`--incremental`を付けると、slide DOM、関連registry/assets、global CSS/theme、runtime、browser/font environmentが一致するslideだけ`output/.bento-cache/`から再利用します。通常buildはcacheを再利用せずfull evidenceを再生成し、workflowの変換・承認gateでも必ずfull build/full validationを使います。cacheは正本でも承認証跡でもありません。
 
 section承認はsection DOM、参照registry projection、参照asset content、global CSS/themeから決定論的digestを作ります。承認後の変更は該当section（global CSS/themeは全section）を未承認へ戻し、変換を拒否します。
 
@@ -133,4 +135,4 @@ python -m unittest discover -v
 Remove-Item Env:BENTO_BROWSER_TEST
 ```
 
-GitHub ActionsはLinuxでlegacy/HTML-first/Work editor/full browser suiteを、Windowsでlauncher testsと空白・日本語path smokeを実行し、`html-first-evidence`を保存します。
+GitHub ActionsはLinuxのunit、HTML-first browser integration、determinismを並列jobで実行し、Playwright Chromium binaryをversion固定keyでcacheします。Windowsではlauncher testsと空白・日本語path smokeを実行します。各jobの証跡は最後に`html-first-evidence`へ統合されます。

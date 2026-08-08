@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .bento_validator import validate_bento_doc
+from .browser_harness import BrowserHarness
 from .browser_check import BrowserCheckReport, run_browser_check
 from .errors import BentoConverterError
 from .html_converter import HtmlConversionResult, convert_html_layout
-from .html_document import assert_runtime_integrity, extract_bento_doc, load_html, write_embedded_document
+from .html_document import assert_runtime_integrity, extract_bento_doc, load_html, runtime_fingerprint, write_embedded_document
 from .html_layout import LayoutResult, extract_computed_layout
 from .html_source import discover_chapters, discover_source_unit, merge_registries
-from .visual_comparison import compare_crops, compare_images
+from .incremental_cache import (
+    IncrementalSlideCache,
+    comparison_cache_key,
+    compute_source_fingerprint_inputs,
+)
+from .visual_comparison import compare_crops, compare_images, open_image_pair
 
 
 CRITICAL_ROLES = {"title", "main-claim", "primary-visual", "conclusion"}
@@ -51,7 +59,17 @@ def _json_path(html_path: Path) -> Path:
 
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    payload = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _clear_generated_files(*directories: Path) -> None:
@@ -64,7 +82,15 @@ def _clear_generated_files(*directories: Path) -> None:
                     path.unlink()
 
 
-def _semantic_comparison(layout: LayoutResult, conversion: HtmlConversionResult, screenshots: tuple[str, ...], root: Path) -> dict[str, Any]:
+def _semantic_comparison(
+    layout: LayoutResult,
+    conversion: HtmlConversionResult,
+    screenshots: tuple[str, ...],
+    root: Path,
+    *,
+    cache: IncrementalSlideCache | None = None,
+    bento_fingerprints: dict[str, str] | None = None,
+) -> dict[str, Any]:
     source_ids = [slide["id"] for slide in layout.slides]
     output_ids = [slide["id"] for slide in conversion.document["slides"]]
     decisions = conversion.report["elements"]
@@ -86,34 +112,54 @@ def _semantic_comparison(layout: LayoutResult, conversion: HtmlConversionResult,
             "stylesTracked": all("styleChecks" in decision for decision in slide_decisions if decision["strategy"] != "ignore"),
             "insideCanvas": all(element["x"] >= 0 and element["y"] >= 0 and element["x"] + element["w"] <= 1280 and element["y"] + element["h"] <= 720 for element in output_slide["elements"]),
         }
-        image_comparison = compare_images(source_path, bento_path) if bento_path else {
-            "status": "fail", "warnings": ["Bento screenshot is missing"]
-        }
-        element_comparisons = []
-        for decision in slide_decisions:
-            source_type = decision.get("sourceType")
-            role = decision.get("role")
-            critical_reason = _critical_reason(decision)
-            important = critical_reason is not None or decision.get("compareCrop") or "title" in decision["elementId"].lower()
-            if not important or not bento_path or "sourceFrame" not in decision or "bentoFrame" not in decision:
-                continue
-            crop = compare_crops(
-                source_path,
-                bento_path,
-                decision.get("sourceBoundingFrame", decision["sourceFrame"]),
-                decision.get("bentoBoundingFrame", decision["bentoFrame"]),
+        fingerprint = None
+        cached_visual = None
+        if cache and bento_path and bento_fingerprints and slide_id in bento_fingerprints:
+            fingerprint = comparison_cache_key(
+                layout.slide_fingerprints.get(slide_id, ""),
+                bento_fingerprints[slide_id],
+                slide_decisions,
             )
-            if crop:
-                contribution = "none"
-                if crop["status"] == "fail":
-                    contribution = "slide-fail" if critical_reason else "slide-warning"
-                elif crop["status"] == "warning":
-                    contribution = "slide-warning"
-                element_comparisons.append({
-                    "elementId": decision["elementId"], "role": role, "sourceType": source_type,
-                    "critical": critical_reason is not None, "criticalReason": critical_reason,
-                    "statusContribution": contribution,
-                    "imageComparison": crop,
+            cached_visual = cache.load_comparison(slide_id, fingerprint)
+        if cached_visual is not None:
+            image_comparison = cached_visual["imageComparison"]
+            element_comparisons = cached_visual["elementComparisons"]
+        elif not bento_path:
+            image_comparison = {"status": "fail", "warnings": ["Bento screenshot is missing"]}
+            element_comparisons = []
+        else:
+            element_comparisons = []
+            with open_image_pair(source_path, bento_path) as (source_image, bento_image):
+                image_comparison = compare_images(source_image, bento_image)
+                for decision in slide_decisions:
+                    source_type = decision.get("sourceType")
+                    role = decision.get("role")
+                    critical_reason = _critical_reason(decision)
+                    important = critical_reason is not None or decision.get("compareCrop") or "title" in decision["elementId"].lower()
+                    if not important or "sourceFrame" not in decision or "bentoFrame" not in decision:
+                        continue
+                    crop = compare_crops(
+                        source_image,
+                        bento_image,
+                        decision.get("sourceBoundingFrame", decision["sourceFrame"]),
+                        decision.get("bentoBoundingFrame", decision["bentoFrame"]),
+                    )
+                    if crop:
+                        contribution = "none"
+                        if crop["status"] == "fail":
+                            contribution = "slide-fail" if critical_reason else "slide-warning"
+                        elif crop["status"] == "warning":
+                            contribution = "slide-warning"
+                        element_comparisons.append({
+                            "elementId": decision["elementId"], "role": role, "sourceType": source_type,
+                            "critical": critical_reason is not None, "criticalReason": critical_reason,
+                            "statusContribution": contribution,
+                            "imageComparison": crop,
+                        })
+            if cache and fingerprint:
+                cache.save_comparison(slide_id, fingerprint, {
+                    "imageComparison": image_comparison,
+                    "elementComparisons": element_comparisons,
                 })
         semantic_ok = all(checks.values())
         critical_crop_fail = any(item["critical"] and item["imageComparison"]["status"] == "fail" for item in element_comparisons)
@@ -153,6 +199,7 @@ def build_from_html(
     output_path: str | Path,
     browser_executable: str | Path | None = None,
     browser_check: bool = True,
+    incremental: bool = False,
 ) -> HtmlBuildResult:
     """Build, validate, render, round-trip, and report an HTML-first deck."""
 
@@ -180,38 +227,75 @@ def build_from_html(
     _clear_generated_files(source_dir, bento_dir, diagnostics_dir)
 
     registry = merge_registries(chapters)
-    layout = extract_computed_layout(chapters, source_dir, browser_executable=browser_executable)
-    conversion = convert_html_layout(layout, registry, chapters)
-    validate_bento_doc(conversion.document)
-
-    write_embedded_document(base, output, conversion.document)
     base_html = load_html(base)
-    output_html = load_html(output)
-    assert_runtime_integrity(base_html, output_html)
-    if extract_bento_doc(output_html) != conversion.document:
-        raise BentoConverterError("Generated #bento-doc does not round-trip exactly.")
-
-    json_path = _json_path(output)
-    _write_json(json_path, conversion.document)
-    _write_json(diagnostics_dir / "computed-layout.json", {"slides": layout.slides})
-    _write_json(diagnostics_dir / "merged-registry.json", registry)
-
+    runtime_revision = "sha256:" + runtime_fingerprint(base_html)
+    fingerprint_inputs = compute_source_fingerprint_inputs(chapters)
+    cache = IncrementalSlideCache(root / ".bento-cache", reuse=incremental)
     browser_report: BrowserCheckReport | None = None
     bento_screenshots: tuple[str, ...] = ()
-    if browser_check:
-        browser_report = run_browser_check(
-            output,
-            screenshots_dir=bento_dir,
-            screenshot_prefix="bento-slide",
-            browser_executable=browser_executable,
-        )
-        bento_screenshots = browser_report.screenshots
-        _write_json(diagnostics_dir / "browser-check.json", browser_report.as_dict())
+    with BrowserHarness(browser_executable) as harness:
+        try:
+            layout = extract_computed_layout(
+                chapters,
+                source_dir,
+                harness=harness,
+                cache=cache,
+                fingerprint_inputs=fingerprint_inputs,
+                runtime_fingerprint=runtime_revision,
+            )
+            conversion = convert_html_layout(layout, registry, chapters)
+            validate_bento_doc(conversion.document)
+            harness.record_embedded_fonts(conversion.document)
+
+            write_embedded_document(base, output, conversion.document)
+            output_html = load_html(output)
+            assert_runtime_integrity(base_html, output_html)
+            if extract_bento_doc(output_html) != conversion.document:
+                raise BentoConverterError("Generated #bento-doc does not round-trip exactly.")
+
+            json_path = _json_path(output)
+            _write_json(json_path, conversion.document)
+            _write_json(diagnostics_dir / "computed-layout.json", {"slides": layout.slides})
+            _write_json(diagnostics_dir / "merged-registry.json", registry)
+
+            if browser_check:
+                browser_report = run_browser_check(
+                    output,
+                    screenshots_dir=bento_dir,
+                    screenshot_prefix="bento-slide",
+                    harness=harness,
+                    cache=cache,
+                    runtime_revision=runtime_revision,
+                )
+                bento_screenshots = browser_report.screenshots
+                _write_json(diagnostics_dir / "browser-check.json", browser_report.as_dict())
+            else:
+                _write_json(diagnostics_dir / "browser-check.json", {
+                    "skipped": True,
+                    "serialize_roundtrip": False,
+                })
+        finally:
+            _write_json(diagnostics_dir / "browser-environment.json", harness.report())
 
     report = dict(conversion.report)
     report["runtimeIntegrity"] = True
     report["browserCheck"] = browser_report.as_dict() if browser_report else {"skipped": True}
-    report["visualComparison"] = _semantic_comparison(layout, conversion, bento_screenshots, root) if browser_report else {"skipped": True}
+    report["visualComparison"] = _semantic_comparison(
+        layout,
+        conversion,
+        bento_screenshots,
+        root,
+        cache=cache,
+        bento_fingerprints=browser_report.slide_fingerprints if browser_report else None,
+    ) if browser_report else {"skipped": True}
+    report["incrementalCache"] = cache.report()
+    report["browserEnvironment"] = {
+        "path": "diagnostics/browser-environment.json",
+        "environmentDigest": json.loads(
+            (diagnostics_dir / "browser-environment.json").read_text(encoding="utf-8")
+        )["environmentDigest"],
+        "canonicalArtifact": False,
+    }
     if browser_report:
         visual_pairs = report["visualComparison"]["pairs"]
         report["summary"].update({

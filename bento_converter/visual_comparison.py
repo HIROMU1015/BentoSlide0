@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 try:
     from PIL import Image, ImageChops, ImageFilter, ImageStat
@@ -35,6 +36,14 @@ CROP_FAIL_THRESHOLDS = {
     "colorDistributionDifference": 0.75,
     "edgeDifference": 0.35,
 }
+
+PHASH_COSINES = tuple(
+    tuple(
+        math.cos(math.pi * (2 * position + 1) * frequency / (2 * HASH_SOURCE_SIZE))
+        for position in range(HASH_SOURCE_SIZE)
+    )
+    for frequency in range(HASH_SIZE)
+)
 
 
 def _data(image: Image.Image):
@@ -73,19 +82,15 @@ def _edge_difference(first: Image.Image, second: Image.Image) -> float:
 
 def _phash(image: Image.Image) -> int:
     pixels = list(_data(image.convert("L").resize((HASH_SOURCE_SIZE, HASH_SOURCE_SIZE), Image.Resampling.LANCZOS)))
-    cosines = [
-        [math.cos(math.pi * (2 * position + 1) * frequency / (2 * HASH_SOURCE_SIZE)) for position in range(HASH_SOURCE_SIZE)]
-        for frequency in range(HASH_SIZE)
-    ]
     coefficients: list[float] = []
     for vertical in range(HASH_SIZE):
         for horizontal in range(HASH_SIZE):
             value = 0.0
             for y in range(HASH_SOURCE_SIZE):
                 row = y * HASH_SOURCE_SIZE
-                vertical_factor = cosines[vertical][y]
+                vertical_factor = PHASH_COSINES[vertical][y]
                 for x in range(HASH_SOURCE_SIZE):
-                    value += pixels[row + x] * cosines[horizontal][x] * vertical_factor
+                    value += pixels[row + x] * PHASH_COSINES[horizontal][x] * vertical_factor
             coefficients.append(value)
     median_source = sorted(coefficients[1:])
     median = median_source[len(median_source) // 2]
@@ -182,9 +187,19 @@ def compare_images(source: str | Path | Image.Image, bento: str | Path | Image.I
     return {"status": status, **metrics, "warnings": warnings}
 
 
+@contextmanager
+def open_image_pair(
+    source: str | Path, bento: str | Path,
+) -> Iterator[tuple[Image.Image, Image.Image]]:
+    """Open a slide pair once so whole-slide and crop comparisons share decodes."""
+
+    with Image.open(source) as source_image, Image.open(bento) as bento_image:
+        yield source_image.convert("RGB"), bento_image.convert("RGB")
+
+
 def compare_crops(
-    source_path: str | Path,
-    bento_path: str | Path,
+    source_path: str | Path | Image.Image,
+    bento_path: str | Path | Image.Image,
     source_frame: dict[str, float],
     bento_frame: dict[str, float],
 ) -> dict[str, Any] | None:
@@ -202,8 +217,13 @@ def compare_crops(
     source_box, bento_box = box(source_frame), box(bento_frame)
     if source_box is None or bento_box is None:
         return None
-    with Image.open(source_path) as source_image, Image.open(bento_path) as bento_image:
-        comparison = compare_images(source_image.crop(source_box), bento_image.crop(bento_box))
-        status, warnings = classify_crop_metrics(comparison)
-        comparison.update({"status": status, "warnings": warnings})
-        return comparison
+    def crop(value: str | Path | Image.Image, bounds: tuple[int, int, int, int]) -> Image.Image:
+        if isinstance(value, Image.Image):
+            return value.crop(bounds)
+        with Image.open(value) as image:
+            return image.crop(bounds)
+
+    comparison = compare_images(crop(source_path, source_box), crop(bento_path, bento_box))
+    status, warnings = classify_crop_metrics(comparison)
+    comparison.update({"status": status, "warnings": warnings})
+    return comparison

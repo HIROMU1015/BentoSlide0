@@ -243,6 +243,11 @@ class DeckWorkflowTests(unittest.TestCase):
         }), encoding="utf-8")
         (diagnostics / "resource-scan.json").write_text(json.dumps({"passed": True, "unresolved": []}), encoding="utf-8")
         (diagnostics / "browser-check.json").write_text(json.dumps({"serialize_roundtrip": True}), encoding="utf-8")
+        (diagnostics / "browser-environment.json").write_text(json.dumps({
+            "format": "bento/browser-environment/v1",
+            "environmentDigest": "sha256:" + "0" * 64,
+            "browserEnvironment": {"profiles": {"sourceLayout": {}, "bentoCheck": {}}},
+        }), encoding="utf-8")
         generated_hash = hashlib.sha256(generated_html.read_bytes()).hexdigest()
         final_hash = None
         if existing_final:
@@ -433,6 +438,21 @@ class DeckWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(baseline)
         self.assertTrue((self.root / baseline["path"]).is_file())
         self.assertRegex(baseline["protectedContentFingerprint"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_mark_converted_requires_versioned_browser_environment_evidence(self) -> None:
+        state = self.ready_for_conversion()
+        self.prepare_output_bundle(state, existing_final=False)
+        environment = self.root / "output/diagnostics/browser-environment.json"
+        environment.unlink()
+        with self.assertRaisesRegex(WorkflowError, "browser-environment"):
+            command_mark_converted(self.root, self.state())
+        environment.write_text(json.dumps({
+            "format": "bento/browser-environment/v1",
+            "environmentDigest": "not-a-digest",
+            "browserEnvironment": {"profiles": {"sourceLayout": {}, "bentoCheck": {}}},
+        }), encoding="utf-8")
+        with self.assertRaisesRegex(WorkflowError, "environment evidence"):
+            command_mark_converted(self.root, self.state())
 
     def test_mark_converted_preserves_existing_final(self) -> None:
         state = self.ready_for_conversion()

@@ -98,7 +98,7 @@ In `html_review`, record the current digest and select the next incomplete secti
 
 ### BentoSlideに変換して
 
-Require `ready_for_conversion`; validate every approval digest; run the single-file HTML-first build to configured generated paths; inspect conversion, browser, screenshot, resource, runtime, and determinism evidence; call `mark-converted`, then `begin-authoring`; stop at `bento_authoring`. Do not start the editor until `BentoSlideで編集を開始して`, and do not initialize final yet.
+Require `ready_for_conversion`; validate every approval digest; run the single-file HTML-first build to configured generated paths without `--incremental`; inspect conversion, browser, browser-environment, screenshot, resource, runtime, and determinism evidence; call `mark-converted`, then `begin-authoring`; stop at `bento_authoring`. Interactive preview builds may use the slide cache, but conversion and approval gates always require full build/full validation. Do not start the editor until `BentoSlideで編集を開始して`, and do not initialize final yet.
 
 ### BentoSlideで編集を開始して
 

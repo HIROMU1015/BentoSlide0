@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .browser_check import find_browser_executable
+from .browser_harness import BrowserHarness
 from .errors import BrowserCheckError, ValidationError, issue
 from .html_source import SourceChapter
+from .incremental_cache import (
+    IncrementalSlideCache,
+    SourceFingerprintInput,
+    compute_source_fingerprint_inputs,
+    source_cache_key,
+)
 from .native_compatibility import classify_native_compatibility
 
 CANVAS_WIDTH = 1280
 CANVAS_HEIGHT = 720
 
 EXTRACT_LAYOUT_JS = r"""
-() => {
+slideIds => {
   const px = value => {
     const parsed = Number.parseFloat(value);
     return Number.isFinite(parsed) ? parsed : 0;
@@ -50,8 +56,11 @@ EXTRACT_LAYOUT_JS = r"""
       boundingFrame: {x:(r.left-sr.left)*sx,y:(r.top-sr.top)*sy,w:r.width*sx,h:r.height*sy},
     };
   };
+  const requested = new Set(Array.isArray(slideIds) ? slideIds : []);
   const slides = [...document.querySelectorAll('section.slide[data-slide-id]')];
-  return slides.map((slide, slideIndex) => {
+  return slides.map((slide, slideIndex) => ({slide, slideIndex}))
+    .filter(item => requested.size === 0 || requested.has(item.slide.dataset.slideId))
+    .map(({slide, slideIndex}) => {
     const sr = slide.getBoundingClientRect();
     const sx = 1280 / sr.width;
     const sy = 720 / sr.height;
@@ -264,6 +273,8 @@ class LayoutResult:
     source_screenshots: tuple[str, ...]
     image_fallbacks: dict[str, str]
     browser: str
+    slide_fingerprints: dict[str, str] = field(default_factory=dict)
+    cache_hits: tuple[str, ...] = ()
 
 
 def extract_computed_layout(
@@ -271,14 +282,23 @@ def extract_computed_layout(
     screenshots_dir: str | Path,
     *,
     browser_executable: str | Path | None = None,
+    harness: BrowserHarness | None = None,
+    cache: IncrementalSlideCache | None = None,
+    fingerprint_inputs: dict[str, SourceFingerprintInput] | None = None,
+    runtime_fingerprint: str = "",
 ) -> LayoutResult:
     """Open chapters in Chromium, then return normalized 1280x720 layout data."""
 
-    try:
-        from playwright.sync_api import Error as PlaywrightError
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise BrowserCheckError("Playwright is required for HTML-first conversion. Install requirements-browser.txt.") from exc
+    if harness is None:
+        with BrowserHarness(browser_executable) as owned_harness:
+            return extract_computed_layout(
+                chapters,
+                screenshots_dir,
+                harness=owned_harness,
+                cache=cache,
+                fingerprint_inputs=fingerprint_inputs,
+                runtime_fingerprint=runtime_fingerprint,
+            )
 
     output = Path(screenshots_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -286,33 +306,59 @@ def extract_computed_layout(
     screenshots: list[str] = []
     image_fallbacks: dict[str, str] = {}
     errors: list[str] = []
-    executable = find_browser_executable(browser_executable)
-    browser_label = executable.name if executable else "Playwright Chromium"
+    fingerprints = fingerprint_inputs or compute_source_fingerprint_inputs(chapters)
+    ordered_ids = list(fingerprints)
+    positions = {slide_id: index for index, slide_id in enumerate(ordered_ids, start=1)}
+    slide_fingerprints: dict[str, str] = {}
+    cache_hits: list[str] = []
     try:
-        with sync_playwright() as playwright:
-            launch: dict[str, Any] = {"headless": True, "args": ["--allow-file-access-from-files"]}
-            if executable:
-                launch["executable_path"] = str(executable)
-            browser = playwright.chromium.launch(**launch)
-            page = browser.new_page(viewport={"width": 1400, "height": 900}, device_scale_factor=1)
+        with harness.page("sourceLayout") as page:
             for chapter in chapters:
                 page.goto(chapter.html_path.as_uri(), wait_until="load")
-                page.add_style_tag(content="*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}")
-                page.evaluate("document.fonts && document.fonts.ready")
-                page.wait_for_timeout(100)
-                computed = page.evaluate(EXTRACT_LAYOUT_JS)
-                if not computed:
-                    errors.append(issue(field="section.slide[data-slide-id]", actual=0, fix=f"Add at least one fixed-size slide to {chapter.html_path.name}."))
-                    continue
-                for slide_index, slide in enumerate(computed):
+                harness.settle(page)
+                harness.assert_no_blocked_network()
+                harness.record_page_environment("sourceLayout", page)
+                environment_digest = harness.profile_digest("sourceLayout")
+                chapter_inputs = [
+                    value for value in fingerprints.values() if value.chapter_id == chapter.chapter_id
+                ]
+                dirty_ids: list[str] = []
+                chapter_slides: dict[str, dict[str, Any]] = {}
+                for value in chapter_inputs:
+                    key = source_cache_key(
+                        value,
+                        environment_digest=environment_digest,
+                        runtime_fingerprint=runtime_fingerprint,
+                    )
+                    slide_fingerprints[value.slide_id] = key
+                    target = output / f"{positions[value.slide_id]:02d}-{value.slide_id}.png"
+                    cached = cache.load_source(value.slide_id, key, target) if cache else None
+                    if cached is None:
+                        dirty_ids.append(value.slide_id)
+                        continue
+                    slide, fallbacks = cached
+                    chapter_slides[value.slide_id] = slide
+                    image_fallbacks.update(fallbacks)
+                    cache_hits.append(value.slide_id)
+                computed = page.evaluate(EXTRACT_LAYOUT_JS, dirty_ids) if dirty_ids else []
+                computed_by_id = {slide["id"]: slide for slide in computed}
+                missing = [slide_id for slide_id in dirty_ids if slide_id not in computed_by_id]
+                if missing:
+                    errors.append(issue(
+                        field="section.slide[data-slide-id]", actual=missing,
+                        fix=f"Keep every discovered slide renderable in {chapter.html_path.name}.",
+                    ))
+                for slide_id in dirty_ids:
+                    slide = computed_by_id.get(slide_id)
+                    if slide is None:
+                        continue
                     if abs(slide["sourceWidth"] - CANVAS_WIDTH) > 1 or abs(slide["sourceHeight"] - CANVAS_HEIGHT) > 1:
                         errors.append(issue(slide_id=slide["id"], field="computed size", actual=(slide["sourceWidth"], slide["sourceHeight"]), fix="Render every source slide at exactly 1280x720 CSS pixels."))
                     slide["chapterId"] = chapter.chapter_id
-                    all_slides.append(slide)
                     slide_locator = page.locator(f'section.slide[data-slide-id="{slide["id"]}"]')
-                    target = output / f"{len(all_slides):02d}-{slide['id']}.png"
+                    target = output / f"{positions[slide_id]:02d}-{slide_id}.png"
                     slide_locator.screenshot(path=str(target))
-                    screenshots.append(str(target.resolve()))
+                    slide_fallbacks: dict[str, str] = {}
                     for element in slide["elements"]:
                         compatibility = classify_native_compatibility(element)
                         element["compatibility"] = {
@@ -349,10 +395,35 @@ def extract_computed_layout(
                             ))
                             continue
                         payload = explicit.screenshot(type="png")
-                        image_fallbacks[f"{slide['id']}/{element['id']}"] = "data:image/png;base64," + base64.b64encode(payload).decode("ascii")
-            browser.close()
-    except PlaywrightError as exc:
+                        fallback_key = f"{slide['id']}/{element['id']}"
+                        fallback_value = "data:image/png;base64," + base64.b64encode(payload).decode("ascii")
+                        image_fallbacks[fallback_key] = fallback_value
+                        slide_fallbacks[fallback_key] = fallback_value
+                    chapter_slides[slide_id] = slide
+                    if cache:
+                        cache.save_source(
+                            slide_id,
+                            slide_fingerprints[slide_id],
+                            slide,
+                            slide_fallbacks,
+                            target,
+                        )
+                for value in chapter_inputs:
+                    slide = chapter_slides.get(value.slide_id)
+                    if slide is not None:
+                        all_slides.append(slide)
+                        screenshots.append(str((output / f"{positions[value.slide_id]:02d}-{value.slide_id}.png").resolve()))
+    except BrowserCheckError:
+        raise
+    except Exception as exc:
         raise BrowserCheckError(f"Chromium layout extraction failed: {exc}") from exc
     if errors:
         raise ValidationError(errors)
-    return LayoutResult(tuple(all_slides), tuple(screenshots), image_fallbacks, browser_label)
+    return LayoutResult(
+        tuple(all_slides),
+        tuple(screenshots),
+        image_fallbacks,
+        harness.browser_label,
+        slide_fingerprints,
+        tuple(cache_hits),
+    )
