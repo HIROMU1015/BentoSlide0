@@ -27,7 +27,7 @@ from scripts.apply_bento_final_edits import (
     apply_patch_document,
     main,
 )
-from scripts.deck_workflow import atomic_write_state
+from scripts.deck_workflow import _normalize_handoff, atomic_write_state
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,7 +108,7 @@ class FastFinalEditTests(unittest.TestCase):
         state["workflow"].update(
             stage=stage, status="in_progress", owner=owner, sourceOfTruth=source_of_truth,
         )
-        state["handoff"]["readyForFinalEditing"] = stage == "bento_finalization"
+        _normalize_handoff(state)
         state["outputs"] = {
             "generatedHtml": "artifacts/custom.generated.bento.html",
             "generatedJson": "artifacts/custom.generated.bento.json",

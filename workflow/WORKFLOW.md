@@ -32,7 +32,7 @@ planned -> html_authoring -> html_review -> bento_integration -> bento_authoring
 
 `canonical` is exactly one of `planning`, `html`, or `bento`. `slideIds` records current canonical membership, while `bentoSlideIds` retains the installed authoring membership during an HTML redesign. HTML approval records the current section digest and authorizes `promote-current-section`; it does not accept the Bento result. Promotion converts only that section and atomically replaces its old contiguous Bento range with the new N-slide range, so slide count and every section-local ID may change without leaving stale slides. It rejects collisions and external dangling references, preserves planning order, and leaves unrelated hashes unchanged. The promoted HTML becomes a historical snapshot; later Work editor changes stay Bento-canonical and are not synchronized back. `finish-current-section` binds acceptance to the section slides plus their referenced registry/provenance closure and opens the next section. Accepted sections can be reopened through Bento or, for a deliberate redesign, through a fresh HTML candidate. After all sections are accepted, whole-deck `content_review` is mandatory on every low-level and high-level approval route.
 
-A content/structure request made in finalization or after completion reopens the affected authoring section. It invalidates whole-deck/final approval and requires section acceptance plus whole-deck approval again. It never enables content edits in final mode and never silently overwrites an existing final artifact set.
+A content/structure request made in finalization or after completion reopens the affected authoring section. It invalidates whole-deck/final approval and requires section acceptance plus whole-deck approval again. After that approval, finalization restarts by archiving the complete previous final/baseline set and transactionally installing the newly approved authoring set. It never enables content edits in final mode or silently discards an existing final.
 
 Natural conversation is routed internally to the high-level operations below. `advance` performs safe mechanical work only and stops at human approval checkpoints.
 
@@ -76,6 +76,8 @@ begin-content-review            validate authoring -> content_review
 approve-content                 bind approval to both current revisions
 reset-authoring-from-html       explicit full reset; authoring stage only
 begin-finalization              approved content -> final artifacts/baselines
+restart-finalization-from-authoring
+                                archive an older final, then install newly approved authoring
 approve-final                   final technical check + human approval
 complete                        bento_finalization -> complete
 reopen-finalization             invalidate final approval and resume presentation edits
@@ -108,7 +110,7 @@ sha256(UTF-8("bento/content-approval/v1\0" + documentRevision + "\0" + registryR
 
 Current revisions are recomputed on save, status, review, approval, final handoff, segment operations, offline transactions, and migrated-state validation. A mismatch makes the approval pending. Finalization refuses a stale approval.
 
-`begin-finalization` creates final HTML, JSON, final registry, baseline document, baseline registry, and updated state in one transaction. Existing mismatching final artifacts are not overwritten. Final mode freezes content, structure, IDs/types, data, references, and registry; only geometry, presentation style, theme/background, and z-order may change.
+`begin-finalization` creates final HTML, JSON, final registry, baseline document, baseline registry, and updated state in one transaction. Existing mismatching final artifacts are not overwritten by this ordinary route. After a final/complete deck is reopened for content work and the revised authoring set receives fresh whole-deck approval, `restart-finalization-from-authoring --confirm ARCHIVE-AND-RESTART-FINALIZATION` archives the complete old final HTML/JSON/registry, both baselines, workflow snapshot, and a revision manifest under `revisions/final-restarts/restart-NNNNNN/`, then installs the new final/baselines and pending final approval in one transaction. The final editor must be stopped so the union writer lease can be acquired. The conversational approved-content route performs this archival restart when it detects an older complete final; generated remains unchanged. Final mode freezes content, structure, IDs/types, data, references, and registry; only geometry, presentation style, theme/background, and z-order may change.
 
 Stop the final Work editor before `approve-final`; its lifetime writer lease deliberately prevents approval from racing a save. Final approval binds the document revision, final HTML byte revision, final registry revision, and runtime fingerprint. `complete` recomputes all four and refuses stale approval. Editing a completed or already-approved deck requires `reopen-finalization`, which validates the current bundle, returns to `bento_finalization`, and clears the old approval before any write.
 

@@ -14,6 +14,8 @@ The writer obtains an OS-level artifact-set lease and a short transaction lock, 
 
 Authoring revision history uses a separate four-artifact transaction for backup HTML, JSON, registry, and a complete manifest written last. The manifest fixes each filename and byte revision plus the document and registry revisions. Number allocation and backup creation run under the authoring writer lease and in-process storage lock. Revert ignores incomplete or mismatched sets; complete legacy three-file backups receive a validated manifest before use.
 
+A content-revision restart of finalization is one wider transaction. It copies the complete prior final HTML/JSON/registry, document/registry baselines, and workflow snapshot into a numbered archive with a byte-revision manifest while installing the newly approved authoring snapshot as final, rebuilding both baselines, updating state, and invalidating final approval. One union writer lease spans the authoring inputs, old final evidence, archive destinations, final outputs, baselines, and `deck.yaml`; any overlapping editor or offline writer makes the operation refuse before mutation. Recovery therefore exposes either the complete old state or the complete archived/new state, never a mixed final.
+
 The operation report is post-commit evidence. If only report writing fails, the journal becomes `report_failed`, the validated new artifacts remain, and the command returns a warning/error. Recovery retries the report and then completes the journal; it does not roll back a sound commit.
 
 ## Recovery

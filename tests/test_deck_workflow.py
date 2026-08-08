@@ -13,12 +13,13 @@ from unittest import mock
 
 import yaml
 
-from bento_converter.artifact_transaction import ArtifactLeaseConflict
+from bento_converter.artifact_transaction import ArtifactLeaseConflict, WriterLease
 from bento_converter.errors import ValidationError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, serialize_bento_doc
 from bento_converter.work_editor_storage import WorkEditorStorage
 from scripts.deck_workflow import (
     WorkflowError,
+    _normalize_handoff,
     atomic_write_state,
     command_approve_chapter,
     command_approve_content,
@@ -37,6 +38,7 @@ from scripts.deck_workflow import (
     command_migrate,
     command_prepare_conversion,
     command_reset_authoring_from_html,
+    command_restart_finalization_from_authoring,
     command_reopen_finalization,
     command_resume,
     command_set_project,
@@ -82,6 +84,7 @@ class ProjectMetadataCommandTests(unittest.TestCase):
     def set_stage(self, stage: str, status: str, source: str) -> None:
         state = self.state()
         state["workflow"].update(stage=stage, status=status, owner="work", sourceOfTruth=source)
+        _normalize_handoff(state)
         atomic_write_state(self.root, state)
 
     def test_set_project_updates_only_metadata_in_initialized(self) -> None:
@@ -290,6 +293,12 @@ class DeckWorkflowTests(unittest.TestCase):
         state = self.state()
         state["outputs"]["generatedJson"] = "output/not-the-generated-sidecar.json"
         with self.assertRaisesRegex(WorkflowError, "sidecar path"):
+            validate_state(self.root, state)
+        state = yaml.safe_load(
+            (ROOT / "tests/fixtures/deck_v2.initialized.yaml").read_text(encoding="utf-8")
+        )
+        state["handoff"]["readyForBentoAuthoring"] = True
+        with self.assertRaisesRegex(WorkflowError, "handoff flags do not match"):
             validate_state(self.root, state)
 
     def test_blocked_state_records_machine_readable_reason(self) -> None:
@@ -525,6 +534,119 @@ class DeckWorkflowTests(unittest.TestCase):
         ]
         final_journal = next(item for item in journals if item["operation"] == "authoring-to-final-initialize")
         self.assertEqual(len(final_journal["artifacts"]), 6)
+
+    def test_content_revision_archives_complete_old_final_and_restarts_transactionally(self) -> None:
+        parsed = parser().parse_args([
+            "--root", str(self.root), "restart-finalization-from-authoring",
+            "--confirm", "ARCHIVE-AND-RESTART-FINALIZATION",
+        ])
+        self.assertEqual(parsed.command, "restart-finalization-from-authoring")
+        state = self.ready_for_conversion()
+        command_migrate(self.root, state, dry_run=False, report_path=None)
+        self.prepare_output_bundle(self.state(), existing_final=False)
+        command_mark_converted(self.root, self.state())
+        command_begin_authoring(self.root, self.state())
+        command_begin_content_review(self.root, self.state())
+        command_approve_content(self.root, self.state())
+        command_begin_finalization(self.root, self.state())
+        finalized = self.state()
+        final_paths = {
+            field: self.root / finalized["outputs"][field]
+            for field in ("finalHtml", "finalJson", "finalRegistry")
+        }
+        baseline = finalized["validation"]["finalBaseline"]
+        old_payloads = {
+            **{field: path.read_bytes() for field, path in final_paths.items()},
+            "baselineDocument": (self.root / baseline["documentPath"]).read_bytes(),
+            "baselineRegistry": (self.root / baseline["registryPath"]).read_bytes(),
+        }
+        generated_before = {
+            field: (self.root / finalized["outputs"][field]).read_bytes()
+            for field in ("generatedHtml", "generatedJson", "generatedRegistry")
+        }
+
+        revised = copy.deepcopy(finalized)
+        revised["approvals"]["bentoContent"] = {
+            "status": "pending", "documentRevision": None, "registryRevision": None,
+            "approvalDigest": None, "approvedAt": None,
+        }
+        revised["approvals"]["finalBento"] = {
+            "status": "pending", "documentRevision": None, "htmlRevision": None,
+            "registryRevision": None, "runtimeFingerprint": None, "approvedAt": None,
+        }
+        revised["validation"].update(finalStatus="pending", checkedAt=None)
+        revised["workflow"].update(
+            stage="bento_authoring", status="in_progress", owner="work",
+            sourceOfTruth="authoring", currentChapter=None, currentSection=None,
+        )
+        _normalize_handoff(revised)
+        self.write_state(revised)
+        storage = authoring_storage(self.root, self.state())
+        status = storage.status()
+        html = load_html(storage.target)
+        document = extract_bento_doc(html)
+        next(
+            element for slide in document["slides"] for element in slide["elements"]
+            if element["id"] == "slide-1-title"
+        )["html"] = "Revised approved content"
+        storage.save_serialized(
+            embed_bento_doc(html, document),
+            base_document_revision=status["documentRevision"],
+            base_registry_revision=status["registryRevision"],
+        )
+        command_begin_content_review(self.root, self.state())
+        command_approve_content(self.root, self.state())
+
+        with self.assertRaisesRegex(WorkflowError, "ARCHIVE-AND-RESTART"):
+            command_restart_finalization_from_authoring(
+                self.root, self.state(), confirmation="wrong",
+            )
+        with self.assertRaisesRegex(WorkflowError, "restart-finalization-from-authoring"):
+            command_begin_finalization(self.root, self.state())
+        for field, path in final_paths.items():
+            self.assertEqual(path.read_bytes(), old_payloads[field])
+
+        editor_lease = WriterLease(self.root, final_paths.values())
+        editor_lease.acquire()
+        try:
+            with self.assertRaises(ArtifactLeaseConflict):
+                command_restart_finalization_from_authoring(
+                    self.root, self.state(), confirmation="ARCHIVE-AND-RESTART-FINALIZATION",
+                )
+        finally:
+            editor_lease.release()
+        for field, path in final_paths.items():
+            self.assertEqual(path.read_bytes(), old_payloads[field])
+
+        command_restart_finalization_from_authoring(
+            self.root, self.state(), confirmation="ARCHIVE-AND-RESTART-FINALIZATION",
+        )
+        restarted = self.state()
+        self.assertEqual(restarted["workflow"]["stage"], "bento_finalization")
+        self.assertEqual(restarted["handoff"], {
+            "readyForCodex": False, "readyForBentoAuthoring": False,
+            "readyForContentReview": False, "readyForFinalEditing": True,
+        })
+        self.assertEqual(
+            extract_bento_doc(load_html(final_paths["finalHtml"])), document,
+        )
+        for field, payload in generated_before.items():
+            self.assertEqual((self.root / restarted["outputs"][field]).read_bytes(), payload)
+        manifests = list((self.root / "output/revisions/final-restarts").glob("restart-*/manifest.json"))
+        self.assertEqual(len(manifests), 1)
+        manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+        archive = manifests[0].parent
+        self.assertEqual((archive / "final.bento.html").read_bytes(), old_payloads["finalHtml"])
+        self.assertEqual((archive / "final.bento.json").read_bytes(), old_payloads["finalJson"])
+        self.assertEqual((archive / "final.registry.json").read_bytes(), old_payloads["finalRegistry"])
+        self.assertEqual((archive / "baseline.bento.json").read_bytes(), old_payloads["baselineDocument"])
+        self.assertEqual((archive / "baseline.registry.json").read_bytes(), old_payloads["baselineRegistry"])
+        self.assertEqual(manifest["format"], "bento/final-restart-archive/v1")
+        journals = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (self.root / "output/.bento-transactions/archive").rglob("*.json")
+        ]
+        self.assertIn("authoring-to-final-restart", {item["operation"] for item in journals})
 
     def test_v2_content_review_rejects_chart_without_registry_id(self) -> None:
         state = self.ready_for_conversion()

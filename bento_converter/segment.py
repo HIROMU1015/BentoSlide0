@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import Any, Iterable
 
-from .authoring_storage import validate_authoring_document, visible_document_text
+from .authoring_storage import REFERENCE_FIELDS, validate_authoring_document, visible_document_text
 from .errors import BentoConverterError
 from .registry_document import REGISTRY_COLLECTIONS, normalize_registry, registry_revision
 from .work_editor_storage import document_revision
@@ -57,6 +57,52 @@ def relationship_projection(slide: dict[str, Any]) -> list[dict[str, Any]]:
         if key in RELATIONSHIP_FIELDS:
             result.append({"path": path, "field": key, "value": value})
     return result
+
+
+def registry_dependency_closure(
+    value: Any, registry: dict[str, Any], *, strict: bool = True,
+) -> dict[str, set[str]]:
+    """Return registry definitions transitively required by a document fragment."""
+
+    normalized = normalize_registry(registry, unit_id=str(registry.get("unitId") or "deck"))
+    references = {collection: set() for collection in REFERENCE_FIELDS.values()}
+    references["sources"] = set()
+    visited = {collection: set() for collection in references}
+
+    def collect(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                collection = REFERENCE_FIELDS.get(key)
+                if collection and isinstance(child, str) and child:
+                    references[collection].add(child)
+                if key == "sourceId" and isinstance(child, str) and child:
+                    references["sources"].add(child)
+                collect(child)
+        elif isinstance(item, list):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    while True:
+        pending = {
+            collection: sorted(references[collection] - visited[collection])
+            for collection in references
+        }
+        if not any(pending.values()):
+            break
+        for collection, identifiers in pending.items():
+            definitions = normalized.get(collection, {})
+            for identifier in identifiers:
+                visited[collection].add(identifier)
+                definition = definitions.get(identifier)
+                if definition is None:
+                    if strict:
+                        raise BentoConverterError(
+                            f"Document fragment references missing registry definition: {collection}.{identifier}"
+                        )
+                    continue
+                collect(definition)
+    return visited
 
 
 def _merge_registry(current: dict[str, Any], segment: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -189,12 +235,12 @@ def _external_removed_references(
     return references
 
 
-def _registry_without_replaced_protection(
+def _registry_without_replaced_section(
     registry: dict[str, Any], *, current: dict[str, Any], target_slide_ids: set[str],
-) -> tuple[dict[str, Any], dict[str, list[str]]]:
-    """Remove protection owned only by slides that a section replacement removes."""
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Remove target-local definitions/protection before merging a section replacement."""
 
-    prepared = copy.deepcopy(registry)
+    prepared = copy.deepcopy(normalize_registry(registry, unit_id=str(registry.get("unitId") or "deck")))
     target_slides = [
         slide for slide in current.get("slides", [])
         if isinstance(slide, dict) and slide.get("id") in target_slide_ids
@@ -204,6 +250,18 @@ def _registry_without_replaced_protection(
         slide for slide in remaining_document.get("slides", [])
         if not isinstance(slide, dict) or slide.get("id") not in target_slide_ids
     ]
+    target_dependencies = registry_dependency_closure(target_slides, prepared)
+    remaining_dependencies = registry_dependency_closure(remaining_document["slides"], prepared)
+    removed_definitions: dict[str, list[str]] = {}
+    for collection in ("sources", *REGISTRY_COLLECTIONS):
+        local = sorted(
+            target_dependencies.get(collection, set())
+            - remaining_dependencies.get(collection, set())
+        )
+        destination = prepared.setdefault(collection, {})
+        removed_definitions[collection] = [identifier for identifier in local if identifier in destination]
+        for identifier in removed_definitions[collection]:
+            del destination[identifier]
     target_element_ids = {
         str(element["id"])
         for slide in target_slides
@@ -212,13 +270,18 @@ def _registry_without_replaced_protection(
     }
     remaining_text = visible_document_text(remaining_document)
     protected = prepared.setdefault("protected", {})
-    removed = {"slideIds": [], "elementIds": [], "requiredText": []}
+    removed: dict[str, Any] = {
+        "definitions": removed_definitions,
+        "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+    }
     for field, owned in (("slideIds", target_slide_ids), ("elementIds", target_element_ids)):
         values = list(protected.get(field, []))
-        removed[field] = sorted(str(value) for value in values if value in owned)
+        removed["protected"][field] = sorted(str(value) for value in values if value in owned)
         protected[field] = [value for value in values if value not in owned]
     required = list(protected.get("requiredText", []))
-    removed["requiredText"] = sorted(str(value) for value in required if value not in remaining_text)
+    removed["protected"]["requiredText"] = sorted(
+        str(value) for value in required if value not in remaining_text
+    )
     protected["requiredText"] = [value for value in required if value in remaining_text]
     return prepared, removed
 
@@ -300,13 +363,19 @@ def merge_segment(
         current["slides"][indexes[0]:indexes[-1] + 1] = segment_slides
         replaced_ids.update(targets)
     registry_base = current_registry
-    removed_protection = {"slideIds": [], "elementIds": [], "requiredText": []}
+    removed_section_registry: dict[str, Any] = {
+        "definitions": {collection: [] for collection in ("sources", *REGISTRY_COLLECTIONS)},
+        "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+    }
     if normalized_operation == "replace-section":
-        registry_base, removed_protection = _registry_without_replaced_protection(
+        registry_base, removed_section_registry = _registry_without_replaced_section(
             current_registry, current=current_document, target_slide_ids=replaced_ids,
         )
     merged_registry, registry_changes = _merge_registry(registry_base, segment_registry)
-    registry_changes["protectedRemoved"] = removed_protection
+    # Preserve the existing report field for callers while reporting the new
+    # target-local definition pruning separately.
+    registry_changes["protectedRemoved"] = removed_section_registry["protected"]
+    registry_changes["definitionsRemoved"] = removed_section_registry["definitions"]
     references = _validate_references(current)
     validate_authoring_document(
         current, current=current_document, registry=merged_registry,

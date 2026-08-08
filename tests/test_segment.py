@@ -166,6 +166,60 @@ class SegmentMergeTests(unittest.TestCase):
                 operation="replace-section", target_slide_ids=targets,
             )
 
+    def test_section_replacement_updates_target_local_registry_definition_and_source(self) -> None:
+        target = self.document["slides"][1]["id"]
+        replacement = copy.deepcopy(self.document["slides"][1])
+        equation = next(element for element in replacement["elements"] if element.get("equationId"))
+        equation["latexSource"] = "H = H_0 + \\beta H_2"
+        current_registry = registry()
+        current_registry["sources"]["paper"] = {"path": "paper.md", "locator": "eq.1"}
+        current_registry["equations"]["hamiltonian_split"]["provenance"] = {"sourceId": "paper"}
+        incoming_registry = copy.deepcopy(current_registry)
+        incoming_registry["equations"]["hamiltonian_split"]["latex"] = equation["latexSource"]
+        incoming_registry["sources"]["paper"]["locator"] = "eq.2"
+
+        merged, merged_registry, report = merge_segment(
+            self.document, current_registry,
+            {**copy.deepcopy(self.document), "slides": [replacement]}, incoming_registry,
+            operation="replace-section", target_slide_ids=[target],
+        )
+        self.assertEqual(merged_registry["equations"]["hamiltonian_split"]["latex"], equation["latexSource"])
+        self.assertEqual(merged_registry["sources"]["paper"]["locator"], "eq.2")
+        self.assertEqual(report["registry"]["definitionsRemoved"]["equations"], ["hamiltonian_split"])
+        self.assertEqual([slide["id"] for slide in merged["slides"]], [slide["id"] for slide in self.document["slides"]])
+
+    def test_section_replacement_rejects_shared_registry_change_and_prunes_unused_local_definition(self) -> None:
+        target = self.document["slides"][1]["id"]
+        shared_document = copy.deepcopy(self.document)
+        shared_element = shared_document["slides"][0]["elements"][0]
+        shared_element["equationId"] = "hamiltonian_split"
+        shared_element["latexSource"] = registry()["equations"]["hamiltonian_split"]["latex"]
+        replacement = copy.deepcopy(shared_document["slides"][1])
+        equation = next(element for element in replacement["elements"] if element.get("equationId"))
+        equation["latexSource"] = "H = H_0 + \\beta H_2"
+        changed_registry = registry()
+        changed_registry["equations"]["hamiltonian_split"]["latex"] = equation["latexSource"]
+        with self.assertRaisesRegex(BentoConverterError, "conflicts with existing equations"):
+            merge_segment(
+                shared_document, registry(),
+                {**copy.deepcopy(shared_document), "slides": [replacement]}, changed_registry,
+                operation="replace-section", target_slide_ids=[target],
+            )
+
+        no_equation = copy.deepcopy(self.document["slides"][1])
+        for element in no_equation["elements"]:
+            element.pop("equationId", None)
+            element.pop("latexSource", None)
+        incoming_registry = registry()
+        incoming_registry["equations"] = {}
+        _, pruned_registry, report = merge_segment(
+            self.document, registry(),
+            {**copy.deepcopy(self.document), "slides": [no_equation]}, incoming_registry,
+            operation="replace-section", target_slide_ids=[target],
+        )
+        self.assertNotIn("hamiltonian_split", pruned_registry["equations"])
+        self.assertEqual(report["registry"]["definitionsRemoved"]["equations"], ["hamiltonian_split"])
+
 
 if __name__ == "__main__":
     unittest.main()

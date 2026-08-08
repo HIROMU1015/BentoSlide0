@@ -20,11 +20,12 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 from bento_converter.artifact_transaction import (
     ArtifactTransactionStore,
+    WriterLease,
+    bytes_revision,
     file_revision,
     recover_repository_transactions,
 )
 from bento_converter.authoring_storage import (
-    REFERENCE_FIELDS,
     AuthoringArtifactStorage,
     validate_authoring_document,
     visible_document_text,
@@ -43,7 +44,12 @@ from bento_converter.registry_document import (
 )
 from bento_converter.section_approval import SectionApprovalEvidence, compute_section_approval_evidence
 from bento_converter.section_candidate import write_section_candidate
-from bento_converter.segment import canonical_projection_hash, merge_segment, slide_hashes
+from bento_converter.segment import (
+    canonical_projection_hash,
+    merge_segment,
+    registry_dependency_closure,
+    slide_hashes,
+)
 from bento_converter.work_editor_storage import (
     WorkEditorStorage,
     document_revision,
@@ -104,6 +110,26 @@ LEGACY_STAGE_SOURCE = {
 
 class WorkflowError(RuntimeError):
     """A requested workflow operation is unsafe or invalid."""
+
+
+def _expected_handoff(state: dict[str, Any], *, stage: str | None = None) -> dict[str, bool]:
+    """Derive schema-v2 handoff flags from the effective workflow stage."""
+
+    effective = stage or state["workflow"]["stage"]
+    if effective == "blocked":
+        blocked_from = state["workflow"].get("blockedFrom")
+        effective = blocked_from.get("stage") if isinstance(blocked_from, dict) else "initialized"
+    return {
+        "readyForCodex": effective in {"ready_for_conversion", "converting"},
+        "readyForBentoAuthoring": effective in {"bento_validation", "bento_authoring"},
+        "readyForContentReview": effective == "content_review",
+        "readyForFinalEditing": effective == "bento_finalization",
+    }
+
+
+def _normalize_handoff(state: dict[str, Any], *, stage: str | None = None) -> None:
+    if state.get("schemaVersion") == 2:
+        state["handoff"].update(_expected_handoff(state, stage=stage))
 
 
 class ChapterHtmlParser(HTMLParser):
@@ -348,6 +374,13 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                 raise WorkflowError(f"workflow.blockedFrom.currentSection is not registered: {previous_section}")
     elif workflow["blockingReason"] is not None or blocked_from is not None:
         raise WorkflowError("workflow.blockingReason and blockedFrom must be null outside the blocked stage")
+    if version == 2:
+        expected_handoff = _expected_handoff(state)
+        if state["handoff"] != expected_handoff:
+            raise WorkflowError(
+                f"handoff flags do not match workflow stage {stage!r}: "
+                f"expected={expected_handoff}, actual={state['handoff']}"
+            )
     for field in ("request",):
         _repo_path(root, state["project"][field], field=f"project.{field}")
     if state["project"]["primarySource"]:
@@ -535,6 +568,7 @@ def _transition(state: dict[str, Any], stage: str, status: str, *, current: str 
         workflow["currentChapter"] = current
     workflow["blockingReason"] = None
     workflow["blockedFrom"] = None
+    _normalize_handoff(state, stage=stage)
 
 
 def _require_stage(state: dict[str, Any], *allowed: str) -> None:
@@ -1550,7 +1584,16 @@ def command_advance(
             return
         raise WorkflowError("The current HTML still needs explicit approval")
     if stage == "content_review" and state["approvals"]["bentoContent"]["status"] == "approved":
-        command_begin_finalization(root, state)
+        if state.get("schemaVersion") == 2 and state["validation"].get("finalBaseline") is not None:
+            _initialize_v2_finalization(
+                root, state, archive_existing=True, require_archive=False,
+            )
+            append_work_log(
+                root,
+                "Re-entered finalization from approved authoring content with safe archive when required",
+            )
+        else:
+            command_begin_finalization(root, state)
         return
     if stage == "bento_finalization" and _final_approval_status(state["approvals"]["finalBento"]) == "approved":
         command_complete(root, state)
@@ -1785,58 +1828,27 @@ def _section_digest(
         raise WorkflowError("Authoring Bento does not contain the section slides in their registered order")
 
     normalized = normalize_registry(registry, unit_id=str(registry.get("unitId") or "deck"))
-    referenced: dict[str, set[str]] = {
-        collection: set() for collection in REFERENCE_FIELDS.values()
-    }
-    source_ids: set[str] = set()
-
-    def collect(value: Any) -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                collection = REFERENCE_FIELDS.get(key)
-                if collection and isinstance(item, str) and item:
-                    referenced[collection].add(item)
-                if key == "sourceId" and isinstance(item, str) and item:
-                    source_ids.add(item)
-                collect(item)
-        elif isinstance(value, list):
-            for item in value:
-                collect(item)
-
-    collect(projection)
+    try:
+        dependencies = registry_dependency_closure(projection, normalized)
+    except BentoConverterError as exc:
+        raise WorkflowError(str(exc)) from exc
     registry_projection: dict[str, Any] = {}
-    visited: dict[str, set[str]] = {collection: set() for collection in referenced}
-    while any(referenced[collection] - visited[collection] for collection in referenced):
-        for collection in referenced:
-            pending = sorted(referenced[collection] - visited[collection])
-            definitions = normalized.get(collection, {})
-            selected: dict[str, Any] = registry_projection.setdefault(collection, {})
-            for identifier in pending:
-                if identifier not in definitions:
-                    raise WorkflowError(
-                        f"Section references missing registry definition: {collection}.{identifier}"
-                    )
-                definition = copy.deepcopy(definitions[identifier])
-                selected[identifier] = definition
-                visited[collection].add(identifier)
-                collect(definition)
-
-    selected_sources: dict[str, Any] = {}
-    pending_sources = set(source_ids)
-    while pending_sources:
-        identifier = sorted(pending_sources)[0]
-        pending_sources.remove(identifier)
-        if identifier in selected_sources:
-            continue
-        sources = normalized.get("sources", {})
-        if identifier not in sources:
-            raise WorkflowError(f"Section references missing registry source: {identifier}")
-        definition = copy.deepcopy(sources[identifier])
-        selected_sources[identifier] = definition
-        before = set(source_ids)
-        collect(definition)
-        pending_sources.update(source_ids - before)
-    registry_projection["sources"] = selected_sources
+    definition_collections = [
+        collection for collection in dependencies if collection != "sources"
+    ]
+    # Keep the established digest shape: when a section references any typed
+    # definition all typed collections are projected (including empty ones),
+    # while a section with only direct source provenance projects sources only.
+    if any(dependencies[collection] for collection in definition_collections):
+        for collection in definition_collections:
+            registry_projection[collection] = {
+                identifier: copy.deepcopy(normalized.get(collection, {})[identifier])
+                for identifier in sorted(dependencies[collection])
+            }
+    registry_projection["sources"] = {
+        identifier: copy.deepcopy(normalized.get("sources", {})[identifier])
+        for identifier in sorted(dependencies["sources"])
+    }
 
     section_document = {"title": "", "slides": projection}
     section_text = visible_document_text(section_document)
@@ -2544,9 +2556,106 @@ def command_approve_content(root: Path, state: dict[str, Any]) -> None:
     append_work_log(root, "Approved Bento authoring content at fixed document and registry revisions")
 
 
-def _initialize_v2_finalization(root: Path, state: dict[str, Any]) -> None:
+def _next_final_restart_archive(final_html: Path) -> tuple[Path, dict[str, Path]]:
+    archive_root = final_html.parent / "revisions/final-restarts"
+    existing = []
+    if archive_root.is_dir():
+        for path in archive_root.glob("restart-*"):
+            match = re.fullmatch(r"restart-(\d{6})", path.name) if path.is_dir() else None
+            if match:
+                existing.append(int(match.group(1)))
+    directory = archive_root / f"restart-{max(existing, default=0) + 1:06d}"
+    return directory, {
+        "finalHtml": directory / "final.bento.html",
+        "finalJson": directory / "final.bento.json",
+        "finalRegistry": directory / "final.registry.json",
+        "baselineDocument": directory / "baseline.bento.json",
+        "baselineRegistry": directory / "baseline.registry.json",
+        "workflowState": directory / "deck.yaml",
+        "manifest": directory / "manifest.json",
+    }
+
+
+def _final_restart_archive_payloads(
+    root: Path, state: dict[str, Any], *, sources: dict[str, Path], destinations: dict[str, Path],
+) -> tuple[dict[Path, bytes], dict[str, Any]]:
+    source_payloads = {role: path.read_bytes() for role, path in sources.items()}
+    archived_payloads = {
+        destinations[role]: payload for role, payload in source_payloads.items()
+    }
+    final_html = source_payloads["finalHtml"].decode("utf-8-sig")
+    final_document = extract_bento_doc(final_html)
+    final_registry = json.loads(source_payloads["finalRegistry"].decode("utf-8-sig"))
+    manifest = {
+        "format": "bento/final-restart-archive/v1",
+        "createdAt": utc_now(),
+        "reason": "approved-authoring-content-revision",
+        "previous": {
+            "documentRevision": document_revision(final_document),
+            "registryRevision": registry_revision(final_registry),
+            "runtimeFingerprint": runtime_fingerprint(final_html),
+            "baseline": copy.deepcopy(state["validation"].get("finalBaseline")),
+        },
+        "files": {
+            role: {
+                "source": sources[role].relative_to(root).as_posix(),
+                "archive": destinations[role].relative_to(root).as_posix(),
+                "revision": bytes_revision(payload),
+            }
+            for role, payload in source_payloads.items()
+        },
+    }
+    manifest_payload = (
+        json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    archived_payloads[destinations["manifest"]] = manifest_payload
+    return archived_payloads, manifest
+
+
+def _validate_final_restart_archive(root: Path, manifest_path: Path) -> None:
+    manifest = _read_json(manifest_path, label="final restart archive manifest")
+    if manifest.get("format") != "bento/final-restart-archive/v1":
+        raise WorkflowError("Final restart archive manifest has an unsupported format")
+    for role, entry in manifest.get("files", {}).items():
+        if not isinstance(entry, dict):
+            raise WorkflowError(f"Final restart archive entry is invalid: {role}")
+        path = _repo_path(root, entry.get("archive"), field=f"finalRestartArchive.files.{role}.archive")
+        if file_revision(path) != entry.get("revision"):
+            raise WorkflowError(f"Final restart archive revision mismatch: {role}")
+
+
+def _initialize_v2_finalization(
+    root: Path, state: dict[str, Any], *, archive_existing: bool = False,
+    require_archive: bool = False,
+) -> None:
+    recover_repository_transactions(root)
+    outputs = state["outputs"]
+    final_html = _repo_path(root, outputs["finalHtml"], field="outputs.finalHtml")
+    final_json = _repo_path(root, outputs["finalJson"], field="outputs.finalJson")
+    final_registry = _repo_path(root, outputs["finalRegistry"], field="outputs.finalRegistry")
+    baseline_document = _final_baseline_path(root, state)
+    baseline_registry = _final_registry_baseline_path(root, state)
+    authoring_html_path = _repo_path(root, outputs["authoringHtml"], field="outputs.authoringHtml")
+    authoring_json_path = _repo_path(root, outputs["authoringJson"], field="outputs.authoringJson")
+    authoring_registry_path = _repo_path(root, outputs["authoringRegistry"], field="outputs.authoringRegistry")
+    if not all(path.is_file() for path in (authoring_html_path, authoring_json_path, authoring_registry_path)):
+        raise WorkflowError("Authoring artifacts must exist before final initialization")
+    # Constructing the storage performs its own recovery under the authoring
+    # artifact lease. Do that before taking the wider restart lease; once the
+    # union lease is held, its read-only snapshot methods are protected from
+    # concurrent writers without trying to acquire a conflicting second lease.
     storage = authoring_storage(root, state)
-    storage.acquire_writer_lease()
+    archive_directory, archive_destinations = _next_final_restart_archive(final_html)
+    state_path = root / STATE_RELATIVE
+    lease = WriterLease(
+        root,
+        (
+            authoring_html_path, authoring_json_path, authoring_registry_path, state_path,
+            final_html, final_json, final_registry, baseline_document, baseline_registry,
+            *archive_destinations.values(),
+        ),
+    )
+    lease.acquire()
     try:
         authoring_html, authoring_document, authoring_registry = storage.content_review_snapshot()
         _require_rolling_sections_accepted(state, authoring_document, authoring_registry)
@@ -2566,12 +2675,6 @@ def _initialize_v2_finalization(root: Path, state: dict[str, Any]) -> None:
             base_registry_revision=registry_revision_value,
             registry=authoring_registry,
         )
-        outputs = state["outputs"]
-        final_html = _repo_path(root, outputs["finalHtml"], field="outputs.finalHtml")
-        final_json = _repo_path(root, outputs["finalJson"], field="outputs.finalJson")
-        final_registry = _repo_path(root, outputs["finalRegistry"], field="outputs.finalRegistry")
-        baseline_document = _final_baseline_path(root, state)
-        baseline_registry = _final_registry_baseline_path(root, state)
         intended_document_payload = (serialize_bento_doc(authoring_document) + "\n").encode("utf-8")
         intended_registry_payload = (
             json.dumps(authoring_registry, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
@@ -2586,10 +2689,34 @@ def _initialize_v2_finalization(root: Path, state: dict[str, Any]) -> None:
         existing = [path.is_file() for path in payloads]
         if any(existing) and not all(existing):
             raise WorkflowError("Final initialization artifacts are incomplete; recover or remove the incomplete set explicitly")
+        archive_payloads: dict[Path, bytes] = {}
+        archive_manifest: dict[str, Any] | None = None
+        archive_sources = {
+            "finalHtml": final_html,
+            "finalJson": final_json,
+            "finalRegistry": final_registry,
+            "baselineDocument": baseline_document,
+            "baselineRegistry": baseline_registry,
+            "workflowState": state_path,
+        }
         if all(existing):
             mismatched = [path for path, payload in payloads.items() if path.read_bytes() != payload]
             if mismatched:
-                raise WorkflowError("Existing final artifacts differ from approved authoring content and will not be overwritten")
+                if not archive_existing:
+                    raise WorkflowError(
+                        "Existing final artifacts differ from approved authoring content; "
+                        "use restart-finalization-from-authoring after explicit content approval"
+                    )
+                validate_output_bundle(root, state, require_final=True)
+                archive_payloads, archive_manifest = _final_restart_archive_payloads(
+                    root, state, sources=archive_sources, destinations=archive_destinations,
+                )
+            elif archive_existing and require_archive:
+                raise WorkflowError(
+                    "Existing final artifacts already match approved authoring content; use begin-finalization"
+                )
+        elif archive_existing and require_archive:
+            raise WorkflowError("Final restart requires one complete existing final artifact set")
 
         next_state = copy.deepcopy(state)
         next_state["validation"]["finalBaseline"] = {
@@ -2599,19 +2726,18 @@ def _initialize_v2_finalization(root: Path, state: dict[str, Any]) -> None:
             "registryRevision": registry_revision_value,
             "protectedContentFingerprint": protected_content_fingerprint(authoring_document),
         }
-        next_state["handoff"]["readyForBentoAuthoring"] = False
-        next_state["handoff"]["readyForContentReview"] = False
-        next_state["handoff"]["readyForFinalEditing"] = True
         next_state["approvals"]["finalBento"] = _pending_final_approval()
         next_state["validation"]["finalStatus"] = "pending"
         next_state["validation"]["checkedAt"] = None
         _transition(next_state, "bento_finalization", "in_progress")
         state_payload = yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8")
-        state_path = root / STATE_RELATIVE
         base_state_payload = state_path.read_bytes()
-        transaction_payloads = {**payloads, state_path: state_payload}
+        base_final_revisions = {
+            path: file_revision(path) for path in archive_sources.values()
+        }
+        transaction_payloads = {**archive_payloads, **payloads, state_path: state_payload}
         transaction = ArtifactTransactionStore(
-            root, transaction_payloads, inherited_writer_lease=storage.transactions.writer_lease,
+            root, transaction_payloads, inherited_writer_lease=lease,
         )
 
         def validate_base() -> None:
@@ -2623,34 +2749,50 @@ def _initialize_v2_finalization(root: Path, state: dict[str, Any]) -> None:
                 raise WorkflowError("Authoring revisions changed before final initialization")
             if state_path.read_bytes() != base_state_payload:
                 raise WorkflowError("deck.yaml changed before final initialization")
+            if archive_payloads and any(
+                file_revision(path) != revision for path, revision in base_final_revisions.items()
+            ):
+                raise WorkflowError("Existing final artifacts changed before restart archival")
 
         def validate_committed() -> None:
             installed_state = yaml.safe_load(state_path.read_text(encoding="utf-8-sig"))
             validate_state(root, installed_state)
             validate_output_bundle(root, installed_state, require_final=True)
+            if archive_payloads:
+                _validate_final_restart_archive(root, archive_destinations["manifest"])
 
+        operation = (
+            "authoring-to-final-restart" if archive_payloads else "authoring-to-final-initialize"
+        )
         transaction.commit(
             transaction_payloads,
-            operation="authoring-to-final-initialize",
+            operation=operation,
             base_document_revision=document_revision_value,
             base_registry_revision=registry_revision_value,
             target_document_revision=document_revision_value,
             target_registry_revision=registry_revision_value,
             validate_base=validate_base,
             validate_committed=validate_committed,
-            report_path=final_html.parent / "finalization-initialization-report.json",
+            report_path=final_html.parent / (
+                "finalization-restart-report.json"
+                if archive_payloads else "finalization-initialization-report.json"
+            ),
             report_payload={
-                "operation": "authoring-to-final-initialize",
+                "operation": operation,
                 "documentRevision": document_revision_value,
                 "registryRevision": registry_revision_value,
                 "approvalDigest": approval["approvalDigest"],
+                "archive": (
+                    archive_directory.relative_to(root).as_posix() if archive_payloads else None
+                ),
+                "previous": archive_manifest["previous"] if archive_manifest else None,
                 "validation": "pass",
             },
         )
         state.clear()
         state.update(next_state)
     finally:
-        storage.release_writer_lease()
+        lease.release()
 
 
 def command_begin_finalization(root: Path, state: dict[str, Any]) -> None:
@@ -2666,6 +2808,25 @@ def command_begin_finalization(root: Path, state: dict[str, Any]) -> None:
     _transition(state, "bento_finalization", "in_progress")
     atomic_write_state(root, state)
     append_work_log(root, "Handed the validated final Bento artifact to Work for layout finalization")
+
+
+def command_restart_finalization_from_authoring(
+    root: Path, state: dict[str, Any], *, confirmation: str,
+) -> None:
+    if confirmation != "ARCHIVE-AND-RESTART-FINALIZATION":
+        raise WorkflowError(
+            "Final restart requires --confirm ARCHIVE-AND-RESTART-FINALIZATION"
+        )
+    if state.get("schemaVersion") != 2:
+        raise WorkflowError("Final restart from authoring requires deck schema v2")
+    _require_stage(state, "content_review")
+    _initialize_v2_finalization(
+        root, state, archive_existing=True, require_archive=True,
+    )
+    append_work_log(
+        root,
+        "Archived the previous final artifact set and restarted finalization from approved authoring content",
+    )
 
 
 def command_approve_final(root: Path, state: dict[str, Any]) -> None:
@@ -2779,6 +2940,7 @@ def command_block(root: Path, state: dict[str, Any], owner: str, reason: str) ->
     if state.get("schemaVersion") == 2:
         workflow["blockedFrom"]["currentSection"] = workflow["currentSection"]
     workflow.update({"stage": "blocked", "status": "blocked", "owner": owner, "blockingReason": reason})
+    _normalize_handoff(state)
     atomic_write_state(root, state)
     append_work_log(root, f"Blocked ({owner}): {reason}")
 
@@ -2851,6 +3013,7 @@ def command_resume(root: Path, state: dict[str, Any]) -> None:
     state["workflow"].update(snapshot)
     state["workflow"]["blockingReason"] = None
     state["workflow"]["blockedFrom"] = None
+    _normalize_handoff(state)
     atomic_write_state(root, state)
     append_work_log(root, f"Resumed workflow at {snapshot['stage']}")
 
@@ -2914,6 +3077,8 @@ def parser() -> argparse.ArgumentParser:
     reset_authoring.add_argument("--browser-executable", type=Path)
     reset_authoring.add_argument("--skip-browser-check", action="store_true")
     commands.add_parser("begin-finalization")
+    restart_finalization = commands.add_parser("restart-finalization-from-authoring")
+    restart_finalization.add_argument("--confirm", required=True)
     commands.add_parser("approve-final")
     commands.add_parser("complete")
     commands.add_parser("reopen-finalization")
@@ -3019,6 +3184,10 @@ def run(args: argparse.Namespace) -> int:
         )
     elif command == "begin-finalization":
         command_begin_finalization(root, state)
+    elif command == "restart-finalization-from-authoring":
+        command_restart_finalization_from_authoring(
+            root, state, confirmation=args.confirm,
+        )
     elif command == "approve-final":
         command_approve_final(root, state)
     elif command == "complete":

@@ -14,6 +14,8 @@ For the rolling schema v2 route, authority is also tracked per section. `planned
 
 Content approval binds the exact authoring document and registry revisions. Any drift makes it pending before status, save, review, approval, finalization, segment, offline, or migration operations continue. Finalization snapshots only freshly approved authoring content—not mutable generated output.
 
+When approved authoring content supersedes an already existing final, the prior final and immutable baselines remain authoritative until a dedicated archival restart commits. That transaction preserves their exact bytes and revision manifest before installing the revised authoring snapshot as the new final/baseline authority. It never changes generated artifacts.
+
 Never convert into final. Rebuilding generated does not reset authoring/final or replace baselines. `--reset-final`, `--allow-content-edit`, and full HTML-to-authoring reset are explicit exceptional operations, never default routing.
 
 State changes use `scripts.deck_workflow`; multi-artifact state changes use the durable journal transaction. A blocked state preserves the full prior tuple for validated `resume`. Schema migration is idempotent and preserves late-stage final authority; it stops without modifying artifacts if required registry/baseline evidence is absent.

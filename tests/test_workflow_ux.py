@@ -14,6 +14,7 @@ from bento_converter.section_candidate import section_candidate
 from bento_converter.segment import merge_segment, slide_hashes
 from scripts.deck_workflow import (
     WorkflowError,
+    _normalize_handoff,
     atomic_write_state,
     command_approve_content,
     command_approve_current,
@@ -69,6 +70,15 @@ class WorkflowUxUnitTests(unittest.TestCase):
         changed_source = json.loads(json.dumps(registry, ensure_ascii=False))
         changed_source["sources"]["paper"]["locator"] = "eq.2"
         self.assertNotEqual(_section_digest(document, changed_source, [equation_slide["id"]]), baseline)
+
+        plain_slide = next(
+            slide for slide in document["slides"]
+            if not any(element.get("equationId") for element in slide.get("elements", []))
+        )
+        plain_baseline = _section_digest(document, registry, [plain_slide["id"]])
+        self.assertEqual(
+            _section_digest(document, unrelated, [plain_slide["id"]]), plain_baseline,
+        )
 
     def test_rolling_content_gate_requires_all_current_section_digests(self) -> None:
         document = extract_bento_doc(load_html(ROOT / "demo.bento.html"))
@@ -249,6 +259,7 @@ class RollingSectionBrowserTests(unittest.TestCase):
             "stage": "content_review", "status": "awaiting_approval",
             "owner": "work", "sourceOfTruth": "authoring",
         })
+        _normalize_handoff(premature)
         atomic_write_state(self.root, premature)
         with self.assertRaisesRegex(WorkflowError, "Every section must be accepted"):
             command_approve_content(self.root, load_state(self.root))
@@ -267,15 +278,27 @@ class RollingSectionBrowserTests(unittest.TestCase):
         command_finish_current_section(self.root, state)
         state = load_state(self.root)
         self.assertEqual(state["workflow"]["stage"], "content_review")
+        self.assertEqual(state["handoff"], {
+            "readyForCodex": False, "readyForBentoAuthoring": False,
+            "readyForContentReview": True, "readyForFinalEditing": False,
+        })
         self.assertTrue(all(entry["status"] == "accepted" for entry in state["sections"].values()))
         command_reopen_current_section(self.root, state, section_id="method", via="bento")
         state = load_state(self.root)
         self.assertEqual(state["workflow"]["stage"], "bento_authoring")
+        self.assertEqual(state["handoff"], {
+            "readyForCodex": False, "readyForBentoAuthoring": True,
+            "readyForContentReview": False, "readyForFinalEditing": False,
+        })
         self.assertEqual(state["sections"]["method"]["status"], "bento_authoring")
         command_finish_current_section(self.root, state)
         state = load_state(self.root)
         command_reopen_current_section(self.root, state, section_id="method", via="html")
         state = load_state(self.root)
+        self.assertEqual(state["handoff"], {
+            "readyForCodex": False, "readyForBentoAuthoring": False,
+            "readyForContentReview": False, "readyForFinalEditing": False,
+        })
         self.assertEqual(state["sections"]["method"]["bentoSlideIds"], ["method-1"])
         source = self.root / "deck/deck.preview.html"
         old = '''  <section class="slide" data-slide-id="method-1" data-section-id="method">
