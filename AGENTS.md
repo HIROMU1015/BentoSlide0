@@ -6,6 +6,7 @@ At the start of every task, read `START_HERE.md`, `deck.yaml`, and `python -m sc
 
 - Infer routine paths, section/chapter selection, state transitions, logs, validation, preview, and conversion commands from the repository. Do not ask the user to repeat mechanical instructions.
 - Use the manifest-listed primary sources as factual authority. Do not invent claims, conditions, symbols, signs, subscripts, assumptions, numbers, comparisons, or generalizations.
+- Evaluate every slide for whether a diagram improves understanding. Prefer editable native text/shape/connector diagrams; distinguish source-original, source-derived, and generated visuals through the registry. Never generate data, experimental/benchmark results, quantitative plots, or equations. Use the transactional visual-asset/PDF extraction route in `docs/visual-workflow.md`.
 - For schema v2 `single`/`imported` authoring, `deck/deck.preview.html` and `deck/deck.registry.json` are the pre-conversion visual/provenance source of truth. Migrated `modular` decks retain paired chapter files.
 - After conversion, generated artifacts are reproducible and read-only. During `bento_authoring`, authoring HTML/JSON/registry are authoritative. After content approval and final handoff, final `#bento-doc`, frozen final registry, and immutable baselines are authoritative.
 - Never write Bento HTML/JSON/registry directly. Use the revision-checked Work editor API or the common transaction/storage layer. Never expose a partially replaced artifact set.

@@ -95,7 +95,9 @@ SVG_FIELDS = {"asset", "markup"}
 MEDIA_FIELDS = {"kind", "src", "poster", "fit", "radius", "controls", "autoplay", "loop", "muted"}
 CHART_FIELDS = {"preset", "option"}
 TABLE_FIELDS = {"columns", "rows", "header", "style"}
-CONVERTER_EXTENSION_FIELDS = {"equationId", "latexSource"}
+CONVERTER_EXTENSION_FIELDS = {
+    "equationId", "latexSource", "assetId", "figureId", "chartId", "tableId",
+}
 SUPPORTED_TYPES = {"text", "shape", "image", "svg", "media", "chart", "table"}
 SHAPE_NAMES = {"rect", "ellipse", "triangle", "arrow", "line", "path"}
 

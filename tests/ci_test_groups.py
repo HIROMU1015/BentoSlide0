@@ -43,6 +43,7 @@ CLASS_GROUPS = {
     "tests.test_segment.SegmentMergeTests": "unit",
     "tests.test_validation.DesignValidationTests": "unit",
     "tests.test_visual_comparison.VisualComparisonTests": "unit",
+    "tests.test_visual_assets.VisualAssetTests": "unit",
     "tests.test_windows_launcher.WindowsLauncherTests": "windows",
     "tests.test_windows_workspace_launcher.WindowsWorkspaceLauncherTests": "windows",
     "tests.test_work_editor.WorkEditorTests": "unit",

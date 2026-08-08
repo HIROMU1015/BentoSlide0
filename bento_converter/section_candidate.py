@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from .errors import BentoConverterError
 from .registry_document import REGISTRY_COLLECTIONS, normalize_registry
 from .section_approval import REFERENCE_ATTRIBUTES, VOID_TAGS
+from .segment import registry_dependency_closure
 
 
 class Node:
@@ -63,6 +64,19 @@ def _walk(node: Node) -> Iterable[Node]:
     for child in node.children:
         if isinstance(child, Node):
             yield from _walk(child)
+
+
+def _source_ids(value: Any) -> set[str]:
+    result: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "sourceId" and isinstance(item, str) and item:
+                result.add(item)
+            result.update(_source_ids(item))
+    elif isinstance(value, list):
+        for item in value:
+            result.update(_source_ids(item))
+    return result
 
 
 def _serialize(node: Node | str) -> str:
@@ -118,16 +132,24 @@ def section_candidate(
     for definition in normalized.get("fonts", {}).values():
         if isinstance(definition, dict) and isinstance(definition.get("asset"), str):
             references.setdefault("assets", set()).add(definition["asset"])
+    seed_fields = {
+        "assets": "assetId", "fonts": "fontId", "equations": "equationId",
+        "figures": "figureId", "tables": "tableId", "charts": "chartId",
+    }
+    dependencies = registry_dependency_closure(
+        [{seed_fields[collection]: identifier} for collection, ids in references.items() for identifier in ids],
+        normalized,
+    )
+    for collection in references:
+        references[collection].update(dependencies.get(collection, set()))
     projected = copy.deepcopy(normalized)
-    source_ids: set[str] = set()
     for collection in REGISTRY_COLLECTIONS:
         wanted = references.get(collection, set())
         definitions = normalized.get(collection, {})
         projected[collection] = {key: copy.deepcopy(definitions[key]) for key in sorted(wanted) if key in definitions}
-        for definition in projected[collection].values():
-            provenance = definition.get("provenance", {}) if isinstance(definition, dict) else {}
-            if isinstance(provenance, dict) and isinstance(provenance.get("sourceId"), str):
-                source_ids.add(provenance["sourceId"])
+    source_ids = set(dependencies.get("sources", set()))
+    for collection in REGISTRY_COLLECTIONS:
+        source_ids.update(_source_ids(projected[collection]))
     projected["sources"] = {
         key: copy.deepcopy(normalized.get("sources", {})[key])
         for key in sorted(source_ids) if key in normalized.get("sources", {})

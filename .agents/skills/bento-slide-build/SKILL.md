@@ -19,6 +19,14 @@ Use `scripts.deck_workflow` for every state change. Recompute revision/digest va
 
 For schema v2 project metadata, use `python -m scripts.deck_workflow set-project --kind ... --title ...` only in `initialized` or `planning`. It is an agent-facing setup command rather than a ninth user short phrase; it changes neither workflow stage nor approvals.
 
+## Propose and manage visuals
+
+For every planned slide, decide whether prose is sufficient, a diagram improves understanding, an original source figure is necessary, a Bento-native diagram can express the idea, or a generated image is justified. Propose useful concept, structure, relationship, flow, architecture, hierarchy, comparison, timeline, and state-change visuals without waiting for the user to request a diagram. Keep the UX conversational; do not ask the user to edit visual YAML, crop images, place assets, or update registry entries.
+
+Prefer native HTML text/shape/connector diagrams. Use `source-original` only for the actual source figure with a registered source ID and precise locator. Use `source-derived` for a reconstruction based on one or more located source passages. Use `generated` for explanatory art that is not evidence and give it no source provenance. Never generate numerical data, experimental or measurement results, benchmark results, quantitative plots, or equations; use registered data and LaTeX/native equations instead.
+
+When present, author and validate `planning/visual-plan.yaml`. Register received/generated images and extract PDF figures with `scripts.register_visual_asset`; it selects `deck/assets/source`, `deck/assets/local`, or `deck/assets/generated` and updates the registry in one transaction. Images should carry both `data-asset-id` and `data-figure-id`. Read `docs/visual-workflow.md` before visual work. Visual creation and redesign remain inside the rolling section approval/promotion/acceptance lifecycle.
+
 ## HTML authoring and conversion
 
 For schema v2 `single`/`imported`, use the paths in `authoring.entryHtml` and `authoring.registry`. Each slide is a 1280 x 720 `section.slide` with stable `data-slide-id` and `data-section-id`. Read `docs/html-first-authoring-contract.md`. Treat the pair as the pre-conversion source of truth; a section approval includes DOM, registry projection, asset hashes, and global CSS/theme.

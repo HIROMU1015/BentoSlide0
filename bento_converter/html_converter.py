@@ -165,7 +165,9 @@ def _common(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id
         "rotation": _compact(element.get("rotation", 0)),
         "opacity": _compact(element.get("opacity", 1)),
     }
-    for field in ("role", "morphId", "link"):
+    for field in (
+        "role", "morphId", "link", "equationId", "assetId", "figureId", "chartId", "tableId",
+    ):
         if element.get(field):
             result[field] = element[field]
     shadow = element.get("style", {}).get("boxShadow")

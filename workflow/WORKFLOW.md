@@ -92,6 +92,8 @@ State writes are atomic. Artifact-changing state transitions use the durable mul
 
 `authoring.mode: single` uses `deck/deck.preview.html` and `deck/deck.registry.json`. Each planned section is a stable grouping of slide IDs. Its approval digest includes canonical section DOM, referenced registry projection, referenced asset bytes, and global CSS/theme. A changed section/registry/asset invalidates that section; changed global CSS/theme invalidates every section. Conversion rechecks all digests.
 
+Planning may include the internal `planning/visual-plan.yaml` contract. For every slide, Work decides whether prose is sufficient, a diagram improves understanding, the original source figure is required, an editable native diagram can express it, or a generated image is justified. Native text/shape/connector diagrams are preferred. Source/generated image registration and PDF cropping use `scripts.register_visual_asset`, which commits the local asset and registry together. Visual origin metadata and transitive figure-to-asset/source dependencies participate in section digests; unrelated visual definitions do not. Never generate data, experimental/measurement/benchmark results, quantitative plots, or equations. See `docs/visual-workflow.md`.
+
 `authoring.mode: modular` is supported for migrated v1 chapter projects. It retains the chapter approval commands and files; migration alone never changes a later stage into Bento authoring.
 
 ## Bento authoring and content approval

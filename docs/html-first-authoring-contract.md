@@ -84,7 +84,7 @@ Charts require pure JSON in a descendant script:
     "theme": {"background":"#fff","color":"#111","accent":"#2563eb","fontFamily":"Arial"}
   },
   "assets": {
-    "figure-1": {"path":"assets/figure-1.png","mimeType":"image/png","provenance":{"sourceId":"paper","locator":"Fig. 1"}}
+    "figure-1": {"path":"assets/source/figure-1.png","mimeType":"image/png","origin":{"kind":"source-original","sourceId":"paper","locator":"Fig. 1"},"provenance":{"sourceId":"paper","locator":"Fig. 1"}}
   },
   "equations": {
     "loss-eq": {"latex":"\\mathcal L=...","provenance":{"sourceId":"paper","locator":"Eq. (3)"}}
@@ -97,6 +97,8 @@ Charts require pure JSON in a descendant script:
 ```
 
 Unknown registry formats fail explicitly. v1 remains accepted only for migrated/legacy sources and is normalized into the v2 lifecycle form. `protected` is a deletion guard: conversion never rewrites prose and fails if named slides, elements, or literal required text are missing. `sources/source-manifest.yaml` and registry `sources` use repository-relative paths; provenance references stable source IDs.
+
+New asset/figure definitions use `origin.kind`: `source-original` requires one `sourceId` and locator; `source-derived` requires a non-empty `sources` list of sourceId/locator pairs; `generated` must not claim source provenance. Images use `data-asset-id` and `data-figure-id`; conversion embeds local bytes but preserves both stable IDs and the merged registry metadata. Prefer HTML text/shape/connector diagrams when the visual can remain Bento-native. See `docs/visual-workflow.md` for planning, PDF extraction, generated assets, and the prohibition on generated data/results/plots/equations.
 
 Generated, authoring, and final registry files are separate lifecycle snapshots. HTML authoring never rewrites generated/authoring/final registries; Bento authoring changes only authoring registry in the same transaction as its document; finalization freezes a copied final registry and baseline.
 

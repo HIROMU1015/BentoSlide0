@@ -19,6 +19,8 @@ For section-local registry definitions, replacement may update or remove the sam
 
 Section acceptance binds a digest of the installed slide projection and the exact referenced equation, chart, table, figure, asset, protected metadata, source, and provenance closure. Unreferenced registry changes do not invalidate unrelated sections. Referenced definition or provenance changes do. Every route into content review, content approval, or final initialization requires all rolling sections to be accepted and their digests to match one consistent authoring document/registry snapshot.
 
+Visual origins are part of that closure. A referenced `source-original` locator, a `source-derived` source list, a generated visual description, or its asset bytes changes the section digest. A figure's `assetId` is transitive, so the underlying asset is included even when only the figure is referenced. An unrelated visual definition does not invalidate an accepted section. Significant visual redesign returns through a temporary HTML candidate and targeted replacement; Bento-only position/size changes remain ordinary authoring edits.
+
 ## Authoring save contract
 
 The authoring API request carries `baseDocumentRevision`, `baseRegistryRevision`, `serializedHtml`, and optionally a complete `registry`. The response returns both result revisions, `contentApprovalInvalidated`, and `transactionId`. HTTP 409 indicates a stale document or registry revision. HTTP 422 indicates schema, registry, reference, resource, runtime, or protected-metadata failure. A fully validated save whose document and registry are unchanged returns `noOp: true` and `transactionId: null`; it creates neither a backup nor a journal/report write.

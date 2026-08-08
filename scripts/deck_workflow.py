@@ -56,6 +56,7 @@ from bento_converter.work_editor_storage import (
     protected_content_fingerprint,
     validate_editor_document,
 )
+from bento_converter.visual_planning import load_visual_plan
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +71,7 @@ PLAN_FILES = {
     "storyOutline": Path("planning/story-outline.md"),
     "slidePlan": Path("planning/slide-plan.md"),
 }
+VISUAL_PLAN_RELATIVE = Path("planning/visual-plan.yaml")
 STAGE_OWNER = {
     "initialized": "work",
     "planning": "work",
@@ -670,6 +672,12 @@ def validate_planning(root: Path) -> None:
     missing = [str(path) for path in PLAN_FILES.values() if not _meaningful_markdown(root / path)]
     if missing:
         raise WorkflowError("Planning artifacts are missing substantive content: " + ", ".join(missing))
+    visual_plan = root / VISUAL_PLAN_RELATIVE
+    if visual_plan.exists():
+        try:
+            load_visual_plan(visual_plan)
+        except BentoConverterError as exc:
+            raise WorkflowError(str(exc)) from exc
 
 
 def _load_chapter(root: Path, chapter_id: str, entry: dict[str, Any]) -> tuple[ChapterHtmlParser, dict[str, Any]]:

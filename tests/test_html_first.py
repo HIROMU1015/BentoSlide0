@@ -172,6 +172,75 @@ class HtmlConversionTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("BENTO_BROWSER_TEST") == "1", "Set BENTO_BROWSER_TEST=1 for Chromium HTML-first integration.")
 class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
+    def test_visual_origins_embed_images_and_native_diagram_without_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "assets/source").mkdir(parents=True)
+            (root / "assets/generated").mkdir(parents=True)
+            Image.new("RGB", (40, 40), "#2563eb").save(root / "assets/source/original.png")
+            Image.new("RGB", (40, 40), "#10b981").save(root / "assets/generated/concept.png")
+            source = root / "deck.preview.html"
+            source.write_text(
+                "<!doctype html><style>body{margin:0}.slide{position:relative;width:1280px;height:720px;background:#fff}"
+                ".item{position:absolute}.node{width:180px;height:90px;background:#dbeafe;border:2px solid #2563eb}</style>"
+                "<section class='slide' data-slide-id='visuals' data-section-id='method'>"
+                "<img class='item' data-bento-id='original' data-bento-type='image' data-asset-id='original-asset' "
+                "data-figure-id='original-figure' src='assets/source/original.png' style='left:60px;top:80px;width:200px;height:160px'>"
+                "<img class='item' data-bento-id='concept' data-bento-type='image' data-asset-id='concept-asset' "
+                "data-figure-id='concept-figure' src='assets/generated/concept.png' style='left:300px;top:80px;width:200px;height:160px'>"
+                "<div class='item node' data-bento-id='node-a' data-bento-type='shape' data-bento-shape='rect' "
+                "style='left:120px;top:360px'></div>"
+                "<div class='item' data-bento-id='connector' data-bento-type='shape' data-bento-shape='line' "
+                "data-line-end='arrow' style='left:300px;top:400px;width:260px;height:8px;border-top:4px solid #334155'></div>"
+                "<div class='item node' data-bento-id='node-b' data-bento-type='shape' data-bento-shape='rect' "
+                "style='left:560px;top:360px'></div>"
+                "<div class='item' data-bento-id='node-label' data-bento-type='text' "
+                "style='left:140px;top:390px;width:140px;height:40px'>Native flow</div>"
+                "</section>", encoding="utf-8",
+            )
+            origin = {"kind": "source-original", "sourceId": "paper", "locator": "Fig. 4, p. 8"}
+            generated = {"kind": "generated"}
+            registry_path = root / "deck.registry.json"
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "deck",
+                "sources": {"paper": {"path": "sources/private/paper.pdf", "type": "pdf"}},
+                "document": {"title": "Visual origins"},
+                "assets": {
+                    "original-asset": {"path": "assets/source/original.png", "origin": origin,
+                                       "provenance": {"sourceId": "paper", "locator": "Fig. 4, p. 8"}},
+                    "concept-asset": {"path": "assets/generated/concept.png", "role": "conceptual-illustration", "origin": generated},
+                },
+                "figures": {
+                    "original-figure": {"assetId": "original-asset", "origin": origin,
+                                         "provenance": {"sourceId": "paper", "locator": "Fig. 4, p. 8"}},
+                    "concept-figure": {"assetId": "concept-asset", "origin": generated},
+                },
+                "fonts": {}, "equations": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }), encoding="utf-8")
+            result = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html",
+                output_path=root / "output/presentation.generated.bento.html", browser_check=False,
+            )
+            by_id = {element["id"]: element for element in result.document["slides"][0]["elements"]}
+            for element_id, asset_id, figure_id in (
+                ("original", "original-asset", "original-figure"),
+                ("concept", "concept-asset", "concept-figure"),
+            ):
+                self.assertEqual(by_id[element_id]["type"], "image")
+                self.assertTrue(by_id[element_id]["src"].startswith("data:image/png;base64,"))
+                self.assertEqual(by_id[element_id]["assetId"], asset_id)
+                self.assertEqual(by_id[element_id]["figureId"], figure_id)
+            self.assertEqual(by_id["node-a"]["type"], "shape")
+            self.assertEqual(by_id["connector"]["type"], "shape")
+            self.assertEqual(by_id["node-label"]["type"], "text")
+            self.assertTrue(result.report["resourceScan"]["passed"])
+            self.assertEqual(result.report["summary"]["unresolvedLocalResourceReferences"], 0)
+            merged = json.loads((root / "output/diagnostics/merged-registry.json").read_text(encoding="utf-8"))
+            self.assertEqual(merged["assets"]["original-asset"]["origin"], origin)
+            self.assertEqual(merged["assets"]["concept-asset"]["origin"], generated)
+
     def test_incremental_build_reuses_only_unchanged_slides(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

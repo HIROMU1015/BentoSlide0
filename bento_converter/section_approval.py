@@ -12,7 +12,8 @@ from typing import Any, Iterable
 from urllib.parse import unquote, urlsplit
 
 from .errors import BentoConverterError
-from .registry_document import validate_registry
+from .registry_document import REGISTRY_V1, REGISTRY_V2, validate_registry
+from .segment import registry_dependency_closure
 
 
 SECTION_DIGEST_FORMAT = "bento/section-approval/v1"
@@ -195,18 +196,28 @@ def _registry_projection(nodes: list[HtmlNode], registry: dict[str, Any]) -> tup
                         expected = definition.get("latex") if isinstance(definition, dict) else None
                         if node.attrs["data-latex"].strip() != str(expected).strip():
                             raise BentoConverterError(f"Equation {value} data-latex does not match registry latex")
+    seed_fields = {
+        "assets": "assetId", "equations": "equationId", "figures": "figureId",
+        "tables": "tableId", "charts": "chartId",
+    }
+    dependencies = (
+        registry_dependency_closure(
+            [{seed_fields[collection]: identifier} for collection, ids in referenced.items() for identifier in ids],
+            registry,
+        )
+        if registry.get("format") in {REGISTRY_V1, REGISTRY_V2}
+        else {collection: set(ids) for collection, ids in referenced.items()} | {"sources": set()}
+    )
+    for collection in referenced:
+        referenced[collection].update(dependencies.get(collection, set()))
     projection: dict[str, Any] = {}
-    source_ids: set[str] = set()
     for collection, ids in referenced.items():
         definitions = registry.get(collection, {})
         missing = sorted(identifier for identifier in ids if identifier not in definitions)
         if missing:
             raise BentoConverterError(f"Section references missing registry {collection}: {missing}")
         projection[collection] = {identifier: definitions[identifier] for identifier in sorted(ids)}
-        for definition in projection[collection].values():
-            provenance = definition.get("provenance", {}) if isinstance(definition, dict) else {}
-            if isinstance(provenance, dict) and isinstance(provenance.get("sourceId"), str):
-                source_ids.add(provenance["sourceId"])
+    source_ids = dependencies.get("sources", set())
     sources = registry.get("sources", {})
     missing_sources = sorted(source_id for source_id in source_ids if source_id not in sources)
     if missing_sources:

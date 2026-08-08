@@ -45,6 +45,56 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowUxUnitTests(unittest.TestCase):
+    def test_visual_origin_metadata_participates_only_in_referenced_section_digest(self) -> None:
+        document = {
+            "format": "bento/slides", "version": 1, "docId": "visual", "title": "Visual",
+            "size": {"w": 1280, "h": 720}, "theme": {},
+            "slides": [{"id": "visual-slide", "elements": [{
+                "id": "visual-image", "type": "image", "x": 0, "y": 0, "w": 100, "h": 100,
+                "rotation": 0, "opacity": 1, "src": "data:image/png;base64,AA==",
+                "fit": "contain", "radius": 0, "assetId": "visual-asset", "figureId": "visual-figure",
+            }]}],
+        }
+        registry = {
+            "format": "bento/html-registry/v2", "unitId": "deck",
+            "sources": {"paper": {"path": "sources/private/paper.pdf", "type": "pdf"}},
+            "assets": {"visual-asset": {
+                "path": "assets/source/visual.png",
+                "origin": {"kind": "source-original", "sourceId": "paper", "locator": "Fig. 4"},
+                "provenance": {"sourceId": "paper", "locator": "Fig. 4"},
+            }},
+            "figures": {"visual-figure": {
+                "assetId": "visual-asset",
+                "origin": {"kind": "source-original", "sourceId": "paper", "locator": "Fig. 4"},
+                "provenance": {"sourceId": "paper", "locator": "Fig. 4"},
+            }},
+            "fonts": {}, "equations": {}, "tables": {}, "charts": {},
+            "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+        }
+        baseline = _section_digest(document, registry, ["visual-slide"])
+        changed_locator = json.loads(json.dumps(registry))
+        for collection, key in (("assets", "visual-asset"), ("figures", "visual-figure")):
+            changed_locator[collection][key]["origin"]["locator"] = "Fig. 5"
+            changed_locator[collection][key]["provenance"]["locator"] = "Fig. 5"
+        self.assertNotEqual(_section_digest(document, changed_locator, ["visual-slide"]), baseline)
+        generated = json.loads(json.dumps(registry))
+        generated["assets"]["unused"] = {
+            "path": "assets/generated/unused.png", "description": "Changed explanation",
+            "origin": {"kind": "generated"},
+        }
+        self.assertEqual(_section_digest(document, generated, ["visual-slide"]), baseline)
+        referenced_generated = json.loads(json.dumps(registry))
+        referenced_generated["assets"]["visual-asset"] = {
+            "path": "assets/generated/visual.png", "description": "Concept A",
+            "origin": {"kind": "generated"},
+        }
+        referenced_generated["figures"]["visual-figure"] = {
+            "assetId": "visual-asset", "description": "Concept A", "origin": {"kind": "generated"},
+        }
+        generated_baseline = _section_digest(document, referenced_generated, ["visual-slide"])
+        referenced_generated["assets"]["visual-asset"]["description"] = "Concept B"
+        self.assertNotEqual(_section_digest(document, referenced_generated, ["visual-slide"]), generated_baseline)
+
     def test_section_digest_tracks_referenced_registry_and_provenance_only(self) -> None:
         document = extract_bento_doc(load_html(ROOT / "demo.bento.html"))
         registry = segment_registry()
@@ -216,6 +266,15 @@ class RollingSectionBrowserTests(unittest.TestCase):
         (self.root / "deck/deck.preview.html").write_text(deck_html, encoding="utf-8")
         registry_value = sample_registry()
         registry_value["assets"]["plot"]["path"] = "assets/fixture.svg"
+        registry_value["sources"]["spec"] = {
+            "path": "sources/private/spec.md", "type": "document", "role": "primary",
+        }
+        registry_value["assets"]["plot"].update({
+            "description": "Derived explanation metadata",
+            "origin": {"kind": "source-derived", "sources": [
+                {"sourceId": "spec", "locator": "method overview"},
+            ]},
+        })
         registry_value["document"] = {
             "title": "Rolling demo", "modified": "2026-08-08T00:00:00Z",
             "theme": {"background": "#fff", "color": "#111", "accent": "#2563eb", "fontFamily": "Arial"},
@@ -275,6 +334,10 @@ class RollingSectionBrowserTests(unittest.TestCase):
         state = load_state(self.root)
         authoring = extract_bento_doc(load_html(self.root / state["outputs"]["authoringHtml"]))
         self.assertEqual([slide["id"] for slide in authoring["slides"]], ["method-1", "導入-1"])
+        authoring_registry = json.loads(
+            (self.root / state["outputs"]["authoringRegistry"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(authoring_registry["assets"]["plot"]["origin"]["kind"], "source-derived")
         command_finish_current_section(self.root, state)
         state = load_state(self.root)
         self.assertEqual(state["workflow"]["stage"], "content_review")
@@ -291,6 +354,10 @@ class RollingSectionBrowserTests(unittest.TestCase):
             "readyForContentReview": False, "readyForFinalEditing": False,
         })
         self.assertEqual(state["sections"]["method"]["status"], "bento_authoring")
+        reopened_registry = json.loads(
+            (self.root / state["outputs"]["authoringRegistry"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(reopened_registry["assets"]["plot"]["description"], "Derived explanation metadata")
         command_finish_current_section(self.root, state)
         state = load_state(self.root)
         command_reopen_current_section(self.root, state, section_id="method", via="html")
