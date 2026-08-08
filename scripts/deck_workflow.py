@@ -23,7 +23,12 @@ from bento_converter.artifact_transaction import (
     file_revision,
     recover_repository_transactions,
 )
-from bento_converter.authoring_storage import AuthoringArtifactStorage, validate_authoring_document
+from bento_converter.authoring_storage import (
+    REFERENCE_FIELDS,
+    AuthoringArtifactStorage,
+    validate_authoring_document,
+    visible_document_text,
+)
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
@@ -372,11 +377,19 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
             if workflow["currentChapter"] is not None:
                 raise WorkflowError(f"{mode} authoring cannot have a current chapter")
             registered_slides: set[str] = set()
+            registered_bento_slides: set[str] = set()
             for section_id, section in state["sections"].items():
                 duplicates = registered_slides.intersection(section["slideIds"])
                 if duplicates:
                     raise WorkflowError(f"Slide IDs are registered in multiple sections: {sorted(duplicates)}")
                 registered_slides.update(section["slideIds"])
+                bento_slide_ids = section.get("bentoSlideIds", [])
+                bento_duplicates = registered_bento_slides.intersection(bento_slide_ids)
+                if bento_duplicates:
+                    raise WorkflowError(
+                        f"Bento slide IDs belong to multiple sections: {sorted(bento_duplicates)}"
+                    )
+                registered_bento_slides.update(bento_slide_ids)
                 canonical = section.get("canonical")
                 if canonical is not None:
                     expected = {
@@ -395,6 +408,10 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                 )]
                 if section["status"] in {"bento_authoring", "accepted"} and any(value is None for value in bento_values):
                     raise WorkflowError(f"Bento section is missing revision binding: {section_id}")
+                if canonical == "bento" and bento_slide_ids and section["slideIds"] != bento_slide_ids:
+                    raise WorkflowError(
+                        f"Bento-canonical section membership differs from its installed slides: {section_id}"
+                    )
                 if section["status"] == "accepted" and section.get("acceptedAt") is None:
                     raise WorkflowError(f"Accepted section has no timestamp: {section_id}")
     resolved_outputs = {
@@ -997,6 +1014,7 @@ def _migration_sections(state: dict[str, Any]) -> dict[str, Any]:
             "title": chapter_id,
             "status": status,
             "slideIds": [],
+            "bentoSlideIds": [],
             "approvalDigest": None,
         }
     return result
@@ -1613,6 +1631,7 @@ def command_configure_sections(root: Path, state: dict[str, Any], section_ids: I
             "status": "planned",
             "canonical": "planning",
             "slideIds": [],
+            "bentoSlideIds": [],
             "approvalDigest": None,
             "bentoDocumentRevision": None,
             "bentoRegistryRevision": None,
@@ -1753,15 +1772,87 @@ def command_unlock_section(root: Path, state: dict[str, Any], section_id: str) -
     append_work_log(root, f"Unlocked section {section_id} for HTML authoring")
 
 
-def _section_digest(document: dict[str, Any], slide_ids: Iterable[str]) -> str:
-    wanted = set(slide_ids)
+def _section_digest(
+    document: dict[str, Any], registry: dict[str, Any], slide_ids: Iterable[str],
+) -> str:
+    ordered_ids = [str(value) for value in slide_ids]
+    wanted = set(ordered_ids)
     projection = [
         slide for slide in document.get("slides", [])
         if isinstance(slide, dict) and slide.get("id") in wanted
     ]
-    if [slide.get("id") for slide in projection] != [value for value in slide_ids]:
+    if [slide.get("id") for slide in projection] != ordered_ids:
         raise WorkflowError("Authoring Bento does not contain the section slides in their registered order")
-    return canonical_projection_hash(projection)
+
+    normalized = normalize_registry(registry, unit_id=str(registry.get("unitId") or "deck"))
+    referenced: dict[str, set[str]] = {
+        collection: set() for collection in REFERENCE_FIELDS.values()
+    }
+    source_ids: set[str] = set()
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                collection = REFERENCE_FIELDS.get(key)
+                if collection and isinstance(item, str) and item:
+                    referenced[collection].add(item)
+                if key == "sourceId" and isinstance(item, str) and item:
+                    source_ids.add(item)
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(projection)
+    registry_projection: dict[str, Any] = {}
+    visited: dict[str, set[str]] = {collection: set() for collection in referenced}
+    while any(referenced[collection] - visited[collection] for collection in referenced):
+        for collection in referenced:
+            pending = sorted(referenced[collection] - visited[collection])
+            definitions = normalized.get(collection, {})
+            selected: dict[str, Any] = registry_projection.setdefault(collection, {})
+            for identifier in pending:
+                if identifier not in definitions:
+                    raise WorkflowError(
+                        f"Section references missing registry definition: {collection}.{identifier}"
+                    )
+                definition = copy.deepcopy(definitions[identifier])
+                selected[identifier] = definition
+                visited[collection].add(identifier)
+                collect(definition)
+
+    selected_sources: dict[str, Any] = {}
+    pending_sources = set(source_ids)
+    while pending_sources:
+        identifier = sorted(pending_sources)[0]
+        pending_sources.remove(identifier)
+        if identifier in selected_sources:
+            continue
+        sources = normalized.get("sources", {})
+        if identifier not in sources:
+            raise WorkflowError(f"Section references missing registry source: {identifier}")
+        definition = copy.deepcopy(sources[identifier])
+        selected_sources[identifier] = definition
+        before = set(source_ids)
+        collect(definition)
+        pending_sources.update(source_ids - before)
+    registry_projection["sources"] = selected_sources
+
+    section_document = {"title": "", "slides": projection}
+    section_text = visible_document_text(section_document)
+    element_ids = {
+        str(element["id"])
+        for slide in projection
+        for element in slide.get("elements", [])
+        if isinstance(element, dict) and isinstance(element.get("id"), str)
+    }
+    protected = normalized.get("protected", {})
+    registry_projection["protected"] = {
+        "slideIds": [value for value in protected.get("slideIds", []) if value in wanted],
+        "elementIds": [value for value in protected.get("elementIds", []) if value in element_ids],
+        "requiredText": [value for value in protected.get("requiredText", []) if value in section_text],
+    }
+    return canonical_projection_hash({"slides": projection, "registry": registry_projection})
 
 
 def _protected_output_hashes(root: Path, state: dict[str, Any]) -> dict[str, str | None]:
@@ -1869,6 +1960,7 @@ def command_promote_current_section(
         next_entry = next_state["sections"][section_id]
         next_entry.update({
             "status": "bento_authoring", "canonical": "bento", "slideIds": slide_ids,
+            "bentoSlideIds": slide_ids,
             "acceptedAt": None,
         })
         next_state["approvals"]["bentoContent"] = _pending_content_approval()
@@ -1881,7 +1973,9 @@ def command_promote_current_section(
             next_entry.update({
                 "bentoDocumentRevision": document_revision(conversion.document),
                 "bentoRegistryRevision": registry_revision(converted_registry),
-                "bentoSectionDigest": _section_digest(conversion.document, slide_ids),
+                "bentoSectionDigest": _section_digest(
+                    conversion.document, converted_registry, slide_ids,
+                ),
             })
             validate_state(root, next_state)
             AuthoringArtifactStorage(
@@ -1895,10 +1989,13 @@ def command_promote_current_section(
             try:
                 current_html, current_document, current_registry = storage.artifact_snapshot()
                 current_ids = [str(slide.get("id")) for slide in current_document.get("slides", [])]
-                if all(slide_id in current_ids for slide_id in slide_ids):
+                installed_ids = list(entry.get("bentoSlideIds") or [])
+                if not installed_ids and all(slide_id in current_ids for slide_id in entry["slideIds"]):
+                    installed_ids = list(entry["slideIds"])
+                if installed_ids:
                     operation = "replace-section"
                     anchor = None
-                    targets = slide_ids
+                    targets = installed_ids
                 else:
                     later_ids: list[str] = []
                     seen_current = False
@@ -1907,7 +2004,7 @@ def command_promote_current_section(
                             seen_current = True
                             continue
                         if seen_current and planned.get("canonical") == "bento":
-                            later_ids.extend(planned["slideIds"])
+                            later_ids.extend(planned.get("bentoSlideIds") or planned["slideIds"])
                     anchor = next((value for value in later_ids if value in current_ids), None)
                     operation = "insert-before" if anchor else "append"
                     targets = None
@@ -1916,9 +2013,12 @@ def command_promote_current_section(
                     operation=operation, anchor_slide_id=anchor, target_slide_ids=targets,
                 )
                 next_entry.update({
+                    "bentoSlideIds": slide_ids,
                     "bentoDocumentRevision": document_revision(merged_document),
                     "bentoRegistryRevision": registry_revision(merged_registry),
-                    "bentoSectionDigest": _section_digest(merged_document, slide_ids),
+                    "bentoSectionDigest": _section_digest(
+                        merged_document, merged_registry, slide_ids,
+                    ),
                 })
                 validate_state(root, next_state)
                 status = storage.status()
@@ -1941,10 +2041,44 @@ def command_promote_current_section(
     append_work_log(root, f"Promoted section {section_id} to Bento authoring without rebuilding unrelated sections")
 
 
-def _assert_accepted_sections_current(state: dict[str, Any], document: dict[str, Any]) -> None:
+def _assert_accepted_sections_current(
+    state: dict[str, Any], document: dict[str, Any], registry: dict[str, Any],
+) -> None:
     for section_id, entry in state["sections"].items():
-        if entry["status"] == "accepted" and entry.get("bentoSectionDigest") != _section_digest(document, entry["slideIds"]):
+        slide_ids = entry.get("bentoSlideIds") or entry["slideIds"]
+        if entry["status"] == "accepted" and entry.get("bentoSectionDigest") != _section_digest(
+            document, registry, slide_ids,
+        ):
             raise WorkflowError(f"Accepted section changed without being reopened: {section_id}")
+
+
+def _is_rolling_section_workflow(state: dict[str, Any]) -> bool:
+    if state.get("schemaVersion") != 2 or state.get("authoring", {}).get("mode") not in {"single", "imported"}:
+        return False
+    return any(
+        entry.get("bentoSlideIds")
+        or entry.get("status") in {"bento_integration", "bento_authoring", "accepted"}
+        for entry in state.get("sections", {}).values()
+    )
+
+
+def _require_rolling_sections_accepted(
+    state: dict[str, Any], document: dict[str, Any], registry: dict[str, Any],
+) -> None:
+    """Enforce the rolling-workflow gate on one consistent artifact snapshot."""
+
+    if not _is_rolling_section_workflow(state):
+        return
+    incomplete = [
+        section_id for section_id, entry in state["sections"].items()
+        if entry["status"] != "accepted"
+    ]
+    if incomplete:
+        raise WorkflowError(
+            "Every section must be accepted before whole-deck content review: "
+            + ", ".join(incomplete)
+        )
+    _assert_accepted_sections_current(state, document, registry)
 
 
 def command_finish_current_section(root: Path, state: dict[str, Any]) -> None:
@@ -1954,14 +2088,17 @@ def command_finish_current_section(root: Path, state: dict[str, Any]) -> None:
         raise WorkflowError("Current section is not in Bento authoring")
     storage = authoring_storage(root, state)
     _, document, registry = storage.artifact_snapshot()
-    _assert_accepted_sections_current(state, document)
+    _assert_accepted_sections_current(state, document, registry)
     next_state = copy.deepcopy(state)
     accepted = next_state["sections"][section_id]
     accepted.update({
         "status": "accepted", "canonical": "bento",
+        "bentoSlideIds": list(accepted.get("bentoSlideIds") or accepted["slideIds"]),
         "bentoDocumentRevision": document_revision(document),
         "bentoRegistryRevision": registry_revision(registry),
-        "bentoSectionDigest": _section_digest(document, accepted["slideIds"]),
+        "bentoSectionDigest": _section_digest(
+            document, registry, accepted.get("bentoSlideIds") or accepted["slideIds"],
+        ),
         "acceptedAt": utc_now(),
     })
     remaining = [key for key, value in next_state["sections"].items() if value["status"] != "accepted"]
@@ -1990,6 +2127,9 @@ def command_reopen_current_section(root: Path, state: dict[str, Any], *, section
         raise WorkflowError(f"Section is not reopenable from status {entry['status']!r}")
     next_state = copy.deepcopy(state)
     reopened = next_state["sections"][selected]
+    if not reopened.get("bentoSlideIds"):
+        # Upgrade rolling states created before installed Bento membership was tracked separately.
+        reopened["bentoSlideIds"] = list(reopened["slideIds"])
     reopened["acceptedAt"] = None
     next_state["approvals"]["bentoContent"] = _pending_content_approval()
     next_state["approvals"]["finalBento"] = _pending_final_approval()
@@ -2012,8 +2152,8 @@ def command_review_whole_deck(root: Path, state: dict[str, Any]) -> None:
         raise WorkflowError("Every section must be accepted before whole-deck content review")
     _require_stage(state, "bento_authoring", "content_review")
     storage = authoring_storage(root, state)
-    _, document, _ = storage.artifact_snapshot()
-    _assert_accepted_sections_current(state, document)
+    _, document, registry = storage.artifact_snapshot()
+    _require_rolling_sections_accepted(state, document, registry)
     state["handoff"]["readyForContentReview"] = True
     _transition(state, "content_review", "awaiting_approval")
     atomic_write_state(root, state)
@@ -2227,7 +2367,8 @@ def _validated_content_review_status(root: Path, state: dict[str, Any]) -> dict[
     storage.acquire_writer_lease()
     try:
         status = _current_authoring_status(root, state, storage=storage)
-        storage.content_review_snapshot()
+        _, document, registry = storage.content_review_snapshot()
+        _require_rolling_sections_accepted(state, document, registry)
         return status
     finally:
         storage.release_writer_lease()
@@ -2408,6 +2549,7 @@ def _initialize_v2_finalization(root: Path, state: dict[str, Any]) -> None:
     storage.acquire_writer_lease()
     try:
         authoring_html, authoring_document, authoring_registry = storage.content_review_snapshot()
+        _require_rolling_sections_accepted(state, authoring_document, authoring_registry)
         document_revision_value = document_revision(authoring_document)
         registry_revision_value = registry_revision(authoring_registry)
         approval = state["approvals"]["bentoContent"]

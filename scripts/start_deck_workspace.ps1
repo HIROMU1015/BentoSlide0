@@ -92,7 +92,7 @@ try {
             exit 0
         }
         'initialized' {
-            Write-Host 'The project is initialized. Add source materials under sources/private/, update the source manifest if needed, and ask Work to create this deck.'
+            Write-Host 'The project is initialized. Add source materials under sources/private/ and tell Work what deck you want to create.'
             exit 0
         }
         'awaiting_plan_approval' {

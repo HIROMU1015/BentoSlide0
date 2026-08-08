@@ -21,22 +21,13 @@ At the start of every task, read `START_HERE.md`, `deck.yaml`, and `python -m sc
 - Recover unfinished transaction journals before serving reads or writes. A report-only failure keeps committed artifacts and is retried; unsafe recovery changes nothing.
 - Never mutate generated/final during segment import or targeted replacement. Treat imported HTML as untrusted and preview only sanitized static output.
 
-## Short user instructions
+## Natural-language routing
 
 Natural conversation is the primary UX. Infer the matching high-level operation, stop at the next human checkpoint, and report the current section in user language. Never require a stage name, section/slide ID, revision, registry field, file path, or CLI command. Persist a substantive new brief with `capture-request`; use `advance`, `approve-current`, `promote-current-section`, `edit-current`, `finish-current-section`, `reopen-current-section`, and `review-whole-deck` internally. `advance` never records approval.
 
 For new schema v2 single/imported decks, use `planned -> html_authoring -> html_review -> bento_integration -> bento_authoring -> accepted`. Exactly one canonical source exists per section: planning, HTML, or Bento. Promotion converts only the approved section, preserves planning order, and leaves unrelated authoring slide hashes plus generated/final artifacts unchanged. Accepted sections remain reopenable. Require whole-deck content review after all sections are accepted.
 
-The phrases below remain backward-compatible aliases, not the preferred interaction model.
-
-- `この資料を作成して`: discover manifest sources, create planning artifacts, register all planned sections, submit the plan, and request only material approval.
-- `この方針で進めて`: approve the plan, author the first incomplete section in the single HTML/registry source, start HTML preview, and request visual approval.
-- `次へ`: approve the current section and select the next; when all are current and approved, become conversion-ready.
-- `BentoSlideに変換して`: validate approved section digests, convert to generated artifacts, collect all evidence, initialize Bento authoring, and stop at `bento_authoring`.
-- `BentoSlideで編集を開始して`: require `bento_authoring`, start authoring mode, and let the user and Work edit the same revision-checked Bento artifact set.
-- `内容を確定して`: validate the current authoring document/registry, enter `content_review`, and request the user's content/structure approval without recording it automatically.
-- `この内容で最終調整へ`: record approval for the current two revisions and canonical digest, then initialize final artifacts and both baselines transactionally.
-- `最終調整を開始して`: require `bento_finalization`, start finalization mode, edit presentation only, save/reload, and run final technical validation.
+The former fixed phrases remain compatibility aliases only. Their exact checkpoint behavior is documented in `docs/legacy-command-aliases.md`; do not present them as the primary UX.
 
 Legacy schema v1 decks must be dry-run migrated with `deck_workflow migrate`; never move a late-stage deck back to Bento authoring merely because of migration.
 

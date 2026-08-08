@@ -14,6 +14,4 @@ Work/Codexは自分で`deck.yaml`と`python -m scripts.deck_workflow status --js
 
 通常はsectionを1つずつ、`HTML作成→見た目確認→Bentoへ昇格→Bento編集→section確定`の順で仕上げます。人が判断するのは各sectionのHTML昇格可否とBento版の確定、最後の資料全体の内容、finalの仕上がりです。承認は自動で通過しません。
 
-Windowsでは`start_deck_workspace.cmd`をダブルクリックすると、現在stageに合うHTML previewまたはWork editorが起動し、URLがclipboardへ入ります。既存finalのresetや通常ブラウザーの起動は行いません。
-
-`start_deck_workspace.cmd`は現在位置に応じ、HTML preview、authoring editor、final editor、完成版viewerのどれかを自動選択します。内部ID、revision、registry、CLIは通常表示しません。必要な場合だけ`status --json`で完全な機械状態を確認できます。
+Windowsでは`start_deck_workspace.cmd`をダブルクリックすると、現在位置に応じてHTML preview、authoring editor、final editor、または完成版viewerを自動選択し、URLをclipboardへ入れます。既存finalのresetや通常ブラウザーの自動起動は行いません。内部ID、revision、registry、CLIは通常表示せず、必要な場合だけ`status --json`で完全な機械状態を確認できます。

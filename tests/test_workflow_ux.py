@@ -15,10 +15,12 @@ from bento_converter.segment import merge_segment, slide_hashes
 from scripts.deck_workflow import (
     WorkflowError,
     atomic_write_state,
+    command_approve_content,
     command_approve_current,
     command_approve_plan,
     command_advance,
     command_begin_section,
+    command_begin_content_review,
     command_complete_section,
     command_configure_sections,
     command_finish_current_section,
@@ -27,6 +29,8 @@ from scripts.deck_workflow import (
     command_promote_current_section,
     command_reopen_current_section,
     command_submit_plan,
+    _require_rolling_sections_accepted,
+    _section_digest,
     load_state,
     user_status_summary,
     valid_actions,
@@ -40,6 +44,56 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowUxUnitTests(unittest.TestCase):
+    def test_section_digest_tracks_referenced_registry_and_provenance_only(self) -> None:
+        document = extract_bento_doc(load_html(ROOT / "demo.bento.html"))
+        registry = segment_registry()
+        equation_slide = next(
+            slide for slide in document["slides"]
+            if any(element.get("equationId") for element in slide.get("elements", []))
+        )
+        equation_id = next(
+            element["equationId"] for element in equation_slide["elements"]
+            if element.get("equationId")
+        )
+        registry["sources"]["paper"] = {"path": "sources/private/paper.md", "locator": "eq.1"}
+        registry["equations"][equation_id]["provenance"] = {"sourceId": "paper"}
+        baseline = _section_digest(document, registry, [equation_slide["id"]])
+
+        unrelated = json.loads(json.dumps(registry, ensure_ascii=False))
+        unrelated["charts"]["unrelated"] = {"title": "not used here"}
+        self.assertEqual(_section_digest(document, unrelated, [equation_slide["id"]]), baseline)
+
+        changed_equation = json.loads(json.dumps(registry, ensure_ascii=False))
+        changed_equation["equations"][equation_id]["latex"] += " + 0"
+        self.assertNotEqual(_section_digest(document, changed_equation, [equation_slide["id"]]), baseline)
+        changed_source = json.loads(json.dumps(registry, ensure_ascii=False))
+        changed_source["sources"]["paper"]["locator"] = "eq.2"
+        self.assertNotEqual(_section_digest(document, changed_source, [equation_slide["id"]]), baseline)
+
+    def test_rolling_content_gate_requires_all_current_section_digests(self) -> None:
+        document = extract_bento_doc(load_html(ROOT / "demo.bento.html"))
+        registry = segment_registry()
+        first_id, second_id = [slide["id"] for slide in document["slides"]]
+        state = yaml.safe_load((ROOT / "tests/fixtures/deck_v2.initialized.yaml").read_text(encoding="utf-8"))
+        state["sections"] = {
+            "first": {
+                "status": "accepted", "slideIds": [first_id], "bentoSlideIds": [first_id],
+                "bentoSectionDigest": _section_digest(document, registry, [first_id]),
+            },
+            "second": {
+                "status": "bento_authoring", "slideIds": [second_id], "bentoSlideIds": [second_id],
+                "bentoSectionDigest": _section_digest(document, registry, [second_id]),
+            },
+        }
+        with self.assertRaisesRegex(WorkflowError, "Every section must be accepted"):
+            _require_rolling_sections_accepted(state, document, registry)
+        state["sections"]["second"]["status"] = "accepted"
+        _require_rolling_sections_accepted(state, document, registry)
+        changed = json.loads(json.dumps(registry, ensure_ascii=False))
+        changed["equations"]["hamiltonian_split"]["latex"] += " + 0"
+        with self.assertRaisesRegex(WorkflowError, "Accepted section changed"):
+            _require_rolling_sections_accepted(state, document, changed)
+
     def test_request_capture_and_unambiguous_source_registration_hide_manifest_mechanics(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -188,6 +242,17 @@ class RollingSectionBrowserTests(unittest.TestCase):
         self.assertEqual([slide["id"] for slide in authoring["slides"]], ["method-1"])
         self.assertFalse((self.root / state["outputs"]["generatedHtml"]).exists())
         self.assertFalse((self.root / state["outputs"]["finalHtml"]).exists())
+        with self.assertRaisesRegex(WorkflowError, "Every section must be accepted"):
+            command_begin_content_review(self.root, load_state(self.root))
+        premature = load_state(self.root)
+        premature["workflow"].update({
+            "stage": "content_review", "status": "awaiting_approval",
+            "owner": "work", "sourceOfTruth": "authoring",
+        })
+        atomic_write_state(self.root, premature)
+        with self.assertRaisesRegex(WorkflowError, "Every section must be accepted"):
+            command_approve_content(self.root, load_state(self.root))
+        atomic_write_state(self.root, state)
         command_finish_current_section(self.root, state)
         state = load_state(self.root)
         self.assertEqual(state["sections"]["method"]["status"], "accepted")
@@ -207,6 +272,40 @@ class RollingSectionBrowserTests(unittest.TestCase):
         state = load_state(self.root)
         self.assertEqual(state["workflow"]["stage"], "bento_authoring")
         self.assertEqual(state["sections"]["method"]["status"], "bento_authoring")
+        command_finish_current_section(self.root, state)
+        state = load_state(self.root)
+        command_reopen_current_section(self.root, state, section_id="method", via="html")
+        state = load_state(self.root)
+        self.assertEqual(state["sections"]["method"]["bentoSlideIds"], ["method-1"])
+        source = self.root / "deck/deck.preview.html"
+        old = '''  <section class="slide" data-slide-id="method-1" data-section-id="method">
+    <div data-bento-id="method-text">Method</div>
+  </section>'''
+        new = '''  <section class="slide" data-slide-id="method-new-1" data-section-id="method">
+    <div data-bento-id="method-new-text-1">Method A</div>
+  </section>
+  <section class="slide" data-slide-id="method-new-2" data-section-id="method">
+    <div data-bento-id="method-new-text-2">Method B</div>
+  </section>'''
+        source.write_text(source.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+        before_document = extract_bento_doc(load_html(self.root / state["outputs"]["authoringHtml"]))
+        introduction_hash = slide_hashes(before_document)["導入-1"]
+        command_complete_section(self.root, state, "method")
+        command_approve_current(self.root, load_state(self.root))
+        command_advance(
+            self.root, load_state(self.root), browser_executable=None, browser_check=False,
+        )
+        state = load_state(self.root)
+        authoring = extract_bento_doc(load_html(self.root / state["outputs"]["authoringHtml"]))
+        self.assertEqual(
+            [slide["id"] for slide in authoring["slides"]],
+            ["method-new-1", "method-new-2", "導入-1"],
+        )
+        self.assertEqual(state["sections"]["method"]["slideIds"], ["method-new-1", "method-new-2"])
+        self.assertEqual(state["sections"]["method"]["bentoSlideIds"], ["method-new-1", "method-new-2"])
+        self.assertEqual(slide_hashes(authoring)["導入-1"], introduction_hash)
+        self.assertFalse((self.root / state["outputs"]["generatedHtml"]).exists())
+        self.assertFalse((self.root / state["outputs"]["finalHtml"]).exists())
 
     def test_changed_html_aborts_promotion_without_authoring_or_state_change(self) -> None:
         state = load_state(self.root)

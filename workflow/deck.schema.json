@@ -118,6 +118,7 @@
           "status": {"enum": ["planned", "authoring", "review", "approved", "html_authoring", "html_review", "bento_integration", "bento_authoring", "accepted"]},
           "canonical": {"enum": ["planning", "html", "bento"]},
           "slideIds": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+          "bentoSlideIds": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
           "approvalDigest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
           "bentoDocumentRevision": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
           "bentoRegistryRevision": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},

@@ -104,6 +104,68 @@ class SegmentMergeTests(unittest.TestCase):
                 operation="replace",
             )
 
+    def test_section_replacement_supports_n_to_m_and_changed_ids(self) -> None:
+        sentinel = self.new_slide("sentinel")
+        current = copy.deepcopy(self.document)
+        current["slides"].append(sentinel)
+        targets = [slide["id"] for slide in current["slides"][:2]]
+        before_sentinel = slide_hashes(current)["sentinel"]
+        replacements = [self.new_slide(f"new-{index}") for index in range(1, 4)]
+        incoming_registry = registry()
+        incoming_registry["protected"]["slideIds"] = [slide["id"] for slide in replacements]
+        incoming_registry["protected"]["elementIds"] = [replacements[0]["elements"][0]["id"]]
+        current_registry = registry()
+        current_registry["protected"]["slideIds"] = targets
+        current_registry["protected"]["elementIds"] = [current["slides"][0]["elements"][0]["id"]]
+        current_registry["protected"]["requiredText"] = [
+            str(current["slides"][0]["elements"][0].get("html", "")),
+        ]
+
+        expanded, expanded_registry, report = merge_segment(
+            current, current_registry, {**copy.deepcopy(current), "slides": replacements}, incoming_registry,
+            operation="replace-section", target_slide_ids=targets,
+        )
+        self.assertEqual(
+            [slide["id"] for slide in expanded["slides"]],
+            ["new-1", "new-2", "new-3", "sentinel"],
+        )
+        self.assertEqual(slide_hashes(expanded)["sentinel"], before_sentinel)
+        self.assertEqual(set(report["relationships"]["targetAfter"]), {"new-1", "new-2", "new-3"})
+        self.assertEqual(expanded_registry["protected"]["slideIds"], ["new-1", "new-2", "new-3"])
+        self.assertTrue(report["registry"]["protectedRemoved"]["slideIds"])
+
+        collapsed, _, _ = merge_segment(
+            expanded, expanded_registry,
+            {**copy.deepcopy(expanded), "slides": [self.new_slide("only-one")]}, registry(),
+            operation="replace-section", target_slide_ids=["new-1", "new-2", "new-3"],
+        )
+        self.assertEqual([slide["id"] for slide in collapsed["slides"]], ["only-one", "sentinel"])
+        self.assertEqual(slide_hashes(collapsed)["sentinel"], before_sentinel)
+
+    def test_section_replacement_allows_partial_id_reuse_but_rejects_external_dangling_reference(self) -> None:
+        sentinel = self.new_slide("sentinel")
+        current = copy.deepcopy(self.document)
+        current["slides"].append(sentinel)
+        targets = [slide["id"] for slide in current["slides"][:2]]
+        partial = [copy.deepcopy(current["slides"][0]), self.new_slide("replacement-second")]
+        merged, _, _ = merge_segment(
+            current, registry(), {**copy.deepcopy(current), "slides": partial}, registry(),
+            operation="replace-section", target_slide_ids=targets,
+        )
+        self.assertEqual(
+            [slide["id"] for slide in merged["slides"]],
+            [targets[0], "replacement-second", "sentinel"],
+        )
+
+        referenced = copy.deepcopy(current)
+        referenced["slides"][-1]["targetSlideId"] = targets[1]
+        with self.assertRaisesRegex(BentoConverterError, "referenced by other slides"):
+            merge_segment(
+                referenced, registry(),
+                {**copy.deepcopy(referenced), "slides": [self.new_slide("new-section")]}, registry(),
+                operation="replace-section", target_slide_ids=targets,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

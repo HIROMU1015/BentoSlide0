@@ -82,6 +82,12 @@ def _visible_document_text(document: dict[str, Any]) -> str:
     return "\n".join(values)
 
 
+def visible_document_text(document: dict[str, Any]) -> str:
+    """Return the text projection used by protected.requiredText validation."""
+
+    return _visible_document_text(document)
+
+
 def _reference_sets(document: dict[str, Any]) -> dict[str, set[str]]:
     result = {collection: set() for collection in REFERENCE_FIELDS.values()}
     for _, element in _elements(document):

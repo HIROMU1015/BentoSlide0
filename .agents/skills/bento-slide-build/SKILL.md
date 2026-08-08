@@ -13,16 +13,7 @@ Use natural conversation as the primary route. Translate the user's intent to on
 
 For schema v2 single/imported decks, work one section at a time: planning -> HTML authoring -> HTML review -> Bento integration -> Bento authoring -> accepted. Record exactly one canonical source (`planning`, `html`, or `bento`). HTML approval authorizes promotion but is not Bento acceptance. Promotion uses a section-only registry projection, planning order, browser conversion, revision-checked authoring storage, and a state/artifact transaction; it never rebuilds unrelated authoring slides or changes generated/final. A promoted HTML section is historical, not automatically synchronized back. After every section is accepted, require whole-deck content review.
 
-The fixed phrases below are compatibility aliases.
-
-- `この資料を作成して`: discover sources, create planning artifacts, configure all sections, submit the plan, and request material approval.
-- `この方針で進めて`: approve the plan, author the first incomplete section in the single HTML/registry pair, start HTML preview, and request visual approval.
-- `次へ`: approve the current section digest and select the next; become conversion-ready only when all current digests pass.
-- `BentoSlideに変換して`: require conversion readiness, build and verify generated output, then enter `bento_authoring`; do not create final yet.
-- `BentoSlideで編集を開始して`: require `bento_authoring` and start the shared authoring-mode Work editor without crossing an approval gate.
-- `内容を確定して`: validate authoring artifacts, enter `content_review`, and request content/structure approval; do not approve automatically.
-- `この内容で最終調整へ`: treat the phrase as approval of the currently reviewed two revisions, record their canonical digest, and initialize final artifacts and both baselines transactionally.
-- `最終調整を開始して`: require `bento_finalization`, use presentation-only final editing, save/reload, and complete final validation.
+The former fixed phrases are compatibility aliases only; use `docs/legacy-command-aliases.md` when their exact checkpoint mapping is needed. Do not present them as the primary UX.
 
 Use `scripts.deck_workflow` for every state change. Recompute revision/digest validity rather than trusting chat history. Run `resume` after resolving a blocker. For schema v1, run `migrate --dry-run` before `migrate`; migration is stage-preserving and late-stage evidence must validate before any change.
 

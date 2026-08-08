@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import Any, Iterable
 
-from .authoring_storage import validate_authoring_document
+from .authoring_storage import validate_authoring_document, visible_document_text
 from .errors import BentoConverterError
 from .registry_document import REGISTRY_COLLECTIONS, normalize_registry, registry_revision
 from .work_editor_storage import document_revision
@@ -144,6 +144,85 @@ def _external_removed_element_references(
     return references
 
 
+def _external_removed_references(
+    current: dict[str, Any], *, target_slide_ids: set[str], replacements: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    old_elements = {
+        str(element["id"])
+        for slide in current.get("slides", [])
+        if isinstance(slide, dict) and slide.get("id") in target_slide_ids
+        for element in slide.get("elements", [])
+        if isinstance(element, dict) and isinstance(element.get("id"), str)
+    }
+    new_slide_ids = {
+        str(slide["id"]) for slide in replacements if isinstance(slide.get("id"), str)
+    }
+    new_elements = {
+        str(element["id"])
+        for slide in replacements
+        for element in slide.get("elements", [])
+        if isinstance(element, dict) and isinstance(element.get("id"), str)
+    }
+    removed_slides = target_slide_ids - new_slide_ids
+    removed_elements = old_elements - new_elements
+    references: list[dict[str, Any]] = []
+    for slide in current.get("slides", []):
+        if not isinstance(slide, dict) or slide.get("id") in target_slide_ids:
+            continue
+        for path, key, value in _walk_fields(slide):
+            missing = None
+            if key in SLIDE_REFERENCE_FIELDS and key != "slideId" and isinstance(value, str) and value in removed_slides:
+                missing = "slide"
+            elif key in ELEMENT_REFERENCE_FIELDS and key != "elementId" and isinstance(value, str) and value in removed_elements:
+                missing = "element"
+            elif key in {"link", "href"} and isinstance(value, str):
+                reference = value[1:] if value.startswith("#") else value
+                if reference in removed_slides:
+                    missing = "slide"
+                elif reference in removed_elements:
+                    missing = "element"
+            if missing:
+                references.append({
+                    "slideId": slide.get("id"), "path": path, "field": key,
+                    "value": value, "missing": missing,
+                })
+    return references
+
+
+def _registry_without_replaced_protection(
+    registry: dict[str, Any], *, current: dict[str, Any], target_slide_ids: set[str],
+) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    """Remove protection owned only by slides that a section replacement removes."""
+
+    prepared = copy.deepcopy(registry)
+    target_slides = [
+        slide for slide in current.get("slides", [])
+        if isinstance(slide, dict) and slide.get("id") in target_slide_ids
+    ]
+    remaining_document = copy.deepcopy(current)
+    remaining_document["slides"] = [
+        slide for slide in remaining_document.get("slides", [])
+        if not isinstance(slide, dict) or slide.get("id") not in target_slide_ids
+    ]
+    target_element_ids = {
+        str(element["id"])
+        for slide in target_slides
+        for element in slide.get("elements", [])
+        if isinstance(element, dict) and isinstance(element.get("id"), str)
+    }
+    remaining_text = visible_document_text(remaining_document)
+    protected = prepared.setdefault("protected", {})
+    removed = {"slideIds": [], "elementIds": [], "requiredText": []}
+    for field, owned in (("slideIds", target_slide_ids), ("elementIds", target_element_ids)):
+        values = list(protected.get(field, []))
+        removed[field] = sorted(str(value) for value in values if value in owned)
+        protected[field] = [value for value in values if value not in owned]
+    required = list(protected.get("requiredText", []))
+    removed["requiredText"] = sorted(str(value) for value in required if value not in remaining_text)
+    protected["requiredText"] = [value for value in required if value in remaining_text]
+    return prepared, removed
+
+
 def merge_segment(
     current_document: dict[str, Any], current_registry: dict[str, Any],
     segment_document: dict[str, Any], segment_registry: dict[str, Any],
@@ -194,8 +273,8 @@ def merge_segment(
             raise BentoConverterError("Range and section replacement targets must be contiguous and ordered")
         if normalized_operation == "replace-range" and len(segment_slides) != len(targets):
             raise BentoConverterError("Range replacement must keep the same number of slides")
-        if normalized_operation in {"replace-range", "replace-section"} and incoming_ids != targets:
-            raise BentoConverterError("Range and section replacement must preserve target slide IDs and order")
+        if normalized_operation == "replace-range" and incoming_ids != targets:
+            raise BentoConverterError("Range replacement must preserve target slide IDs and order")
         if set(incoming_ids) & (set(existing_ids) - set(targets)):
             raise BentoConverterError("Replacement slide IDs collide with non-target slides")
         if normalized_operation == "replace-slide":
@@ -207,11 +286,27 @@ def merge_segment(
                     "Replacement removes elements referenced by other slides: "
                     + json.dumps(external, ensure_ascii=False, sort_keys=True)
                 )
+        elif normalized_operation == "replace-section":
+            external = _external_removed_references(
+                current, target_slide_ids=set(targets), replacements=segment_slides,
+            )
+            if external:
+                raise BentoConverterError(
+                    "Section replacement removes slides or elements referenced by other slides: "
+                    + json.dumps(external, ensure_ascii=False, sort_keys=True)
+                )
         for target in targets:
             before_relationships[target] = relationship_projection(current["slides"][existing_ids.index(target)])
         current["slides"][indexes[0]:indexes[-1] + 1] = segment_slides
         replaced_ids.update(targets)
-    merged_registry, registry_changes = _merge_registry(current_registry, segment_registry)
+    registry_base = current_registry
+    removed_protection = {"slideIds": [], "elementIds": [], "requiredText": []}
+    if normalized_operation == "replace-section":
+        registry_base, removed_protection = _registry_without_replaced_protection(
+            current_registry, current=current_document, target_slide_ids=replaced_ids,
+        )
+    merged_registry, registry_changes = _merge_registry(registry_base, segment_registry)
+    registry_changes["protectedRemoved"] = removed_protection
     references = _validate_references(current)
     validate_authoring_document(
         current, current=current_document, registry=merged_registry,
@@ -243,7 +338,7 @@ def merge_segment(
             "targetBefore": before_relationships,
             "targetAfter": {
                 identifier: relationship_projection(next(slide for slide in current["slides"] if slide["id"] == identifier))
-                for identifier in replaced_ids
+                for identifier in incoming_ids
             },
         },
         "validation": "pass",

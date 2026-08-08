@@ -30,7 +30,7 @@ New schema v2 single/imported decks are normally completed section by section:
 planned -> html_authoring -> html_review -> bento_integration -> bento_authoring -> accepted
 ```
 
-`canonical` is exactly one of `planning`, `html`, or `bento`. HTML approval records the current section digest and authorizes `promote-current-section`; it does not accept the Bento result. Promotion converts only that section and inserts or replaces its slides in planning order. The promoted HTML becomes a historical snapshot; later Work editor changes stay Bento-canonical and are not synchronized back. `finish-current-section` accepts the current Bento revision and opens the next section. Accepted sections can be reopened through Bento or, for a deliberate redesign, through a fresh HTML candidate. After all sections are accepted, whole-deck `content_review` is mandatory.
+`canonical` is exactly one of `planning`, `html`, or `bento`. `slideIds` records current canonical membership, while `bentoSlideIds` retains the installed authoring membership during an HTML redesign. HTML approval records the current section digest and authorizes `promote-current-section`; it does not accept the Bento result. Promotion converts only that section and atomically replaces its old contiguous Bento range with the new N-slide range, so slide count and every section-local ID may change without leaving stale slides. It rejects collisions and external dangling references, preserves planning order, and leaves unrelated hashes unchanged. The promoted HTML becomes a historical snapshot; later Work editor changes stay Bento-canonical and are not synchronized back. `finish-current-section` binds acceptance to the section slides plus their referenced registry/provenance closure and opens the next section. Accepted sections can be reopened through Bento or, for a deliberate redesign, through a fresh HTML candidate. After all sections are accepted, whole-deck `content_review` is mandatory on every low-level and high-level approval route.
 
 A content/structure request made in finalization or after completion reopens the affected authoring section. It invalidates whole-deck/final approval and requires section acceptance plus whole-deck approval again. It never enables content edits in final mode and never silently overwrites an existing final artifact set.
 
@@ -112,39 +112,9 @@ Current revisions are recomputed on save, status, review, approval, final handof
 
 Stop the final Work editor before `approve-final`; its lifetime writer lease deliberately prevents approval from racing a save. Final approval binds the document revision, final HTML byte revision, final registry revision, and runtime fingerprint. `complete` recomputes all four and refuses stale approval. Editing a completed or already-approved deck requires `reopen-finalization`, which validates the current bundle, returns to `bento_finalization`, and clears the old approval before any write.
 
-## Short-command routing
+## Legacy compatibility aliases
 
-### この資料を作成して
-
-Read `REQUEST.md`, resolve the manifest/primary source, create the planning files, register all sections, submit the plan, and ask only for material approval. With zero or ambiguous primary sources, ask only for the missing material decision.
-
-### この方針で進めて
-
-Record plan approval, select the first incomplete section, author/update the single HTML/registry source, start or refresh `http://127.0.0.1:4173/`, validate it, and request visual approval.
-
-### 次へ
-
-In `html_review`, record the current digest and select the next incomplete section. When all sections are approved and current, move to `ready_for_conversion`. Never ask for the section ID.
-
-### BentoSlideに変換して
-
-Require `ready_for_conversion`; validate every approval digest; run the single-file HTML-first build to configured generated paths without `--incremental`; inspect conversion, browser, browser-environment, screenshot, resource, runtime, and determinism evidence; call `mark-converted`, then `begin-authoring`; stop at `bento_authoring`. Interactive preview builds may use the slide cache, but conversion and approval gates always require full build/full validation. Do not start the editor until `BentoSlideで編集を開始して`, and do not initialize final yet.
-
-### BentoSlideで編集を開始して
-
-Require `bento_authoring`, start the stage-aware editor in authoring mode, and expose the same revision-checked authoring HTML/JSON/registry to the user and Work. Do not enter content review or finalization automatically.
-
-### 内容を確定して
-
-Validate the current authoring document/registry and call `begin-content-review`. Request the user's content/structure approval. Do not call `approve-content` from this phrase alone.
-
-### この内容で最終調整へ
-
-Require `content_review`; treat this phrase as explicit approval of the currently displayed content/structure, call `approve-content`, recheck both revisions, and call `begin-finalization`. Any intervening write invalidates approval. This is the only normal authoring-to-final handoff.
-
-### 最終調整を開始して
-
-Require `bento_finalization`, start finalization mode, and adjust layout/style only. Save, reload, validate against both baselines, obtain final approval, and complete.
+The former fixed Japanese phrases remain accepted aliases, but they are not the primary workflow description or required user syntax. Their exact checkpoint mapping lives in `docs/legacy-command-aliases.md`. Natural requests must be routed by intent through the high-level operations above.
 
 ## Segment and import routes
 
