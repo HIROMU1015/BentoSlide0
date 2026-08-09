@@ -7,9 +7,12 @@
     "chapters": true,
     "ci-output": true,
     "codex_bento_local_workflow_handoff": true,
+    "deck": true,
     "docs": true,
     "imports": true,
     "instructions": true,
+    "output": true,
+    "planning": true,
     "scratch": true,
     "scripts": true,
     "tests": true,
@@ -24,6 +27,11 @@
     "demo-slide-*.png": true,
     "gpt_bento_design.json": true,
     "requirements*.txt": true,
+    "REQUEST.md": true,
+    "sources/README.md": true,
+    "sources/source-manifest.yaml": true,
+    "**/.gitkeep": true,
+    "images/README.md": true,
     "start_bento_editor.cmd": true,
     "start_html_preview.cmd": true,
     "stop_bento_editor.cmd": true,
@@ -33,6 +41,7 @@
   "explorer.fileNesting.enabled": true,
   "explorer.fileNesting.expand": false,
   "explorer.fileNesting.patterns": {
+    "START_HERE.md": "README.md",
     "start_deck_workspace.cmd": "stop_deck_workspace.cmd"
   }
 }

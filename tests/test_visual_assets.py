@@ -99,6 +99,11 @@ class VisualAssetTests(unittest.TestCase):
             self.assertEqual(extraction["figureNumber"], "Fig. 1")
             self.assertEqual(extraction["caption"], "Overview")
             self.assertTrue((root / result["path"]).read_bytes().startswith(b"\x89PNG"))
+            self.assertEqual(result["libraryPath"], "images/extracted/paper-fig-1.png")
+            self.assertEqual(
+                (root / result["libraryPath"]).read_bytes(),
+                (root / result["path"]).read_bytes(),
+            )
 
     def test_visual_plan_contract(self) -> None:
         validate_visual_plan({

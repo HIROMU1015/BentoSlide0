@@ -18,3 +18,9 @@ output/html-preview*.log
 output/.bento-cache/
 sources/private/*
 !sources/private/.gitkeep
+images/user/*
+!images/user/.gitkeep
+images/extracted/*
+!images/extracted/.gitkeep
+images/generated/*
+!images/generated/.gitkeep

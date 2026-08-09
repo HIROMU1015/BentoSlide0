@@ -9,3 +9,5 @@ Place papers and non-public supporting material in `sources/private/`. The direc
 - Japanese filenames are supported.
 
 Agents read these as local files only and must not stage or commit private sources. Registry v2 provenance points to stable manifest source IDs. Public, redistributable fixtures may be placed outside `sources/private/` when intentionally tracked. Imported HTML originals remain isolated under `imports/` and are handled by the static importer rather than treated as trusted pages.
+
+User-supplied and agent-created image files live in the separate visible `images/` library. `images/user/` is the intake folder, `images/extracted/` keeps PDF/source crops, and `images/generated/` keeps generated explanatory art. Those library files remain local and become build inputs only after the transactional visual registration flow copies them into the hidden `deck/assets/` registry source of truth.

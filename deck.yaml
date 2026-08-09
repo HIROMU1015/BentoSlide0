@@ -1,9 +1,9 @@
 schemaVersion: 2
 project:
-  kind: paper_explanation
-  title: null
+  kind: workflow_explainer
+  title: BentoSlide0を実際に使う
   request: REQUEST.md
-  primarySource: null
+  primarySource: START_HERE.md
   supplementarySources: []
 sources:
   manifest: sources/source-manifest.yaml
@@ -14,10 +14,10 @@ authoring:
   registry: deck/deck.registry.json
   currentSection: null
 workflow:
-  stage: initialized
-  status: pending
+  stage: awaiting_plan_approval
+  status: awaiting_approval
   owner: work
-  sourceOfTruth: sources
+  sourceOfTruth: planning
   currentChapter: null
   currentSection: null
   blockingReason: null
@@ -33,7 +33,62 @@ approvals:
     approvalDigest: null
     approvedAt: null
   finalBento: pending
-sections: {}
+sections:
+  promise:
+    title: promise
+    status: planned
+    canonical: planning
+    slideIds: []
+    bentoSlideIds: []
+    approvalDigest: null
+    bentoDocumentRevision: null
+    bentoRegistryRevision: null
+    bentoSectionDigest: null
+    acceptedAt: null
+  request-and-plan:
+    title: request-and-plan
+    status: planned
+    canonical: planning
+    slideIds: []
+    bentoSlideIds: []
+    approvalDigest: null
+    bentoDocumentRevision: null
+    bentoRegistryRevision: null
+    bentoSectionDigest: null
+    acceptedAt: null
+  section-work:
+    title: section-work
+    status: planned
+    canonical: planning
+    slideIds: []
+    bentoSlideIds: []
+    approvalDigest: null
+    bentoDocumentRevision: null
+    bentoRegistryRevision: null
+    bentoSectionDigest: null
+    acceptedAt: null
+  approval-and-final:
+    title: approval-and-final
+    status: planned
+    canonical: planning
+    slideIds: []
+    bentoSlideIds: []
+    approvalDigest: null
+    bentoDocumentRevision: null
+    bentoRegistryRevision: null
+    bentoSectionDigest: null
+    acceptedAt: null
+  revision-and-summary:
+    title: revision-and-summary
+    status: planned
+    canonical: planning
+    slideIds: []
+    bentoSlideIds: []
+    approvalDigest: null
+    bentoDocumentRevision: null
+    bentoRegistryRevision: null
+    bentoSectionDigest: null
+    acceptedAt: null
 chapters: {}
 handoff:
   readyForCodex: false

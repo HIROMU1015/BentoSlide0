@@ -73,6 +73,16 @@ For backward compatibility, registry definitions without `origin` remain valid. 
 
 ## Asset and PDF figure flow
 
+The visible `images/` directory is the local image library:
+
+```text
+images/user/        images supplied by the user
+images/extracted/   source figures extracted by Work/GPT
+images/generated/   generated explanatory images
+```
+
+Library files are local intake/history, not registry authority. Registration copies the selected bytes into the hidden `deck/assets/` tree and binds them to the registry digest. PDF extraction preserves its crop in `images/extracted/` and registers the same bytes transactionally. Image-generation output must first be saved under `images/generated/`; user-provided images remain under `images/user/`.
+
 The internal registration command copies an image, computes its `contentDigest`, and updates asset and figure definitions in the same crash-recoverable transaction. Destinations are selected by origin:
 
 ```text
@@ -85,11 +95,11 @@ Examples for agent/tooling use:
 
 ```powershell
 python -m scripts.register_visual_asset --root . --registry deck/deck.registry.json register `
-  --input scratch/paper-fig-3.png --asset-id paper-fig-3 --kind source-original `
+  --input images/user/paper-fig-3.png --asset-id paper-fig-3 --kind source-original `
   --role source-figure --source-ref "paper::Fig. 3, p. 7" --caption "Method overview"
 
 python -m scripts.register_visual_asset --root . --registry deck/deck.registry.json register `
-  --input scratch/method-concept.png --asset-id method-concept --kind generated `
+  --input images/generated/method-concept.png --asset-id method-concept --kind generated `
   --role conceptual-illustration --description "Intuition, not evidence" --generator "GPT image capability"
 
 python -m scripts.register_visual_asset --root . --registry deck/deck.registry.json extract-pdf `
@@ -97,7 +107,7 @@ python -m scripts.register_visual_asset --root . --registry deck/deck.registry.j
   --locator "Fig. 3, p. 7" --figure-number "Fig. 3" --caption "Method overview"
 ```
 
-PDF extraction records the one-based page, figure number, caption, crop rectangle in PDF points, and render DPI. It resolves the PDF from the registered repository-relative source path and needs no manual user crop. `--replace` is explicit; ID/path collisions otherwise fail. The supported `pymupdf` module is used only for PDF rendering.
+PDF extraction records the one-based page, figure number, caption, crop rectangle in PDF points, render DPI, and persistent `images/extracted/` library path. It resolves the PDF from the registered repository-relative source path and needs no manual user crop. `--replace` is explicit; ID/path collisions otherwise fail. The supported `pymupdf` module is used only for PDF rendering.
 
 ## HTML, Bento, and rolling sections
 

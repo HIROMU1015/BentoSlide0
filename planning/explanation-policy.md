@@ -1,3 +1,33 @@
-# Explanation policy
+# Explanation policy — BentoSlide0を実際に使う
 
-<!-- ChatGPT Work writes the source-grounded explanation policy here. -->
+## 説明の目的
+
+初見の利用者が「このリポジトリを自分の資料制作に使うと、何をして、何が返り、どこで判断するのか」を9枚で具体的に想像できるようにする。内部workflowの網羅説明ではなく、1件の資料を開始から完成後の修正まで追う利用体験を主役にする。
+
+## 想定読者
+
+- BentoSlide0を初めて複製した利用者
+- ChatGPT Workとの会話で資料を作りたいが、CLI、registry、revisionを覚えたくない人
+- HTMLで設計した後も、Bento上で内容やレイアウトを調整したい人
+
+## 説明原則
+
+1. 各スライドは「利用者がすること」「画面に見えること」「裏側で守られること」の順に読むだけで理解できるようにする。
+2. 利用者の発話は固定コマンドではなく、実際に使える自然な日本語の例として示す。
+3. `deck.yaml`、registry、revision、transactionなどの内部語は主見出しにせず、必要な箇所だけ「自動で保護」の根拠として小さく示す。
+4. HTML確認とBento編集、内容確定と最終レイアウト調整を混同させない。
+5. すべてが一度に自動承認されるようには描かず、人が確認するcheckpointを明示する。
+6. 完成後の変更経路も含め、「作って終わり」ではなく安全に戻れる運用として説明する。
+7. 数字をキャッチコピーに固定せず、workflow変更で陳腐化しにくい表現を使う。
+
+## 視覚方針
+
+- 16:9、明るいアイボリー背景、濃いチャコール文字、青緑を進行色、オレンジを人の判断色にする。
+- 3〜8枚目の下部に同じjourney barを固定し、現在位置だけを強調する。
+- 会話例は吹き出し、画面結果は白いアプリwindow、内部処理は薄い補足cardとして視覚的に分離する。
+- folder、ChatGPT Work、HTML preview、Bento editor、final viewerを簡潔なUI mockとして描き、抽象的な矢印だけの資料にしない。
+- 1枚につき主張は1つ。文章は短くし、コードや長いパスは本文に出さない。
+
+## 事実の扱い
+
+`START_HERE.md`を一次説明とし、`README.md`、`workflow/WORKFLOW.md`、authoring lifecycle、source-of-truth、transaction、legacy alias文書で裏付ける。資料中の手順・保護・変更可能範囲はこれらに記載された現行仕様だけを使う。

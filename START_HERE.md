@@ -2,6 +2,8 @@
 
 このリポジトリは1資料分のローカルBentoSlide制作環境です。一次資料を`sources/private/`へ置き、ChatGPT Workへ作りたい資料を普段の言葉で伝えてください。依頼内容は`REQUEST.md`へ保存され、参照資料が1件ならmanifestへ自動登録されます。
 
+画像は`images/`へ置きます。自分で追加する画像は`images/user/`、Work/GPTが資料から切り出した画像は`images/extracted/`、生成した説明画像は`images/generated/`です。登録・出典・Bentoへの埋め込みはエージェントが行うため、`deck/`やregistryを直接編集する必要はありません。
+
 例えば「この資料を、初見の人にも分かる8枚の説明資料にして」「第2部の図を簡潔にして」のように依頼できます。従来の短文コマンドも互換経路として使えます。
 
 Work/Codexは自分で`deck.yaml`と`python -m scripts.deck_workflow status --json`を確認し、`workflow/WORKFLOW.md`の現在stageだけを実行します。ユーザーにYAML更新、ファイル名、section番号、registry更新、log、port、CLI操作を求めません。

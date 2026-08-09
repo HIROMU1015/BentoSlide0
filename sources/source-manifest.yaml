@@ -1,3 +1,31 @@
 schemaVersion: 1
 authorityMode: single
-items: []
+items:
+  - id: start-here
+    path: START_HERE.md
+    type: text/markdown
+    role: primary
+  - id: readme
+    path: README.md
+    type: text/markdown
+    role: evidence
+  - id: workflow
+    path: workflow/WORKFLOW.md
+    type: text/markdown
+    role: evidence
+  - id: authoring-lifecycle
+    path: docs/authoring-lifecycle.md
+    type: text/markdown
+    role: evidence
+  - id: source-of-truth
+    path: docs/source-of-truth-policy.md
+    type: text/markdown
+    role: reference
+  - id: artifact-transactions
+    path: docs/artifact-transactions.md
+    type: text/markdown
+    role: reference
+  - id: legacy-aliases
+    path: docs/legacy-command-aliases.md
+    type: text/markdown
+    role: supplementary

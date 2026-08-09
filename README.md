@@ -6,13 +6,14 @@
 
 1. このリポジトリを資料ごとに複製します。
 2. 一次資料を`sources/private/`へ置きます。
-3. ChatGPT Workへ、作りたい資料を普段の言葉で伝えます。
-4. Workが依頼を`REQUEST.md`へ保存し、曖昧でなければsource manifestも準備します。
-5. Workが各slideで図の有効性も判断し、必要ならnative図・出典付き原図・生成visualを提案します。
-6. 構成を確認します。
-7. 各sectionをHTML確認、Bento昇格、Bento編集、section確定の順で仕上げます。
-8. 全section確定後に資料全体の内容を確認します。
-9. 最終調整ではレイアウト・styleだけを仕上げます。
+3. 必要なら手持ち画像を`images/user/`へ置きます。抽出画像と生成画像はWorkが`images/extracted/`と`images/generated/`へ整理します。
+4. ChatGPT Workへ、作りたい資料を普段の言葉で伝えます。
+5. Workが依頼を`REQUEST.md`へ保存し、曖昧でなければsource manifestも準備します。
+6. Workが各slideで図の有効性も判断し、必要ならnative図・出典付き原図・生成visualを提案します。
+7. 構成を確認します。
+8. 各sectionをHTML確認、Bento昇格、Bento編集、section確定の順で仕上げます。
+9. 全section確定後に資料全体の内容を確認します。
+10. 最終調整ではレイアウト・styleだけを仕上げます。
 
 ファイル名、section番号、状態更新、ログ、port、変換コマンドはエージェントが`deck.yaml`から判断します。`deck.yaml`はschema v2の唯一の機械状態です。Windowsでは`start_deck_workspace.cmd`がstageに応じてHTML preview、authoring editor、final editor、完成版viewerを選びます。従来の短文コマンドも互換経路として維持しています。
 

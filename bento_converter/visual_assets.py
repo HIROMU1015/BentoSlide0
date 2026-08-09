@@ -205,6 +205,7 @@ def extract_pdf_figure(
 ) -> dict[str, Any]:
     """Render a PDF crop to PNG, then register it as source-original."""
 
+    asset_id = _safe_id(asset_id, label="asset_id")
     try:
         import pymupdf  # type: ignore[import-not-found]
     except ImportError as exc:
@@ -242,9 +243,11 @@ def extract_pdf_figure(
     finally:
         if "document" in locals():
             document.close()
-    temporary = root / "output" / ".visual-assets" / f"{asset_id}.png"
-    temporary.parent.mkdir(parents=True, exist_ok=True)
-    temporary.write_bytes(png)
+    library_path = root / "images" / "extracted" / f"{asset_id}.png"
+    if library_path.exists() and not replace:
+        raise BentoConverterError(f"Extracted image library path already exists: {library_path}")
+    library_path.parent.mkdir(parents=True, exist_ok=True)
+    library_path.write_bytes(png)
     extraction = {
         "page": page,
         "crop": [x0, y0, x1, y1],
@@ -252,18 +255,16 @@ def extract_pdf_figure(
         **({"figureNumber": figure_number} if figure_number else {}),
         **({"caption": caption} if caption else {}),
     }
-    try:
-        return register_visual_asset(
-            repository=root,
-            registry_path=registry_file,
-            input_path=temporary,
-            asset_id=asset_id,
-            kind="source-original",
-            role=role,
-            source_references=[SourceReference(source_id, locator)],
-            caption=caption,
-            extraction=extraction,
-            replace=replace,
-        )
-    finally:
-        temporary.unlink(missing_ok=True)
+    result = register_visual_asset(
+        repository=root,
+        registry_path=registry_file,
+        input_path=library_path,
+        asset_id=asset_id,
+        kind="source-original",
+        role=role,
+        source_references=[SourceReference(source_id, locator)],
+        caption=caption,
+        extraction=extraction,
+        replace=replace,
+    )
+    return {**result, "libraryPath": library_path.relative_to(root).as_posix()}
