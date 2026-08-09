@@ -1,0 +1,38 @@
+{
+  "files.exclude": {
+    ".agents": true,
+    ".github": true,
+    ".vscode": true,
+    "bento_converter": true,
+    "chapters": true,
+    "ci-output": true,
+    "codex_bento_local_workflow_handoff": true,
+    "docs": true,
+    "imports": true,
+    "instructions": true,
+    "scratch": true,
+    "scripts": true,
+    "tests": true,
+    "workflow": true,
+    ".gitattributes": true,
+    ".gitignore": true,
+    "AGENTS.md": true,
+    "Bento_Slides.base.bento.html": true,
+    "deck.yaml": true,
+    "demo.bento.html": true,
+    "demo.generated.bento.html": true,
+    "demo-slide-*.png": true,
+    "gpt_bento_design.json": true,
+    "requirements*.txt": true,
+    "start_bento_editor.cmd": true,
+    "start_html_preview.cmd": true,
+    "stop_bento_editor.cmd": true,
+    "stop_html_preview.cmd": true
+  },
+  "explorer.compactFolders": true,
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.expand": false,
+  "explorer.fileNesting.patterns": {
+    "start_deck_workspace.cmd": "stop_deck_workspace.cmd"
+  }
+}
