@@ -67,7 +67,7 @@ python -m scripts.build_bento_from_html `
 
 編集反復では同じ出力先へ`--incremental`を付けると、slide DOM、関連registry/assets、global CSS/theme、runtime、browser/font environmentが一致するslideだけ`output/.bento-cache/`から再利用します。source/Bento PNGはrecord内SHA-256と一致する場合だけ再利用され、不一致や中断recordはcache missになります。通常buildはcacheを再利用せずfull evidenceを再生成し、workflowの変換・承認gateでも必ずfull build/full validationを使います。cacheは正本でも承認証跡でもありません。
 
-whole-deck HTML承認は、各section DOM、参照registry projection、参照asset content、global CSS/themeから決定論的digestを一括記録します。承認後の変更は該当section（global CSS/themeは全section）を未承認へ戻し、変換を拒否します。修正候補は承認前に正本へ入らず、関連slideを含む影響範囲を提示してから適用されます。
+whole-deck HTML承認は、各section DOM、参照registry projection、参照asset content、global CSS/themeから決定論的digestを一括記録します。承認後の変更は該当section（global CSS/themeは全section）を未承認へ戻し、変換を拒否します。修正候補は承認前に正本へ入らず、人向け説明と機械判定を同じdigestへ固定して影響範囲を提示します。適用時は正本と候補を同一lease内で再検証し、適用後の影響slideについてbrowser report・環境fingerprint・screenshotが揃うまで全体承認へ進みません。
 
 ## Bento authoringとfinalization
 

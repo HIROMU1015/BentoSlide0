@@ -18,6 +18,7 @@ output/html-preview*.log
 output/.bento-cache/
 output/.bento-transactions/
 output/html-change-proposals/
+output/html-change-reviews/
 **/.bento-html-change-*.candidate.html
 **/.bento-html-change-*.candidate.registry.json
 sources/private/*

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -11,8 +13,20 @@ from .registry_document import registry_revision
 from .section_approval import HtmlDeckStructureEvidence, compute_html_deck_structure_evidence
 
 
-HTML_CHANGE_FORMAT = "bento/html-change-proposal/v1"
+HTML_CHANGE_FORMAT = "bento/html-change-proposal/v2"
+HTML_CHANGE_DIGEST_FORMAT = "bento/html-change-proposal-digest/v1"
 HTML_CHANGE_SCOPES = {"local", "related", "global"}
+PROPOSAL_DIGEST_FIELDS = (
+    "format", "proposalId",
+    "baseHtmlRevision", "baseRegistryRevision",
+    "candidateHtml", "candidateRegistry",
+    "candidateHtmlRevision", "candidateRegistryRevision",
+    "request", "summary", "impactSummary", "scope",
+    "requestedSlideIds", "relatedSlideIds", "changedSlideIds", "affectedSlideIds",
+    "addedSlideIds", "removedSlideIds", "changedSectionIds", "slideTitles",
+    "reordered", "sectionMembershipChanged", "structuralImpact",
+    "globalStyleChanged", "registryChanged",
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +71,22 @@ class HtmlChangeImpact:
             "changedSectionIds": list(self.changed_section_ids),
             "slideTitles": dict(self.slide_titles),
         }
+
+
+def html_change_proposal_digest(proposal: dict[str, Any]) -> str:
+    """Bind human explanation and machine impact to the exact candidate bytes."""
+
+    missing = [field for field in PROPOSAL_DIGEST_FIELDS if field not in proposal]
+    if missing:
+        raise BentoConverterError(f"HTML change proposal digest fields are missing: {missing}")
+    payload = {
+        "format": HTML_CHANGE_DIGEST_FORMAT,
+        "proposal": {field: proposal[field] for field in PROPOSAL_DIGEST_FIELDS},
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _ordered_union(*values: Iterable[str]) -> tuple[str, ...]:
@@ -152,9 +182,9 @@ def analyze_html_change(
 
     requested_set = set(requested)
     related_effect = bool(set(changed) - requested_set) or bool(related) or registry_changed
-    if global_style_changed:
+    if structural or global_style_changed:
         scope = "global"
-    elif structural or related_effect:
+    elif related_effect:
         scope = "related"
     else:
         scope = "local"

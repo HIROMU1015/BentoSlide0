@@ -31,9 +31,9 @@ planning -> complete HTML/registry -> whole-deck preview
          -> reviewed change proposals -> one HTML approval -> deterministic conversion
 ```
 
-The first HTML review registers every slide under its planned section, but the user reviews the deck as one story. Later natural-language edits never overwrite reviewed canonical HTML immediately. The agent creates a temporary candidate and a machine-readable `bento/html-change-proposal/v1` report containing the requested, changed, related, added, removed, reordered, and affected slides; section, registry, structural, and global-style impact; and human-facing summaries. Global CSS/theme or structural changes conservatively require whole-deck review. Registry changes expand review to every affected section.
+The first HTML review registers every slide under its planned section, but the user reviews the deck as one story. Later natural-language edits never overwrite reviewed canonical HTML immediately. The agent creates a temporary candidate and a machine-readable `bento/html-change-proposal/v2` report containing the requested, changed, related, added, removed, reordered, and affected slides; section, registry, structural, and global-style impact; and human-facing summaries. Global CSS/theme or structural changes conservatively require whole-deck review. Registry changes expand review to every affected section.
 
-The user is told what the candidate changes and whether it can affect other slides before confirmation. `approve-html-change` binds confirmation to the current canonical HTML/registry revisions, exact candidate revisions, and recomputed impact. `apply-html-change` is the only route that replaces canonical HTML/registry, does so transactionally, and returns the complete deck to HTML review. A stale or tampered proposal is rejected; cancellation remains safe because it never installs candidate bytes. The preview sidebar can switch between current and candidate versions and lists every affected slide. See `docs/html-change-review.md`.
+The user is told what the candidate changes and whether it can affect other slides before confirmation. `approve-html-change` binds confirmation to the current canonical HTML/registry revisions, exact candidate revisions, human explanation, and recomputed impact. `apply-html-change` is the only route that replaces canonical HTML/registry; it revalidates every bound input under one union writer lease, commits transactionally, and returns the complete deck to HTML review. `check-html-change` then stores revision-bound browser/environment/screenshot evidence for every affected slide still present. Whole-deck HTML approval is refused until that evidence is current. A stale or tampered proposal is rejected; cancellation remains safe because it never installs candidate bytes. The preview sidebar can switch between current and candidate versions and lists every affected slide. See `docs/html-change-review.md`.
 
 Sections are still required for planning order, provenance closure, approval digests, impact reporting, and optional targeted work, but they are not separate user approval gates in whole-deck mode. One final HTML approval stores every current section digest and opens conversion.
 
@@ -55,7 +55,7 @@ Natural conversation is routed internally to the high-level operations below. `a
 advance / approve-current / promote-current-section / edit-current
 finish-current-section / reopen-current-section / review-whole-deck
 capture-request / route / status [--json]
-propose-html-change / approve-html-change / apply-html-change / cancel-html-change
+propose-html-change / approve-html-change / apply-html-change / check-html-change / cancel-html-change
 ```
 
 ## State commands
@@ -72,6 +72,7 @@ approve-html-deck               bind one approval to all current section digests
 propose-html-change             snapshot and analyze a candidate; canonical stays unchanged
 approve-html-change             confirm the exact current proposal and impact
 apply-html-change               transactionally install only the approved candidate
+check-html-change               browser-check installed affected slides and bind the evidence
 cancel-html-change              close a proposal without changing canonical HTML
 promote-current-section         section-only conversion and authoring transaction
 promote-section --section ...   explicit-ID compatibility form of the same transaction

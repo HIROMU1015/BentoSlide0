@@ -18,13 +18,14 @@ from scripts.deck_workflow import WorkflowError, load_state, repository_root
 
 
 STATUS_FORMAT = "bento/html-preview-status/v1"
-ACTIVE_HTML_CHANGE_STATUSES = {"proposed", "approved"}
+VISIBLE_HTML_CHANGE_STATUSES = {"proposed", "approved", "applied"}
 
 
 def _html_change_preview(state: dict[str, Any]) -> dict[str, Any] | None:
     proposal = state.get("authoring", {}).get("htmlChange")
-    if not isinstance(proposal, dict) or proposal.get("status") not in ACTIVE_HTML_CHANGE_STATUSES:
+    if not isinstance(proposal, dict) or proposal.get("status") not in VISIBLE_HTML_CHANGE_STATUSES:
         return None
+    post_apply = proposal.get("postApplyReview") if isinstance(proposal.get("postApplyReview"), dict) else None
     candidate = str(proposal.get("candidateHtml") or "")
     return {
         "proposalId": proposal.get("proposalId"),
@@ -36,6 +37,7 @@ def _html_change_preview(state: dict[str, Any]) -> dict[str, Any] | None:
         "slideTitles": dict(proposal.get("slideTitles") or {}),
         "candidatePath": candidate,
         "candidateUrl": "/" + quote(candidate.replace("\\", "/"), safe="/"),
+        "postApplyReviewStatus": post_apply.get("status") if post_apply else None,
     }
 
 
@@ -83,7 +85,7 @@ def _index_html(repository: Path) -> bytes:
             change_panel = f"""
 <section class="change-review" id="html-change-review">
 <h2>変更案の確認</h2>
-<p><code>{html.escape(str(change['status']))}</code> / <code>{html.escape(str(change['scope']))}</code></p>
+<p><code>{html.escape(str(change['status']))}</code> / <code>{html.escape(str(change['scope']))}</code>{f" / browser review: <code>{html.escape(str(change['postApplyReviewStatus']))}</code>" if change['postApplyReviewStatus'] else ''}</p>
 <p>{html.escape(str(change['summary']))}</p>
 <p>{html.escape(str(change['impactSummary']))}</p>
 <details><summary>確認が必要なスライド ({len(change['affectedSlideIds'])})</summary><ul>{affected}</ul></details>

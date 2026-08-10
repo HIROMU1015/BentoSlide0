@@ -54,6 +54,27 @@ class CiFinalizationFixtureTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "Refusing"):
             main(["--root", str(self.root)])
 
+    def test_windows_smoke_uses_explicit_initialized_and_whole_deck_states(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        save_state = workflow.index('Copy-Item deck.yaml $wholeDeckState')
+        install_initialized = workflow.index(
+            'Copy-Item tests/fixtures/deck_v2.initialized.yaml deck.yaml'
+        )
+        initialized_start = workflow.index('"initialized start_deck_workspace.cmd failed')
+        restore_whole_deck = workflow.index('Copy-Item $wholeDeckState deck.yaml')
+        whole_deck_start = workflow.index('"whole-deck start_deck_workspace.cmd failed')
+        self.assertLess(
+            save_state,
+            install_initialized,
+        )
+        self.assertLess(install_initialized, initialized_start)
+        self.assertLess(initialized_start, restore_whole_deck)
+        self.assertLess(restore_whole_deck, whole_deck_start)
+        self.assertIn(
+            '$workspaceStatus.stage -ne "html_review" -or $workspaceStatus.mode -ne "single"',
+            workflow,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

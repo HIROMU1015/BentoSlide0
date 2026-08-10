@@ -13,6 +13,7 @@ from PIL import Image
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError, BrowserCheckError
 from bento_converter.html_converter import convert_html_layout
+from bento_converter.html_change_review import collect_html_change_browser_evidence
 from bento_converter.html_layout import LayoutResult
 from bento_converter.html_pipeline import build_from_html
 from bento_converter.html_source import SourceChapter, discover_chapters, discover_source_unit, merge_registries
@@ -192,6 +193,44 @@ class HtmlConversionTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("BENTO_BROWSER_TEST") == "1", "Set BENTO_BROWSER_TEST=1 for Chromium HTML-first integration.")
 class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
+    def test_post_apply_review_captures_only_affected_slides(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "deck.preview.html"
+            registry_path = root / "deck.registry.json"
+            source.write_text(
+                "<!doctype html><style>html,body{margin:0}.slide{position:relative;width:1280px;height:720px;"
+                "overflow:hidden;background:#fff}.text{position:absolute;width:400px;height:80px}</style>"
+                "<main data-bento-deck>"
+                "<section class='slide' data-slide-id='one' data-section-id='intro'>"
+                "<div class='text' data-bento-id='one-title' data-bento-type='text' "
+                "style='left:80px;top:80px'>One</div></section>"
+                "<section class='slide' data-slide-id='two' data-section-id='method'>"
+                "<div class='text' data-bento-id='two-title' data-bento-type='text' "
+                "style='left:80px;top:80px'>Two</div></section></main>",
+                encoding="utf-8",
+            )
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "deck", "sources": {},
+                "document": {"title": "Post-apply review"},
+                "assets": {}, "fonts": {}, "equations": {}, "figures": {},
+                "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }), encoding="utf-8")
+
+            evidence = collect_html_change_browser_evidence(
+                html_path=source,
+                registry_path=registry_path,
+                affected_slide_ids=["two"],
+                screenshots_dir=root / "screenshots",
+            )
+
+            self.assertEqual(evidence.report["status"], "pass")
+            self.assertEqual(evidence.report["affectedSlideIds"], ["two"])
+            self.assertEqual(set(evidence.screenshots), {"two"})
+            self.assertTrue(evidence.screenshots["two"].is_file())
+            self.assertTrue(evidence.environment["environmentDigest"].startswith("sha256:"))
+
     def test_visual_origins_embed_images_and_native_diagram_without_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

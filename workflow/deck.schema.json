@@ -45,13 +45,14 @@
             "format", "proposalId", "status", "baseHtmlRevision", "baseRegistryRevision",
             "candidateHtml", "candidateRegistry", "candidateHtmlRevision", "candidateRegistryRevision",
             "proposalPath", "request", "summary", "impactSummary", "scope",
+            "proposalDigest", "approvedProposalDigest", "postApplyReview",
             "requestedSlideIds", "relatedSlideIds", "changedSlideIds", "affectedSlideIds",
             "addedSlideIds", "removedSlideIds", "changedSectionIds", "slideTitles",
             "reordered", "sectionMembershipChanged", "structuralImpact", "globalStyleChanged",
             "registryChanged", "proposedAt", "approvedAt", "appliedAt", "cancelledAt"
           ],
           "properties": {
-            "format": {"const": "bento/html-change-proposal/v1"},
+            "format": {"const": "bento/html-change-proposal/v2"},
             "proposalId": {"type": "string", "pattern": "^[a-f0-9]{12}$"},
             "status": {"enum": ["proposed", "approved", "applied", "cancelled"]},
             "baseHtmlRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
@@ -64,6 +65,8 @@
             "request": {"type": "string", "minLength": 1},
             "summary": {"type": "string", "minLength": 1},
             "impactSummary": {"type": "string", "minLength": 1},
+            "proposalDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "approvedProposalDigest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
             "scope": {"enum": ["local", "related", "global"]},
             "requestedSlideIds": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
             "relatedSlideIds": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
@@ -78,6 +81,41 @@
             "structuralImpact": {"type": "boolean"},
             "globalStyleChanged": {"type": "boolean"},
             "registryChanged": {"type": "boolean"},
+            "postApplyReview": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": [
+                "format", "status", "proposalDigest", "htmlRevision", "registryRevision",
+                "affectedSlideIds", "reportPath", "reportRevision", "environmentPath",
+                "environmentRevision", "browserEnvironmentDigest", "screenshots", "checkedAt"
+              ],
+              "properties": {
+                "format": {"const": "bento/html-change-post-apply-review/v1"},
+                "status": {"enum": ["pending", "checked"]},
+                "proposalDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "htmlRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "registryRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "affectedSlideIds": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+                "reportPath": {"type": "string", "minLength": 1},
+                "reportRevision": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+                "environmentPath": {"type": "string", "minLength": 1},
+                "environmentRevision": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+                "browserEnvironmentDigest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+                "screenshots": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["path", "revision"],
+                    "properties": {
+                      "path": {"type": "string", "minLength": 1},
+                      "revision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+                    }
+                  }
+                },
+                "checkedAt": {"type": ["string", "null"], "format": "date-time"}
+              }
+            },
             "proposedAt": {"type": "string", "format": "date-time"},
             "approvedAt": {"type": ["string", "null"], "format": "date-time"},
             "appliedAt": {"type": ["string", "null"], "format": "date-time"},

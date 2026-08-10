@@ -220,6 +220,9 @@ jobs:
           git archive --format=zip --output=$archive HEAD
           Expand-Archive -LiteralPath $archive -DestinationPath $copy
           Set-Location $copy
+          $wholeDeckState = Join-Path $env:RUNNER_TEMP "whole-deck-html-review.yaml"
+          Copy-Item deck.yaml $wholeDeckState
+          Copy-Item tests/fixtures/deck_v2.initialized.yaml deck.yaml
           New-Item -ItemType Directory -Force output/diagnostics | Out-Null
           Copy-Item demo.bento.html output/presentation.generated.bento.html
           Set-Content output/diagnostics/merged-registry.json "{}" -Encoding utf8
@@ -244,6 +247,19 @@ jobs:
           if ($exitCode -ne 0) { throw "initialized start_deck_workspace.cmd failed: $exitCode" }
           if ((Test-Path output/html-preview-session.json) -or (Test-Path output/work-editor-session.json)) {
             throw "initialized workspace unexpectedly started a server"
+          }
+          Copy-Item $wholeDeckState deck.yaml
+          $exitCode = Invoke-CmdLauncher (Join-Path $copy "start_deck_workspace.cmd") "-NoClipboard"
+          if ($exitCode -ne 0) { throw "whole-deck start_deck_workspace.cmd failed: $exitCode" }
+          $workspaceSession = Get-Content output/html-preview-session.json -Raw -Encoding utf8 | ConvertFrom-Json
+          $workspaceStatus = Invoke-RestMethod -Uri ($workspaceSession.url + "api/status")
+          if ($workspaceStatus.stage -ne "html_review" -or $workspaceStatus.mode -ne "single") {
+            throw "whole-deck html_review did not route to HTML preview"
+          }
+          $exitCode = Invoke-CmdLauncher (Join-Path $copy "stop_deck_workspace.cmd")
+          if ($exitCode -ne 0) { throw "whole-deck stop_deck_workspace.cmd failed: $exitCode" }
+          if ((Test-Path output/html-preview.pid) -or (Test-Path output/html-preview-session.json)) {
+            throw "whole-deck HTML preview session files remain"
           }
           $exitCode = Invoke-CmdLauncher (Join-Path $copy "start_html_preview.cmd") "-NoClipboard"
           if ($exitCode -ne 0) { throw "start_html_preview.cmd failed: $exitCode" }

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
+from bento_converter.artifact_transaction import ArtifactTransactionStore
+from bento_converter.html_change import analyze_html_change
+from bento_converter.html_change_review import (
+    HtmlChangeBrowserEvidence,
+    POST_APPLY_REPORT_FORMAT,
+)
 from bento_converter.section_approval import compute_section_approval_evidence
 from scripts.deck_workflow import (
     WorkflowError,
@@ -24,6 +32,7 @@ from scripts.deck_workflow import (
     command_complete_html_deck,
     command_configure_sections,
     command_cancel_html_change,
+    command_check_html_change,
     command_propose_html_change,
     command_prepare_conversion,
     command_submit_plan,
@@ -167,6 +176,36 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
         path.write_text(value, encoding="utf-8")
         return path.relative_to(self.root)
 
+    def browser_evidence(self, affected_slide_ids: list[str]) -> HtmlChangeBrowserEvidence:
+        screenshots: dict[str, Path] = {}
+        for index, slide_id in enumerate(affected_slide_ids, start=1):
+            path = self.root / "scratch/browser-evidence" / f"{index:02d}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"png:{slide_id}".encode("utf-8"))
+            screenshots[slide_id] = path
+        environment_digest = "sha256:" + "e" * 64
+        return HtmlChangeBrowserEvidence(
+            report={
+                "format": POST_APPLY_REPORT_FORMAT,
+                "status": "pass",
+                "affectedSlideIds": list(affected_slide_ids),
+                "checks": [
+                    {"slideId": slide_id, "status": "pass", "issues": []}
+                    for slide_id in affected_slide_ids
+                ],
+                "networkPolicy": "local-only",
+                "renderPolicy": {"animations": "disabled"},
+            },
+            environment={
+                "format": "bento/browser-environment/v1",
+                "environmentDigest": environment_digest,
+                "browserEnvironment": {
+                    "renderPolicy": {"animations": "disabled"},
+                },
+            },
+            screenshots=screenshots,
+        )
+
     def test_section_approval_detects_global_change_and_conversion_revalidates(self) -> None:
         state = load_state(self.root)
         command_configure_sections(self.root, state, ["introduction", "method"])
@@ -258,7 +297,34 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
         applied = load_state(self.root)
         self.assertIn("Updated method", (self.root / "deck/deck.preview.html").read_text(encoding="utf-8"))
         self.assertEqual(applied["authoring"]["htmlChange"]["status"], "applied")
+        self.assertEqual(
+            applied["authoring"]["htmlChange"]["postApplyReview"]["status"],
+            "pending",
+        )
         self.assertTrue(all(entry["status"] == "html_review" for entry in applied["sections"].values()))
+        with self.assertRaisesRegex(WorkflowError, "post-apply browser review"):
+            command_approve_html_deck(self.root, applied)
+
+        expected = self.browser_evidence(["method-1"])
+        with patch(
+            "scripts.deck_workflow.collect_html_change_browser_evidence",
+            return_value=expected,
+        ):
+            command_check_html_change(
+                self.root, load_state(self.root), browser_executable=None,
+            )
+        checked = load_state(self.root)
+        review = checked["authoring"]["htmlChange"]["postApplyReview"]
+        self.assertEqual(review["status"], "checked")
+        self.assertEqual(set(review["screenshots"]), {"method-1"})
+        screenshot_path = self.root / review["screenshots"]["method-1"]["path"]
+        screenshot_payload = screenshot_path.read_bytes()
+        screenshot_path.write_bytes(b"tampered screenshot")
+        with self.assertRaisesRegex(WorkflowError, "screenshot revision is stale"):
+            command_approve_html_deck(self.root, checked)
+        screenshot_path.write_bytes(screenshot_payload)
+        command_approve_html_deck(self.root, checked)
+        self.assertEqual(load_state(self.root)["workflow"]["stage"], "ready_for_conversion")
 
     def test_change_impact_expands_for_related_slides_and_global_css(self) -> None:
         state = self.whole_deck_review()
@@ -332,10 +398,131 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
         altered = load_state(self.root)
         altered["authoring"]["htmlChange"]["affectedSlideIds"] = ["導入-1"]
         altered["authoring"]["htmlChange"]["slideTitles"] = {"導入-1": "Introduction"}
-        atomic_write_state(self.root, altered)
-        with self.assertRaisesRegex(WorkflowError, "impact no longer matches"):
-            command_approve_html_change(self.root, load_state(self.root))
+        with self.assertRaisesRegex(WorkflowError, "proposalDigest"):
+            atomic_write_state(self.root, altered)
+        with self.assertRaisesRegex(WorkflowError, "explanation or impact changed"):
+            command_approve_html_change(self.root, altered)
+        unchanged = load_state(self.root)
+        self.assertEqual(
+            unchanged["authoring"]["htmlChange"]["proposalDigest"],
+            fresh["proposalDigest"],
+        )
         self.assertEqual(fresh["status"], "proposed")
+
+    def test_human_explanation_is_bound_to_the_approved_proposal(self) -> None:
+        state = self.whole_deck_review()
+        canonical = (self.root / "deck/deck.preview.html").read_text(encoding="utf-8")
+        candidate = self.candidate(canonical.replace("Method", "Updated method"))
+        command_propose_html_change(
+            self.root, state, candidate_html=candidate, candidate_registry=None,
+            request="方法を変更", summary="方法説明を変更します",
+            impact_summary="方法スライドだけに影響します",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        altered = load_state(self.root)
+        altered["authoring"]["htmlChange"]["summary"] = "承認画面とは異なる説明"
+        with self.assertRaisesRegex(WorkflowError, "explanation or impact changed"):
+            command_approve_html_change(self.root, altered)
+        self.assertEqual(
+            load_state(self.root)["authoring"]["htmlChange"]["status"],
+            "proposed",
+        )
+
+    def test_apply_revalidates_base_and_candidate_under_one_union_lease(self) -> None:
+        state = self.whole_deck_review()
+        canonical_path = self.root / "deck/deck.preview.html"
+        canonical = canonical_path.read_text(encoding="utf-8")
+        candidate = self.candidate(canonical.replace("Method", "Updated method"))
+        command_propose_html_change(
+            self.root, state, candidate_html=candidate, candidate_registry=None,
+            request="方法を変更", summary="方法説明を変更します",
+            impact_summary="方法スライドだけに影響します",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        command_approve_html_change(self.root, load_state(self.root))
+        approved = load_state(self.root)
+        proposal = approved["authoring"]["htmlChange"]
+        snapshot_html = (self.root / proposal["candidateHtml"]).resolve()
+        snapshot_registry = (self.root / proposal["candidateRegistry"]).resolve()
+        original_commit = ArtifactTransactionStore.commit
+        observed_artifacts: set[Path] = set()
+
+        def racing_commit(store, payloads, **kwargs):
+            observed_artifacts.update(store.artifacts)
+            canonical_path.write_text(
+                canonical.replace("Method", "Concurrent canonical edit"),
+                encoding="utf-8",
+            )
+            return original_commit(store, payloads, **kwargs)
+
+        with patch.object(ArtifactTransactionStore, "commit", new=racing_commit):
+            with self.assertRaisesRegex(WorkflowError, "canonical HTML changed"):
+                command_apply_html_change(self.root, approved)
+
+        self.assertIn(snapshot_html, observed_artifacts)
+        self.assertIn(snapshot_registry, observed_artifacts)
+        self.assertIn("Concurrent canonical edit", canonical_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            load_state(self.root)["authoring"]["htmlChange"]["status"],
+            "approved",
+        )
+
+    def test_structural_changes_are_always_global(self) -> None:
+        canonical_path = self.root / "deck/deck.preview.html"
+        canonical = canonical_path.read_text(encoding="utf-8")
+        registry_value = registry()
+        slides = re.findall(r'<section class="slide".*?</section>', canonical, flags=re.DOTALL)
+        self.assertEqual(len(slides), 2)
+        variants = {
+            "add": canonical.replace(
+                "</main>",
+                '<section class="slide" data-slide-id="extra-1" '
+                'data-section-id="method"><div data-bento-id="extra-text">Extra</div></section>\n</main>',
+            ),
+            "remove": canonical.replace(slides[1], ""),
+            "reorder": canonical.replace(slides[0], "__FIRST_SLIDE__")
+            .replace(slides[1], slides[0])
+            .replace("__FIRST_SLIDE__", slides[1]),
+            "membership": canonical.replace(
+                'data-slide-id="method-1" data-section-id="method"',
+                'data-slide-id="method-1" data-section-id="introduction"',
+            ),
+        }
+        expected = {"導入-1", "method-1"}
+        for name, candidate_html in variants.items():
+            with self.subTest(name=name):
+                path = self.root / "deck" / f".{name}.preview.html"
+                path.write_text(candidate_html, encoding="utf-8")
+                impact = analyze_html_change(
+                    base_html=canonical_path,
+                    base_registry=registry_value,
+                    candidate_html=path,
+                    candidate_registry=registry_value,
+                    repository=self.root,
+                    requested_slide_ids=["導入-1"],
+                )
+                self.assertEqual(impact.scope, "global")
+                self.assertTrue(impact.structural_impact)
+                self.assertTrue(expected.issubset(set(impact.affected_slide_ids)))
+
+    def test_registry_only_change_expands_to_the_affected_section(self) -> None:
+        canonical_path = self.root / "deck/deck.preview.html"
+        candidate_registry = registry()
+        candidate_registry["assets"]["plot"]["path"] = "assets/図 表 2.png"
+        (self.root / "deck/assets/図 表 2.png").write_bytes(b"asset-two")
+        impact = analyze_html_change(
+            base_html=canonical_path,
+            base_registry=registry(),
+            candidate_html=canonical_path,
+            candidate_registry=candidate_registry,
+            repository=self.root,
+            requested_slide_ids=["method-1"],
+        )
+        self.assertTrue(impact.registry_changed)
+        self.assertFalse(impact.structural_impact)
+        self.assertEqual(impact.scope, "related")
+        self.assertEqual(set(impact.affected_slide_ids), {"導入-1", "method-1"})
+        self.assertEqual(impact.changed_section_ids, ("introduction",))
 
     def test_whole_deck_change_cli_keeps_target_and_related_slides_distinct(self) -> None:
         args = workflow_parser().parse_args([

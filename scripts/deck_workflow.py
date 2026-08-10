@@ -34,7 +34,16 @@ from bento_converter.authoring_storage import (
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
-from bento_converter.html_change import HTML_CHANGE_FORMAT, HtmlChangeImpact, analyze_html_change
+from bento_converter.html_change import (
+    HTML_CHANGE_FORMAT,
+    HtmlChangeImpact,
+    analyze_html_change,
+    html_change_proposal_digest,
+)
+from bento_converter.html_change_review import (
+    POST_APPLY_REVIEW_FORMAT,
+    collect_html_change_browser_evidence,
+)
 from bento_converter.html_pipeline import build_from_html
 from bento_converter.html_source import REGISTRY_FORMAT
 from bento_converter.registry_document import (
@@ -134,6 +143,21 @@ def _html_change(state: dict[str, Any]) -> dict[str, Any] | None:
 def _has_active_html_change(state: dict[str, Any]) -> bool:
     proposal = _html_change(state)
     return bool(proposal and proposal.get("status") in ACTIVE_HTML_CHANGE_STATUSES)
+
+
+def _post_apply_review(proposal: dict[str, Any] | None) -> dict[str, Any] | None:
+    value = proposal.get("postApplyReview") if isinstance(proposal, dict) else None
+    return value if isinstance(value, dict) else None
+
+
+def _has_unfinished_html_change(state: dict[str, Any]) -> bool:
+    proposal = _html_change(state)
+    if not proposal:
+        return False
+    if proposal.get("status") in ACTIVE_HTML_CHANGE_STATUSES:
+        return True
+    review = _post_apply_review(proposal)
+    return bool(proposal.get("status") == "applied" and (not review or review.get("status") != "checked"))
 
 
 def _expected_handoff(state: dict[str, Any], *, stage: str | None = None) -> dict[str, bool]:
@@ -456,27 +480,109 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                     }:
                         raise WorkflowError("An HTML change candidate cannot overwrite the canonical source")
                 proposal_status = proposal["status"]
+                try:
+                    current_proposal_digest = html_change_proposal_digest(proposal)
+                except BentoConverterError as exc:
+                    raise WorkflowError(str(exc)) from exc
+                if proposal["proposalDigest"] != current_proposal_digest:
+                    raise WorkflowError("HTML change proposalDigest does not match its explanation and impact")
                 if proposal_status in ACTIVE_HTML_CHANGE_STATUSES and stage != "html_review":
                     raise WorkflowError("An active HTML change proposal is allowed only during whole-deck HTML review")
                 if proposal_status == "proposed" and any(
                     proposal[field] is not None for field in ("approvedAt", "appliedAt", "cancelledAt")
                 ):
                     raise WorkflowError("A proposed HTML change cannot retain approval or completion timestamps")
+                if proposal_status == "proposed" and (
+                    proposal["approvedProposalDigest"] is not None
+                    or proposal["postApplyReview"] is not None
+                ):
+                    raise WorkflowError("A proposed HTML change cannot retain approval or post-apply evidence")
                 if proposal_status == "approved" and (
                     proposal["approvedAt"] is None
                     or proposal["appliedAt"] is not None
                     or proposal["cancelledAt"] is not None
                 ):
                     raise WorkflowError("An approved HTML change requires only approvedAt")
+                if proposal_status == "approved" and (
+                    proposal["approvedProposalDigest"] != proposal["proposalDigest"]
+                    or proposal["postApplyReview"] is not None
+                ):
+                    raise WorkflowError("An approved HTML change must bind the exact proposal digest")
                 if proposal_status == "applied" and (
                     proposal["approvedAt"] is None or proposal["appliedAt"] is None
                     or proposal["cancelledAt"] is not None
                 ):
                     raise WorkflowError("An applied HTML change requires approvedAt and appliedAt")
+                if proposal_status == "applied" and (
+                    proposal["approvedProposalDigest"] != proposal["proposalDigest"]
+                    or not isinstance(proposal["postApplyReview"], dict)
+                ):
+                    raise WorkflowError("An applied HTML change requires its approved digest and post-apply review")
                 if proposal_status == "cancelled" and (
                     proposal["cancelledAt"] is None or proposal["appliedAt"] is not None
                 ):
                     raise WorkflowError("A cancelled HTML change requires cancelledAt and cannot be applied")
+                if proposal_status == "cancelled" and proposal["postApplyReview"] is not None:
+                    raise WorkflowError("A cancelled HTML change cannot retain post-apply evidence")
+                review = _post_apply_review(proposal)
+                if review is not None:
+                    review_root = (
+                        root / "output" / "html-change-reviews" / proposal["proposalId"]
+                    ).resolve()
+                    report_path = _repo_path(
+                        root, review["reportPath"],
+                        field="authoring.htmlChange.postApplyReview.reportPath",
+                    )
+                    environment_path = _repo_path(
+                        root, review["environmentPath"],
+                        field="authoring.htmlChange.postApplyReview.environmentPath",
+                    )
+                    if report_path != review_root / "browser-report.json":
+                        raise WorkflowError("Post-apply browser report path is not proposal-scoped")
+                    if environment_path != review_root / "browser-environment.json":
+                        raise WorkflowError("Post-apply browser environment path is not proposal-scoped")
+                    screenshot_paths: list[Path] = []
+                    for slide_id, screenshot in review["screenshots"].items():
+                        screenshot_path = _repo_path(
+                            root, screenshot["path"],
+                            field=f"authoring.htmlChange.postApplyReview.screenshots.{slide_id}.path",
+                        )
+                        if screenshot_path.parent != review_root / "screenshots":
+                            raise WorkflowError("Post-apply screenshot path is not proposal-scoped")
+                        screenshot_paths.append(screenshot_path)
+                    if len(screenshot_paths) != len(set(screenshot_paths)):
+                        raise WorkflowError("Post-apply slides cannot share a screenshot path")
+                    if review["format"] != POST_APPLY_REVIEW_FORMAT:
+                        raise WorkflowError("Unknown post-apply HTML review format")
+                    if review["proposalDigest"] != proposal["proposalDigest"]:
+                        raise WorkflowError("Post-apply review is bound to a different proposal")
+                    if review["htmlRevision"] != proposal["candidateHtmlRevision"]:
+                        raise WorkflowError("Post-apply review HTML revision differs from the applied candidate")
+                    if review["registryRevision"] != proposal["candidateRegistryRevision"]:
+                        raise WorkflowError("Post-apply review registry revision differs from the applied candidate")
+                    renderable_affected = [
+                        slide_id for slide_id in proposal["affectedSlideIds"]
+                        if slide_id not in set(proposal["removedSlideIds"])
+                    ]
+                    if review["affectedSlideIds"] != renderable_affected:
+                        raise WorkflowError(
+                            "Post-apply review must cover every affected slide that remains in the deck"
+                        )
+                    evidence_fields = (
+                        "reportRevision", "environmentRevision", "browserEnvironmentDigest", "checkedAt",
+                    )
+                    if review["status"] == "pending" and (
+                        any(review[field] is not None for field in evidence_fields)
+                        or review["screenshots"]
+                    ):
+                        raise WorkflowError("Pending post-apply review cannot retain completed evidence")
+                    if review["status"] == "checked" and (
+                        any(review[field] is None for field in evidence_fields)
+                        or set(review["screenshots"]) != set(review["affectedSlideIds"])
+                    ):
+                        raise WorkflowError("Checked post-apply review requires complete current evidence")
+                    if review["status"] == "pending" and stage != "html_review":
+                        raise WorkflowError("Pending post-apply review is allowed only during HTML review")
             registered_slides: set[str] = set()
             registered_bento_slides: set[str] = set()
             for section_id, section in state["sections"].items():
@@ -1484,6 +1590,11 @@ def validate_current_stage(root: Path, state: dict[str, Any]) -> None:
         validate_html_authoring(
             root, state, require_approved=stage in {"ready_for_conversion", "converting"},
         )
+        proposal = _html_change(state)
+        if proposal and proposal.get("status") == "applied":
+            review = _post_apply_review(proposal)
+            if review and review.get("status") == "checked":
+                _require_current_post_apply_review(root, state)
         return
     if stage == "bento_validation":
         validate_output_bundle(root, state, require_final=state.get("schemaVersion") == 1)
@@ -1596,6 +1707,10 @@ def valid_actions(state: dict[str, Any]) -> list[str]:
                 return ["approve-html-change", "cancel-html-change"]
             if proposal and proposal.get("status") == "approved":
                 return ["apply-html-change", "cancel-html-change"]
+            if proposal and proposal.get("status") == "applied":
+                review = _post_apply_review(proposal)
+                if not review or review.get("status") != "checked":
+                    return ["check-html-change"]
             return ["approve-current", "edit-current", "propose-html-change"]
         current = state["workflow"].get("currentSection")
         entry = state.get("sections", {}).get(current, {}) if current else {}
@@ -1675,6 +1790,13 @@ def command_advance(
             if proposal and proposal.get("status") == "approved":
                 command_apply_html_change(root, state)
                 return
+            if proposal and proposal.get("status") == "applied":
+                review = _post_apply_review(proposal)
+                if not review or review.get("status") != "checked":
+                    command_check_html_change(
+                        root, state, browser_executable=browser_executable,
+                    )
+                    return
             raise WorkflowError("The whole-deck HTML or its pending change still needs explicit approval")
         _, entry = _rolling_section(state)
         if entry["status"] == "bento_integration":
@@ -1994,6 +2116,7 @@ def command_approve_html_deck(root: Path, state: dict[str, Any]) -> None:
         raise WorkflowError("approve-html-deck requires whole-deck authoring")
     if _has_active_html_change(state):
         raise WorkflowError("Resolve the active HTML change proposal before approving the whole deck")
+    _require_current_post_apply_review(root, state)
     incomplete = [
         section_id for section_id, entry in state["sections"].items()
         if entry["status"] != "html_review" or entry.get("canonical") != "html"
@@ -2068,7 +2191,7 @@ def command_propose_html_change(
     _require_stage(state, "html_review")
     if _authoring_strategy(state) != WHOLE_DECK_STRATEGY:
         raise WorkflowError("HTML change proposals require whole-deck authoring")
-    if _has_active_html_change(state):
+    if _has_unfinished_html_change(state):
         raise WorkflowError("Resolve the active HTML change proposal before creating another")
     source_candidate = _repo_path(root, str(candidate_html), field="html-change.candidateHtml")
     if not source_candidate.is_file():
@@ -2128,11 +2251,15 @@ def command_propose_html_change(
         "summary": _clean_proposal_text(summary, field="summary"),
         "impactSummary": _clean_proposal_text(impact_summary, field="impact-summary"),
         **_proposal_impact_payload(impact, evidence),
+        "proposalDigest": None,
+        "approvedProposalDigest": None,
+        "postApplyReview": None,
         "proposedAt": utc_now(),
         "approvedAt": None,
         "appliedAt": None,
         "cancelledAt": None,
     }
+    proposal["proposalDigest"] = html_change_proposal_digest(proposal)
     next_state = copy.deepcopy(state)
     next_state["authoring"]["htmlChange"] = proposal
     validate_state(root, next_state)
@@ -2159,6 +2286,11 @@ def _verified_html_change(
     proposal = _html_change(state)
     if not proposal or proposal.get("status") != required_status:
         raise WorkflowError(f"HTML change proposal must be {required_status!r}")
+    current_digest = html_change_proposal_digest(proposal)
+    if proposal.get("proposalDigest") != current_digest:
+        raise WorkflowError("HTML change proposal explanation or impact changed after it was created")
+    if required_status == "approved" and proposal.get("approvedProposalDigest") != current_digest:
+        raise WorkflowError("HTML change approval is not bound to the current proposal digest")
     canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
     canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
     snapshot_html = _repo_path(root, proposal["candidateHtml"], field="authoring.htmlChange.candidateHtml")
@@ -2221,6 +2353,7 @@ def command_approve_html_change(root: Path, state: dict[str, Any]) -> None:
     proposal, _, _, proposal_path = _verified_html_change(root, state, required_status="proposed")
     approved = copy.deepcopy(proposal)
     approved["status"] = "approved"
+    approved["approvedProposalDigest"] = approved["proposalDigest"]
     approved["approvedAt"] = utc_now()
     _commit_proposal_state(
         root, state, approved, proposal_path, operation="approve-whole-deck-html-change",
@@ -2235,6 +2368,8 @@ def command_apply_html_change(root: Path, state: dict[str, Any]) -> None:
     )
     canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
     canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    candidate_html_payload = snapshot_html.read_bytes()
+    candidate_registry_payload = snapshot_registry.read_bytes()
     candidate_registry = _read_json(snapshot_registry, label="candidate HTML registry")
     evidence = _whole_deck_evidence(
         root, state, html_path=snapshot_html, registry=candidate_registry,
@@ -2242,19 +2377,73 @@ def command_apply_html_change(root: Path, state: dict[str, Any]) -> None:
     applied = copy.deepcopy(proposal)
     applied["status"] = "applied"
     applied["appliedAt"] = utc_now()
+    review_root = root / "output" / "html-change-reviews" / applied["proposalId"]
+    applied["postApplyReview"] = {
+        "format": POST_APPLY_REVIEW_FORMAT,
+        "status": "pending",
+        "proposalDigest": applied["proposalDigest"],
+        "htmlRevision": applied["candidateHtmlRevision"],
+        "registryRevision": applied["candidateRegistryRevision"],
+        # Removed slides remain part of the human-facing impact report but no
+        # longer have a DOM node that can be rendered after apply.
+        "affectedSlideIds": [
+            slide_id for slide_id in applied["affectedSlideIds"]
+            if slide_id not in set(applied["removedSlideIds"])
+        ],
+        "reportPath": _relative(root, review_root / "browser-report.json"),
+        "reportRevision": None,
+        "environmentPath": _relative(root, review_root / "browser-environment.json"),
+        "environmentRevision": None,
+        "browserEnvironmentDigest": None,
+        "screenshots": {},
+        "checkedAt": None,
+    }
     next_state = copy.deepcopy(state)
     next_state["authoring"]["htmlChange"] = applied
     _set_whole_deck_html_review(next_state, evidence)
     validate_state(root, next_state)
     state_path = root / STATE_RELATIVE
+    base_state_revision = file_revision(state_path)
     payloads = {
-        canonical_html: snapshot_html.read_bytes(),
-        canonical_registry: snapshot_registry.read_bytes(),
+        canonical_html: candidate_html_payload,
+        canonical_registry: candidate_registry_payload,
         proposal_path: _proposal_report_payload(applied),
         state_path: yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8"),
     }
-    ArtifactTransactionStore(root, tuple(payloads)).commit(
-        payloads, operation="apply-approved-whole-deck-html-change",
+    transaction = ArtifactTransactionStore(
+        root, (*payloads, snapshot_html, snapshot_registry),
+    )
+
+    def validate_base() -> None:
+        if file_revision(state_path) != base_state_revision:
+            raise WorkflowError("deck.yaml changed after the HTML change was prepared")
+        current_state = load_state(root)
+        current, current_html, current_registry, _ = _verified_html_change(
+            root, current_state, required_status="approved",
+        )
+        if current["proposalDigest"] != applied["proposalDigest"]:
+            raise WorkflowError("A different HTML change proposal was approved before apply")
+        if bytes_revision(candidate_html_payload) != file_revision(current_html):
+            raise WorkflowError("Prepared HTML payload differs from the approved candidate")
+        if bytes_revision(candidate_registry_payload) != file_revision(current_registry):
+            raise WorkflowError("Prepared registry payload differs from the approved candidate")
+
+    def validate_committed() -> None:
+        committed = load_state(root)
+        validate_state(root, committed)
+        current_proposal = _html_change(committed)
+        if not current_proposal or current_proposal.get("status") != "applied":
+            raise WorkflowError("Committed HTML change state is not applied")
+        if file_revision(canonical_html) != current_proposal["candidateHtmlRevision"]:
+            raise WorkflowError("Committed canonical HTML differs from the approved candidate")
+        if file_revision(canonical_registry) != current_proposal["candidateRegistryRevision"]:
+            raise WorkflowError("Committed canonical registry differs from the approved candidate")
+
+    transaction.commit(
+        payloads,
+        operation="apply-approved-whole-deck-html-change",
+        validate_base=validate_base,
+        validate_committed=validate_committed,
     )
     append_work_log(
         root,
@@ -2279,6 +2468,173 @@ def command_cancel_html_change(root: Path, state: dict[str, Any]) -> None:
         root, state, cancelled, proposal_path, operation="cancel-whole-deck-html-change",
     )
     append_work_log(root, f"Cancelled HTML change proposal {cancelled['proposalId']}; canonical HTML was unchanged")
+
+
+def _require_current_post_apply_review(root: Path, state: dict[str, Any]) -> None:
+    proposal = _html_change(state)
+    if not proposal or proposal.get("status") != "applied":
+        return
+    review = _post_apply_review(proposal)
+    if not review or review.get("status") != "checked":
+        raise WorkflowError("Affected slides need current post-apply browser review before whole-deck approval")
+    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    if file_revision(canonical_html) != review["htmlRevision"]:
+        raise WorkflowError("Post-apply browser review is stale for the current HTML")
+    if file_revision(canonical_registry) != review["registryRevision"]:
+        raise WorkflowError("Post-apply browser review is stale for the current registry")
+    if review["proposalDigest"] != proposal["proposalDigest"]:
+        raise WorkflowError("Post-apply browser review belongs to a different proposal")
+    report_path = _repo_path(
+        root, review["reportPath"], field="authoring.htmlChange.postApplyReview.reportPath",
+    )
+    environment_path = _repo_path(
+        root, review["environmentPath"], field="authoring.htmlChange.postApplyReview.environmentPath",
+    )
+    if file_revision(report_path) != review["reportRevision"]:
+        raise WorkflowError("Post-apply browser report revision is stale")
+    if file_revision(environment_path) != review["environmentRevision"]:
+        raise WorkflowError("Post-apply browser environment revision is stale")
+    report = _read_json(report_path, label="post-apply browser report")
+    environment = _read_json(environment_path, label="post-apply browser environment")
+    if report.get("status") != "pass" or report.get("proposalDigest") != proposal["proposalDigest"]:
+        raise WorkflowError("Post-apply browser report does not pass for the current proposal")
+    if report.get("htmlRevision") != review["htmlRevision"] or report.get("registryRevision") != review["registryRevision"]:
+        raise WorkflowError("Post-apply browser report artifact revisions are stale")
+    if report.get("affectedSlideIds") != review["affectedSlideIds"]:
+        raise WorkflowError("Post-apply browser report covers different slides")
+    if environment.get("environmentDigest") != review["browserEnvironmentDigest"]:
+        raise WorkflowError("Post-apply browser environment digest is stale")
+    for slide_id, screenshot in review["screenshots"].items():
+        path = _repo_path(
+            root, screenshot["path"],
+            field=f"authoring.htmlChange.postApplyReview.screenshots.{slide_id}.path",
+        )
+        if file_revision(path) != screenshot["revision"]:
+            raise WorkflowError(f"Post-apply screenshot revision is stale: {slide_id}")
+
+
+def command_check_html_change(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    browser_executable: Path | None,
+) -> None:
+    """Create revision-bound browser evidence for an applied HTML change."""
+
+    _require_stage(state, "html_review")
+    proposal = _html_change(state)
+    review = _post_apply_review(proposal)
+    if not proposal or proposal.get("status") != "applied" or not review:
+        raise WorkflowError("There is no applied HTML change awaiting browser review")
+    if review.get("status") != "pending":
+        _require_current_post_apply_review(root, state)
+        return
+    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    if file_revision(canonical_html) != review["htmlRevision"]:
+        raise WorkflowError("Applied HTML changed before post-apply browser review")
+    if file_revision(canonical_registry) != review["registryRevision"]:
+        raise WorkflowError("Applied registry changed before post-apply browser review")
+
+    with tempfile.TemporaryDirectory(prefix="bento-html-change-review-") as temporary:
+        evidence = collect_html_change_browser_evidence(
+            html_path=canonical_html,
+            registry_path=canonical_registry,
+            affected_slide_ids=review["affectedSlideIds"],
+            screenshots_dir=Path(temporary) / "screenshots",
+            browser_executable=browser_executable,
+        )
+        checked_at = utc_now()
+        review_root = root / "output" / "html-change-reviews" / proposal["proposalId"]
+        screenshot_payloads: dict[Path, bytes] = {}
+        screenshot_state: dict[str, dict[str, str]] = {}
+        screenshot_report: dict[str, dict[str, str]] = {}
+        for index, slide_id in enumerate(review["affectedSlideIds"], start=1):
+            payload = evidence.screenshots[slide_id].read_bytes()
+            destination = review_root / "screenshots" / f"{index:02d}.png"
+            relative = _relative(root, destination)
+            revision = bytes_revision(payload)
+            screenshot_payloads[destination] = payload
+            screenshot_state[slide_id] = {"path": relative, "revision": revision}
+            screenshot_report[slide_id] = {"path": relative, "revision": revision}
+
+        environment_payload = (
+            json.dumps(evidence.environment, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        report_value = {
+            **evidence.report,
+            "proposalId": proposal["proposalId"],
+            "proposalDigest": proposal["proposalDigest"],
+            "htmlRevision": review["htmlRevision"],
+            "registryRevision": review["registryRevision"],
+            "screenshots": screenshot_report,
+            "browserEnvironmentDigest": evidence.environment["environmentDigest"],
+            "checkedAt": checked_at,
+        }
+        report_payload = (
+            json.dumps(report_value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        checked = copy.deepcopy(proposal)
+        checked_review = checked["postApplyReview"]
+        checked_review.update({
+            "status": "checked",
+            "reportRevision": bytes_revision(report_payload),
+            "environmentRevision": bytes_revision(environment_payload),
+            "browserEnvironmentDigest": evidence.environment["environmentDigest"],
+            "screenshots": screenshot_state,
+            "checkedAt": checked_at,
+        })
+        next_state = copy.deepcopy(state)
+        next_state["authoring"]["htmlChange"] = checked
+        validate_state(root, next_state)
+        state_path = root / STATE_RELATIVE
+        proposal_path = _repo_path(root, proposal["proposalPath"], field="authoring.htmlChange.proposalPath")
+        report_path = _repo_path(root, review["reportPath"], field="postApplyReview.reportPath")
+        environment_path = _repo_path(root, review["environmentPath"], field="postApplyReview.environmentPath")
+        base_state_revision = file_revision(state_path)
+        payloads = {
+            **screenshot_payloads,
+            report_path: report_payload,
+            environment_path: environment_payload,
+            proposal_path: _proposal_report_payload(checked),
+            state_path: yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8"),
+        }
+        transaction = ArtifactTransactionStore(
+            root, (*payloads, canonical_html, canonical_registry),
+        )
+
+        def validate_base() -> None:
+            if file_revision(state_path) != base_state_revision:
+                raise WorkflowError("deck.yaml changed during post-apply browser review")
+            current = load_state(root)
+            current_proposal = _html_change(current)
+            current_review = _post_apply_review(current_proposal)
+            if (
+                not current_proposal
+                or current_proposal.get("proposalDigest") != proposal["proposalDigest"]
+                or not current_review
+                or current_review.get("status") != "pending"
+            ):
+                raise WorkflowError("HTML change review state changed during browser inspection")
+            if file_revision(canonical_html) != review["htmlRevision"]:
+                raise WorkflowError("Canonical HTML changed during browser inspection")
+            if file_revision(canonical_registry) != review["registryRevision"]:
+                raise WorkflowError("Canonical registry changed during browser inspection")
+
+        def validate_committed() -> None:
+            _require_current_post_apply_review(root, load_state(root))
+
+        transaction.commit(
+            payloads,
+            operation="check-applied-whole-deck-html-change",
+            validate_base=validate_base,
+            validate_committed=validate_committed,
+        )
+    append_work_log(
+        root,
+        f"Browser-checked affected slides for applied HTML change {proposal['proposalId']}",
+    )
 
 
 def _section_digest(
@@ -3526,6 +3882,8 @@ def parser() -> argparse.ArgumentParser:
     propose_html_change.add_argument("--related-slide", action="append", default=[], dest="related_slides")
     commands.add_parser("approve-html-change")
     commands.add_parser("apply-html-change")
+    check_html_change = commands.add_parser("check-html-change")
+    check_html_change.add_argument("--browser-executable", type=Path)
     commands.add_parser("cancel-html-change")
     commands.add_parser("submit-plan")
     commands.add_parser("approve-plan")
@@ -3632,6 +3990,10 @@ def run(args: argparse.Namespace) -> int:
         command_approve_html_change(root, state)
     elif command == "apply-html-change":
         command_apply_html_change(root, state)
+    elif command == "check-html-change":
+        command_check_html_change(
+            root, state, browser_executable=args.browser_executable,
+        )
     elif command == "cancel-html-change":
         command_cancel_html_change(root, state)
     elif command == "submit-plan":

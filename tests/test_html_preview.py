@@ -12,6 +12,7 @@ from urllib.request import urlopen
 
 import yaml
 
+from bento_converter.html_change import html_change_proposal_digest
 from scripts.deck_workflow import WorkflowError, atomic_write_state, load_state
 from scripts.deck_workflow import migrate_v1_state
 from scripts.run_html_preview import create_preview_server
@@ -192,7 +193,7 @@ class SingleHtmlPreviewTests(unittest.TestCase):
             "strategy": "whole_deck",
             "currentSection": None,
             "htmlChange": {
-                "format": "bento/html-change-proposal/v1",
+                "format": "bento/html-change-proposal/v2",
                 "proposalId": "a1b2c3d4e5f6",
                 "status": "proposed",
                 "baseHtmlRevision": "sha256:" + "1" * 64,
@@ -205,6 +206,9 @@ class SingleHtmlPreviewTests(unittest.TestCase):
                 "request": "導入を短くする",
                 "summary": "導入スライドの説明を短くします",
                 "impactSummary": "導入だけに影響し、他のスライドは変えません",
+                "proposalDigest": None,
+                "approvedProposalDigest": None,
+                "postApplyReview": None,
                 "scope": "local",
                 "requestedSlideIds": ["slide-1"],
                 "relatedSlideIds": [],
@@ -225,6 +229,8 @@ class SingleHtmlPreviewTests(unittest.TestCase):
                 "cancelledAt": None,
             },
         })
+        proposal = state["authoring"]["htmlChange"]
+        proposal["proposalDigest"] = html_change_proposal_digest(proposal)
         state["workflow"].update(currentSection=None, status="awaiting_approval")
         state["sections"]["intro"].update(
             status="html_review", canonical="html", approvalDigest=None,

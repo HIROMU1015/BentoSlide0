@@ -13,7 +13,7 @@ HTML and generated registries remain historical evidence. Authoring saves never 
 
 ## Whole-deck HTML review (standard)
 
-New single/imported decks create the complete HTML/registry pair before conversion. The first review covers the whole story. Later HTML corrections use immutable temporary candidates: impact is calculated across slide DOM, order, section membership, registry, assets, and global CSS/theme; the user sees both the requested edit and every other slide that may need review; and canonical HTML changes only after explicit revision-bound confirmation. Application is a two-artifact/state/report transaction and invalidates all HTML approval digests. Generated, authoring, and final artifacts remain untouched. See `html-change-review.md`.
+New single/imported decks create the complete HTML/registry pair before conversion. The first review covers the whole story. Later HTML corrections use immutable temporary candidates: impact is calculated across slide DOM, order, section membership, registry, assets, and global CSS/theme; the user sees both the requested edit and every other slide that may need review; and canonical HTML changes only after explicit revision-bound confirmation. The confirmation digest includes the human explanation and machine impact. Application revalidates canonical/candidate inputs under one union writer lease, commits HTML/registry/state/report together, and invalidates all HTML approval digests. A revision-bound browser report, environment fingerprint, and affected-slide screenshots are then required before whole-deck approval. Generated, authoring, and final artifacts remain untouched. See `html-change-review.md`.
 
 ## Rolling section handoff (optional)
 
