@@ -11,6 +11,8 @@ Migrated `authoring.mode: modular` decks retain lexically sorted `chapters/chapt
 
 Every single-file slide must include `data-section-id`. Section approval covers canonical slide DOM, referenced registry definitions/source provenance, referenced local asset content, and global CSS/theme. A changed local dependency invalidates the affected section; changed global CSS/theme invalidates all sections. Conversion requires current approval digests.
 
+New single/imported decks author and review the complete HTML file as one user-facing checkpoint. Sections remain deterministic digest and impact scopes. After the first review, corrections must use a temporary candidate and the revision-bound impact/confirmation flow in `html-change-review.md`; reviewed canonical HTML must not be overwritten directly.
+
 ## HTML contract
 
 Every slide must be exactly 1280 × 720 computed CSS pixels and use:

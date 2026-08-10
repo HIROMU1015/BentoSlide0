@@ -12,16 +12,26 @@ from bento_converter.section_approval import compute_section_approval_evidence
 from scripts.deck_workflow import (
     WorkflowError,
     atomic_write_state,
+    command_adopt_whole_deck,
+    command_apply_html_change,
+    command_approve_current,
+    command_approve_html_change,
+    command_approve_html_deck,
     command_approve_plan,
     command_approve_section,
     command_begin_section,
     command_complete_section,
+    command_complete_html_deck,
     command_configure_sections,
+    command_cancel_html_change,
+    command_propose_html_change,
     command_prepare_conversion,
     command_submit_plan,
     command_unlock_section,
     load_state,
     migrate_v1_state,
+    parser as workflow_parser,
+    validate_sections,
 )
 
 
@@ -135,6 +145,28 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def whole_deck_review(self) -> dict:
+        state = load_state(self.root)
+        state["authoring"]["strategy"] = "whole_deck"
+        state["authoring"]["htmlChange"] = None
+        atomic_write_state(self.root, state)
+        command_configure_sections(self.root, state, ["introduction", "method"])
+        command_submit_plan(self.root, state)
+        command_approve_plan(self.root, state)
+        authored = load_state(self.root)
+        self.assertIsNone(authored["workflow"]["currentSection"])
+        self.assertTrue(all(
+            entry["status"] == "html_authoring" for entry in authored["sections"].values()
+        ))
+        command_complete_html_deck(self.root, authored)
+        return load_state(self.root)
+
+    def candidate(self, value: str) -> Path:
+        path = self.root / "scratch/candidate.preview.html"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value, encoding="utf-8")
+        return path.relative_to(self.root)
+
     def test_section_approval_detects_global_change_and_conversion_revalidates(self) -> None:
         state = load_state(self.root)
         command_configure_sections(self.root, state, ["introduction", "method"])
@@ -163,6 +195,161 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
         self.assertEqual(state["sections"]["introduction"]["status"], "authoring")
         self.assertIsNone(state["sections"]["introduction"]["approvalDigest"])
         self.assertEqual(state["workflow"]["stage"], "html_authoring")
+
+    def test_html_review_ignores_planning_canonical_membership(self) -> None:
+        state = load_state(self.root)
+        command_configure_sections(self.root, state, ["introduction", "method"])
+        command_submit_plan(self.root, state)
+        command_approve_plan(self.root, state)
+        command_complete_section(self.root, state, "introduction")
+
+        current = load_state(self.root)
+        self.assertEqual(current["sections"]["introduction"]["canonical"], "html")
+        self.assertEqual(current["sections"]["method"]["canonical"], "planning")
+        self.assertEqual(current["sections"]["method"]["slideIds"], [])
+        validate_sections(self.root, current)
+
+    def test_whole_deck_review_approves_all_section_digests_once(self) -> None:
+        state = self.whole_deck_review()
+        self.assertEqual(state["workflow"]["stage"], "html_review")
+        self.assertIsNone(state["workflow"]["currentSection"])
+        self.assertTrue(all(entry["status"] == "html_review" for entry in state["sections"].values()))
+
+        command_approve_current(self.root, state)
+        approved = load_state(self.root)
+        self.assertEqual(approved["workflow"]["stage"], "ready_for_conversion")
+        self.assertTrue(approved["handoff"]["readyForCodex"])
+        self.assertTrue(all(entry["status"] == "approved" for entry in approved["sections"].values()))
+        self.assertTrue(all(entry["approvalDigest"] for entry in approved["sections"].values()))
+
+    def test_adopt_existing_full_html_opens_one_review_without_changing_html(self) -> None:
+        state = load_state(self.root)
+        command_configure_sections(self.root, state, ["introduction", "method"])
+        command_submit_plan(self.root, state)
+        command_approve_plan(self.root, state)
+        before = (self.root / "deck/deck.preview.html").read_bytes()
+        command_adopt_whole_deck(self.root, state)
+        adopted = load_state(self.root)
+        self.assertEqual(adopted["authoring"]["strategy"], "whole_deck")
+        self.assertEqual(adopted["workflow"]["stage"], "html_review")
+        self.assertIsNone(adopted["workflow"]["currentSection"])
+        self.assertEqual((self.root / "deck/deck.preview.html").read_bytes(), before)
+        self.assertEqual(adopted["sections"]["method"]["slideIds"], ["method-1"])
+
+    def test_reviewed_local_change_does_not_mutate_canonical_until_apply(self) -> None:
+        state = self.whole_deck_review()
+        canonical = (self.root / "deck/deck.preview.html").read_text(encoding="utf-8")
+        candidate = self.candidate(canonical.replace("Method", "Updated method"))
+        proposal = command_propose_html_change(
+            self.root, state, candidate_html=candidate, candidate_registry=None,
+            request="方法の説明を更新", summary="方法スライドの説明を更新します",
+            impact_summary="方法スライドだけに影響し、共通スタイルは変えません",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        self.assertEqual(proposal["scope"], "local")
+        self.assertEqual(proposal["changedSlideIds"], ["method-1"])
+        self.assertEqual(proposal["affectedSlideIds"], ["method-1"])
+        self.assertEqual((self.root / "deck/deck.preview.html").read_text(encoding="utf-8"), canonical)
+        with self.assertRaisesRegex(WorkflowError, "must be 'approved'"):
+            command_apply_html_change(self.root, load_state(self.root))
+
+        command_approve_html_change(self.root, load_state(self.root))
+        command_apply_html_change(self.root, load_state(self.root))
+        applied = load_state(self.root)
+        self.assertIn("Updated method", (self.root / "deck/deck.preview.html").read_text(encoding="utf-8"))
+        self.assertEqual(applied["authoring"]["htmlChange"]["status"], "applied")
+        self.assertTrue(all(entry["status"] == "html_review" for entry in applied["sections"].values()))
+
+    def test_change_impact_expands_for_related_slides_and_global_css(self) -> None:
+        state = self.whole_deck_review()
+        canonical = (self.root / "deck/deck.preview.html").read_text(encoding="utf-8")
+        related_candidate = self.candidate(
+            canonical.replace('data-bento-id="plot-image"', 'data-bento-id="plot-image" alt="updated"')
+            .replace("Method", "Updated method")
+        )
+        related = command_propose_html_change(
+            self.root, state, candidate_html=related_candidate, candidate_registry=None,
+            request="導入を分かりやすくする", summary="導入と関連する方法説明を調整します",
+            impact_summary="導入の変更が方法スライドの接続表現にも影響します",
+            requested_slide_ids=["導入-1"], related_slide_ids=["method-1"],
+        )
+        self.assertEqual(related["scope"], "related")
+        self.assertEqual(set(related["affectedSlideIds"]), {"導入-1", "method-1"})
+
+        command_cancel_html_change(self.root, load_state(self.root))
+        global_candidate = self.candidate(canonical.replace("</style>", "body{color:red}</style>"))
+        global_change = command_propose_html_change(
+            self.root, load_state(self.root), candidate_html=global_candidate, candidate_registry=None,
+            request="全体の文字色を調整", summary="共通スタイルの文字色を調整します",
+            impact_summary="共通CSSのため全スライドを再確認します",
+            requested_slide_ids=["導入-1"], related_slide_ids=[],
+        )
+        self.assertEqual(global_change["scope"], "global")
+        self.assertTrue(global_change["globalStyleChanged"])
+        self.assertEqual(set(global_change["affectedSlideIds"]), {"導入-1", "method-1"})
+
+    def test_stale_base_rejects_change_approval(self) -> None:
+        state = self.whole_deck_review()
+        canonical_path = self.root / "deck/deck.preview.html"
+        canonical = canonical_path.read_text(encoding="utf-8")
+        candidate = self.candidate(canonical.replace("Method", "Updated method"))
+        command_propose_html_change(
+            self.root, state, candidate_html=candidate, candidate_registry=None,
+            request="方法を変更", summary="方法説明を変更します",
+            impact_summary="方法スライドだけに影響します",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        canonical_path.write_text(canonical.replace("Method", "Concurrent edit"), encoding="utf-8")
+        with self.assertRaisesRegex(WorkflowError, "canonical HTML changed"):
+            command_approve_html_change(self.root, load_state(self.root))
+
+        # Cancellation is always safe because it never installs candidate bytes.
+        command_cancel_html_change(self.root, load_state(self.root))
+        self.assertEqual(load_state(self.root)["authoring"]["htmlChange"]["status"], "cancelled")
+
+    def test_tampered_candidate_or_impact_rejects_confirmation(self) -> None:
+        state = self.whole_deck_review()
+        canonical = (self.root / "deck/deck.preview.html").read_text(encoding="utf-8")
+        candidate = self.candidate(canonical.replace("Method", "Updated method"))
+        proposal = command_propose_html_change(
+            self.root, state, candidate_html=candidate, candidate_registry=None,
+            request="方法を変更", summary="方法説明を変更します",
+            impact_summary="方法スライドだけに影響します",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        snapshot = self.root / proposal["candidateHtml"]
+        snapshot.write_text(snapshot.read_text(encoding="utf-8") + "<!-- tampered -->", encoding="utf-8")
+        with self.assertRaisesRegex(WorkflowError, "candidate HTML changed"):
+            command_approve_html_change(self.root, load_state(self.root))
+        command_cancel_html_change(self.root, load_state(self.root))
+
+        fresh = command_propose_html_change(
+            self.root, load_state(self.root), candidate_html=candidate, candidate_registry=None,
+            request="方法を変更", summary="方法説明を変更します",
+            impact_summary="方法スライドだけに影響します",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        altered = load_state(self.root)
+        altered["authoring"]["htmlChange"]["affectedSlideIds"] = ["導入-1"]
+        altered["authoring"]["htmlChange"]["slideTitles"] = {"導入-1": "Introduction"}
+        atomic_write_state(self.root, altered)
+        with self.assertRaisesRegex(WorkflowError, "impact no longer matches"):
+            command_approve_html_change(self.root, load_state(self.root))
+        self.assertEqual(fresh["status"], "proposed")
+
+    def test_whole_deck_change_cli_keeps_target_and_related_slides_distinct(self) -> None:
+        args = workflow_parser().parse_args([
+            "--root", str(self.root), "propose-html-change",
+            "--candidate-html", "scratch/candidate.preview.html",
+            "--request", "導入を短くする",
+            "--summary", "導入を整理します",
+            "--impact-summary", "方法の接続表現も確認します",
+            "--target-slide", "導入-1",
+            "--related-slide", "method-1",
+        ])
+        self.assertEqual(args.command, "propose-html-change")
+        self.assertEqual(args.target_slides, ["導入-1"])
+        self.assertEqual(args.related_slides, ["method-1"])
 
 
 if __name__ == "__main__":

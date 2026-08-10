@@ -1,25 +1,98 @@
 {
   "format": "bento/html-registry/v2",
   "unitId": "deck",
-  "sources": {},
+  "sources": {
+    "start-here": {"path": "START_HERE.md", "type": "text/markdown", "role": "primary"},
+    "readme": {"path": "README.md", "type": "text/markdown", "role": "evidence"},
+    "workflow": {"path": "workflow/WORKFLOW.md", "type": "text/markdown", "role": "evidence"},
+    "authoring-lifecycle": {"path": "docs/authoring-lifecycle.md", "type": "text/markdown", "role": "evidence"},
+    "source-of-truth": {"path": "docs/source-of-truth-policy.md", "type": "text/markdown", "role": "reference"},
+    "artifact-transactions": {"path": "docs/artifact-transactions.md", "type": "text/markdown", "role": "reference"},
+    "legacy-aliases": {"path": "docs/legacy-command-aliases.md", "type": "text/markdown", "role": "supplementary"}
+  },
   "document": {
-    "title": "",
+    "title": "BentoSlide0を実際に使う",
+    "modified": "2026-08-10T00:00:00Z",
     "theme": {
-      "background": "#ffffff",
-      "color": "#14213d",
-      "accent": "#2563eb",
-      "fontFamily": "Arial"
+      "background": "#fbf7ee",
+      "color": "#202b2b",
+      "accent": "#167a78",
+      "fontFamily": "Yu Gothic UI"
     }
   },
   "assets": {},
   "fonts": {},
   "equations": {},
-  "figures": {},
+  "figures": {
+    "fig-demo-flow": {
+      "role": "derived-diagram",
+      "description": "One overall plan followed by the repeated per-section HTML review, BentoSlide authoring, and acceptance loop",
+      "origin": {"kind": "source-derived", "sources": [{"sourceId": "start-here", "locator": "Sources and roles; normal section-by-section workflow"}, {"sourceId": "workflow", "locator": "Rolling section lifecycle"}]}
+    },
+    "fig-first-actions": {
+      "role": "derived-diagram",
+      "description": "Four user actions for beginning a deck",
+      "origin": {"kind": "source-derived", "sources": [{"sourceId": "start-here", "locator": "Opening paragraphs"}, {"sourceId": "readme", "locator": "最短の使い方 1-4"}]}
+    },
+    "fig-natural-request": {
+      "role": "derived-diagram",
+      "description": "Natural-language request template and example",
+      "origin": {"kind": "source-derived", "sources": [{"sourceId": "start-here", "locator": "Natural-language request examples"}, {"sourceId": "readme", "locator": "最短の使い方 4-5"}]}
+    },
+    "fig-review-plan": {
+      "role": "derived-diagram",
+      "description": "Plan review cards, checklist, and example replies",
+      "origin": {"kind": "source-derived", "sources": [{"sourceId": "workflow", "locator": "Stages and Rolling section lifecycle"}, {"sourceId": "start-here", "locator": "Human approval checkpoints"}]}
+    },
+    "fig-section-loop": {
+      "role": "derived-diagram",
+      "description": "HTML review, feedback, Bento authoring, and section acceptance loop",
+      "origin": {"kind": "source-derived", "sources": [{"sourceId": "workflow", "locator": "Rolling section lifecycle"}, {"sourceId": "authoring-lifecycle", "locator": "Rolling section handoff"}]}
+    },
+    "fig-one-launcher": {
+      "role": "derived-diagram",
+      "description": "One launcher routing to four stage-appropriate screens",
+      "origin": {"kind": "source-derived", "sources": [{"sourceId": "start-here", "locator": "Windows launcher paragraph"}, {"sourceId": "readme", "locator": "最短の使い方 launcher description"}]}
+    },
+    "fig-content-layout": {
+      "role": "derived-diagram",
+      "description": "Content authoring followed by presentation-only finalization",
+      "origin": {"kind": "source-derived", "sources": [{"sourceId": "authoring-lifecycle", "locator": "Approval and final handoff"}, {"sourceId": "source-of-truth", "locator": "Authoring and finalization authority"}]}
+    },
+    "fig-safe-revision": {
+      "role": "derived-diagram",
+      "description": "Separate safe routes for presentation and content revisions",
+      "origin": {"kind": "source-derived", "sources": [{"sourceId": "workflow", "locator": "Content or structure request after finalization"}, {"sourceId": "artifact-transactions", "locator": "Content-revision restart transaction"}]}
+    },
+    "fig-quick-reference": {
+      "role": "derived-diagram",
+      "description": "Shortest user-facing workflow checklist",
+      "origin": {"kind": "source-derived", "sources": [{"sourceId": "readme", "locator": "最短の使い方"}, {"sourceId": "start-here", "locator": "Opening and workflow summary"}]}
+    }
+  },
   "tables": {},
   "charts": {},
   "protected": {
-    "slideIds": [],
-    "elementIds": [],
-    "requiredText": []
+    "slideIds": [
+      "demo-is-the-deck",
+      "first-actions",
+      "natural-request",
+      "review-the-plan",
+      "section-loop",
+      "one-launcher",
+      "content-then-layout",
+      "safe-revision",
+      "quick-reference"
+    ],
+    "elementIds": [
+      "s1-title", "s2-title", "s3-title", "s4-title", "s5-title",
+      "s6-title", "s7-title", "s8-title", "s9-title"
+    ],
+    "requiredText": [
+      "全体構成は先に。",
+      "確定したら次のsectionへ",
+      "1 sectionずつ、見て・言って・触って・確定する",
+      "BentoSlide0は、変換器ではなく、完成まで戻れる共同制作workflow。"
+    ]
   }
 }

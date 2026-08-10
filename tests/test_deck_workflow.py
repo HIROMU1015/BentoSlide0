@@ -63,16 +63,29 @@ class ProjectMetadataCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name) / "日本語 workflow demo"
-        for directory in ("workflow", "sources", "planning"):
+        for directory in ("workflow", "sources/private", "planning"):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         for relative in (
             "REQUEST.md", "workflow/deck.schema.json",
-            "workflow/deck.v1.schema.json", "sources/source-manifest.yaml",
-            "planning/work-log.md",
+            "workflow/deck.v1.schema.json", "planning/work-log.md",
         ):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, destination)
+        (self.root / "sources/private/spec.md").write_text("# Fixture source\n\nStable test evidence.\n", encoding="utf-8")
+        (self.root / "sources/source-manifest.yaml").write_text(
+            yaml.safe_dump({
+                "schemaVersion": 1,
+                "authorityMode": "single",
+                "items": [{
+                    "id": "fixture-source",
+                    "path": "sources/private/spec.md",
+                    "type": "text/markdown",
+                    "role": "primary",
+                }],
+            }, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
         shutil.copy2(ROOT / "tests/fixtures/deck_v2.initialized.yaml", self.root / "deck.yaml")
 
     def tearDown(self) -> None:
@@ -165,10 +178,18 @@ class DeckWorkflowTests(unittest.TestCase):
         shutil.copy2(ROOT / "tests/fixtures/deck_v1.yaml", self.root / "deck.yaml")
         for relative in (
             "REQUEST.md", "workflow/deck.schema.json", "workflow/deck.v1.schema.json",
-            "planning/explanation-policy.md", "planning/story-outline.md", "planning/slide-plan.md",
             "planning/decisions.md", "planning/work-log.md",
         ):
             shutil.copy2(ROOT / relative, self.root / relative)
+        for relative, heading in (
+            ("planning/explanation-policy.md", "Explanation policy"),
+            ("planning/story-outline.md", "Story outline"),
+            ("planning/slide-plan.md", "Slide plan"),
+        ):
+            (self.root / relative).write_text(
+                f"# {heading}\n\n<!-- Fixture intentionally starts without substantive content. -->\n",
+                encoding="utf-8",
+            )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()

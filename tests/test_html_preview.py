@@ -181,6 +181,65 @@ class SingleHtmlPreviewTests(unittest.TestCase):
             urlopen(self.base + "/deck/%2e%2e/deck.yaml", timeout=3)
         self.assertEqual(captured.exception.code, 404)
 
+    def test_active_whole_deck_change_is_visible_and_candidate_is_previewable(self) -> None:
+        candidate = self.root / "deck/.bento-html-change-a1b2c3d4e5f6.candidate.html"
+        candidate.write_text(
+            '<section class="slide" data-slide-id="slide-1" data-section-id="intro">Candidate preview</section>',
+            encoding="utf-8",
+        )
+        state = load_state(self.root)
+        state["authoring"].update({
+            "strategy": "whole_deck",
+            "currentSection": None,
+            "htmlChange": {
+                "format": "bento/html-change-proposal/v1",
+                "proposalId": "a1b2c3d4e5f6",
+                "status": "proposed",
+                "baseHtmlRevision": "sha256:" + "1" * 64,
+                "baseRegistryRevision": "sha256:" + "2" * 64,
+                "candidateHtml": candidate.relative_to(self.root).as_posix(),
+                "candidateRegistry": "deck/.bento-html-change-a1b2c3d4e5f6.candidate.registry.json",
+                "candidateHtmlRevision": "sha256:" + "3" * 64,
+                "candidateRegistryRevision": "sha256:" + "4" * 64,
+                "proposalPath": "output/html-change-proposals/a1b2c3d4e5f6.json",
+                "request": "導入を短くする",
+                "summary": "導入スライドの説明を短くします",
+                "impactSummary": "導入だけに影響し、他のスライドは変えません",
+                "scope": "local",
+                "requestedSlideIds": ["slide-1"],
+                "relatedSlideIds": [],
+                "changedSlideIds": ["slide-1"],
+                "affectedSlideIds": ["slide-1"],
+                "addedSlideIds": [],
+                "removedSlideIds": [],
+                "changedSectionIds": ["intro"],
+                "slideTitles": {"slide-1": "導入"},
+                "reordered": False,
+                "sectionMembershipChanged": False,
+                "structuralImpact": False,
+                "globalStyleChanged": False,
+                "registryChanged": False,
+                "proposedAt": "2026-08-10T00:00:00Z",
+                "approvedAt": None,
+                "appliedAt": None,
+                "cancelledAt": None,
+            },
+        })
+        state["workflow"].update(currentSection=None, status="awaiting_approval")
+        state["sections"]["intro"].update(
+            status="html_review", canonical="html", approvalDigest=None,
+        )
+        atomic_write_state(self.root, state)
+
+        body = self.read("/")[2]
+        self.assertIn("変更案の確認", body)
+        self.assertIn("変更案を見る", body)
+        self.assertIn("他のスライドは変えません", body)
+        self.assertIn("Candidate preview", self.read("/deck/.bento-html-change-a1b2c3d4e5f6.candidate.html")[2])
+        payload = json.loads(self.read("/api/status")[2])
+        self.assertEqual(payload["htmlChange"]["status"], "proposed")
+        self.assertEqual(payload["htmlChange"]["affectedSlideIds"], ["slide-1"])
+
 
 if __name__ == "__main__":
     unittest.main()

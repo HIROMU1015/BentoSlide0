@@ -3,14 +3,332 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BentoSlide authoring source</title>
+  <title>BentoSlide0を実際に使う</title>
   <style>
     * { box-sizing: border-box; }
-    html, body { margin: 0; background: #d9dde5; font-family: Arial, sans-serif; }
-    .slide { position: relative; width: 1280px; height: 720px; overflow: hidden; background: #fff; color: #14213d; }
+    html, body { margin: 0; background: #d8ddd9; font-family: "Yu Gothic UI", "Meiryo", Arial, sans-serif; }
+    body { display: flex; flex-direction: column; align-items: center; gap: 28px; padding: 28px 0; }
+    .slide { position: relative; width: 1280px; height: 720px; overflow: hidden; background: #fbf7ee; color: #202b2b; }
+    .top-rule { position: absolute; left: 0; top: 0; width: 1280px; height: 8px; background: #167a78; }
+    .eyebrow { position: absolute; left: 66px; top: 36px; font-size: 16px; font-weight: 700; letter-spacing: 1.8px; color: #167a78; }
+    .slide-title { position: absolute; left: 66px; top: 66px; width: 1148px; margin: 0; font-size: 36px; line-height: 1.25; letter-spacing: .2px; color: #202b2b; }
+    .slide-kicker { position: absolute; left: 68px; top: 118px; width: 1100px; margin: 0; font-size: 17px; line-height: 1.5; color: #60706d; }
+    .page { position: absolute; right: 42px; top: 39px; font-size: 14px; font-weight: 700; color: #87918f; }
+    .card { position: absolute; background: #ffffff; border: 1px solid #dbe3df; border-radius: 22px; }
+    .card-label { font-size: 14px; font-weight: 800; letter-spacing: 1px; color: #167a78; }
+    .card-title { margin: 0; font-size: 23px; line-height: 1.35; color: #202b2b; }
+    .card-copy { margin: 0; font-size: 16px; line-height: 1.55; color: #596663; }
+    .pill { position: absolute; display: flex; align-items: center; justify-content: center; border-radius: 999px; font-size: 14px; font-weight: 700; }
+    .accent { color: #167a78; }
+    .human { color: #d66721; }
+    .accent-bg { background: #dff2ee; color: #116c69; }
+    .human-bg { background: #fff0df; color: #b55218; }
+    .soft-bg { background: #edf1ef; color: #52615e; }
+    .native-arrow { position: absolute; width: 48px; height: 48px; color: #167a78; font-size: 36px; line-height: 1.2; font-weight: 700; }
+    .section-tag { position: absolute; left: 66px; top: 160px; padding: 8px 14px; border-radius: 999px; background: #dff2ee; color: #116c69; font-size: 14px; font-weight: 800; }
+    .operation-strip { position: absolute; left: 64px; bottom: 46px; width: 1152px; height: 76px; display: grid; grid-template-columns: 1fr 1fr 1fr; background: #fff; border: 1px solid #dbe3df; border-radius: 16px; overflow: hidden; }
+    .operation-cell { position: relative; padding: 11px 18px 8px; border-right: 1px solid #dbe3df; }
+    .operation-cell:last-child { border-right: 0; }
+    .operation-label { margin: 0 0 5px; font-size: 12px; line-height: 1; font-weight: 800; letter-spacing: 1px; color: #167a78; }
+    .operation-text { margin: 0; font-size: 15px; line-height: 1.35; font-weight: 700; color: #2b3937; }
+    .journey { position: absolute; left: 0; bottom: 0; width: 1280px; height: 32px; display: grid; grid-template-columns: repeat(6, 1fr); background: #283533; color: #aab6b3; }
+    .journey-step { display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; border-right: 1px solid #43514f; }
+    .journey-step.active { background: #167a78; color: white; }
+    .journey-step.human-step { color: #ffc18c; }
+    .hero-title { position: absolute; left: 68px; top: 54px; width: 1140px; height: 72px; margin: 0; font-size: 48px; line-height: 1.2; color: #202b2b; }
+    .hero-sub { position: absolute; left: 70px; top: 121px; width: 950px; margin: 0; font-size: 20px; line-height: 1.5; color: #5d6a68; }
+    .hero-card { position: absolute; top: 218px; width: 316px; height: 282px; padding: 24px; background: #fff; border: 1px solid #dbe3df; border-radius: 24px; }
+    .hero-card h2 { margin: 12px 0 10px; font-size: 24px; line-height: 1.3; }
+    .hero-card p { margin: 0; font-size: 16px; line-height: 1.55; color: #60706d; }
+    .mini-window { position: relative; width: 100%; height: 88px; border: 1px solid #cfd9d5; border-radius: 12px; background: #f8faf9; overflow: hidden; }
+    .mini-window-bar { position: absolute; left: 0; top: 0; width: 100%; height: 20px; background: #e4ebe8; }
+    .dot { position: absolute; top: 7px; width: 6px; height: 6px; border-radius: 50%; background: #8aa09b; }
+    .folder-tab { position: absolute; left: 20px; top: 34px; width: 116px; height: 34px; border-radius: 6px; background: #dff2ee; color: #116c69; font-size: 12px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
+    .chat-line { position: absolute; border-radius: 999px; height: 12px; background: #cfe4df; }
+    .screen-slide { position: absolute; left: 32px; top: 30px; width: 205px; height: 46px; border-radius: 7px; background: #fbf7ee; border: 2px solid #167a78; }
+    .roadmap { position: absolute; left: 92px; bottom: 66px; width: 1096px; height: 72px; display: grid; grid-template-columns: repeat(7, 1fr); align-items: center; }
+    .roadmap-item { position: relative; height: 44px; display: flex; align-items: center; justify-content: center; background: #edf1ef; color: #455451; font-size: 13px; font-weight: 800; border-radius: 12px; margin: 0 5px; }
+    .roadmap-item.active { background: #167a78; color: #fff; }
+    .roadmap-arrow { position: absolute; right: -12px; top: 10px; font-size: 20px; color: #8ba09b; }
+    .loop-hero-title { position: absolute; left: 68px; top: 42px; width: 1120px; height: 104px; margin: 0; font-size: 42px; line-height: 1.22; color: #202b2b; }
+    .loop-hero-sub { position: absolute; left: 70px; top: 150px; width: 1100px; margin: 0; font-size: 18px; line-height: 1.45; color: #5d6a68; }
+    .loop-panel { position: absolute; top: 210px; height: 318px; padding: 22px; background: #fff; border: 1px solid #dbe3df; border-radius: 22px; }
+    .loop-panel h2 { margin: 8px 0 10px; font-size: 22px; line-height: 1.3; }
+    .loop-panel p { margin: 0; font-size: 14px; line-height: 1.5; color: #60706d; }
+    .plan-lines { display: grid; gap: 7px; margin-top: 18px; }
+    .plan-line { height: 25px; padding: 4px 10px; border-radius: 8px; background: #edf1ef; color: #52615e; font-size: 12px; font-weight: 800; }
+    .plan-line.active { background: #dff2ee; color: #116c69; }
+    .section-loop-grid { display: grid; grid-template-columns: 104px 24px 104px 24px 104px 24px 104px; justify-content: center; align-items: center; margin-top: 18px; }
+    .loop-node { height: 126px; padding: 16px 8px; border-radius: 16px; background: #edf1ef; color: #34423f; text-align: center; }
+    .loop-node.bento { background: #dff2ee; color: #116c69; }
+    .loop-node.human-node { background: #fff0df; color: #a84c16; }
+    .loop-node strong { display: block; margin-bottom: 12px; font-size: 13px; letter-spacing: .5px; }
+    .loop-node span { display: block; font-size: 12px; line-height: 1.35; font-weight: 700; }
+    .loop-arrow-small { text-align: center; color: #167a78; font-size: 22px; font-weight: 900; }
+    .repeat-note { margin-top: 18px; padding: 10px 14px; border-radius: 12px; background: #283533; color: #fff; text-align: center; font-size: 14px; font-weight: 800; }
+    .next-list { display: grid; gap: 9px; margin-top: 18px; }
+    .next-row { display: flex; align-items: center; justify-content: space-between; height: 34px; padding: 0 11px; border-radius: 10px; background: #edf1ef; color: #4b5a57; font-size: 12px; font-weight: 800; }
+    .next-row.done { background: #dff2ee; color: #116c69; }
+    .next-row.next { background: #fff0df; color: #a84c16; }
+    .section-chain { position: absolute; left: 68px; bottom: 46px; width: 1144px; height: 104px; padding: 18px 20px; display: grid; grid-template-columns: 130px 24px 215px 24px 215px 24px 205px 24px 165px; justify-content: center; align-items: center; background: #f1eee6; border: 1px solid #d9d3c6; border-radius: 18px; }
+    .chain-item { height: 64px; padding: 11px 10px; display: flex; align-items: center; justify-content: center; border-radius: 12px; background: #fff; color: #3e4b49; text-align: center; font-size: 13px; line-height: 1.35; font-weight: 800; }
+    .chain-item.plan { background: #283533; color: #fff; }
+    .chain-item.repeat { background: #dff2ee; color: #116c69; }
+    .chain-item.finish { background: #fff0df; color: #a84c16; }
+    .chain-arrow { text-align: center; color: #8ba09b; font-size: 20px; font-weight: 900; }
+    .step-card { position: absolute; top: 198px; width: 258px; height: 342px; padding: 24px 22px; background: #fff; border: 1px solid #dbe3df; border-radius: 20px; }
+    .step-number { position: absolute; right: 18px; top: 14px; font-size: 34px; font-weight: 800; color: #c8dfda; }
+    .step-icon { position: absolute; left: 22px; top: 28px; width: 62px; height: 50px; border-radius: 12px; background: #dff2ee; color: #116c69; display: flex; align-items: center; justify-content: center; font-size: 19px; font-weight: 900; }
+    .step-card h2 { position: absolute; left: 22px; top: 104px; width: 210px; margin: 0; font-size: 21px; line-height: 1.35; }
+    .step-card p { position: absolute; left: 22px; top: 172px; width: 212px; margin: 0; font-size: 15px; line-height: 1.55; color: #5d6a68; }
+    .path-tag { position: absolute; left: 22px; bottom: 24px; width: 212px; padding: 10px 8px; border-radius: 10px; background: #f2f5f3; color: #34423f; font-size: 14px; font-weight: 800; text-align: center; }
+    .field-card { position: absolute; left: 66px; top: 178px; width: 458px; height: 342px; padding: 22px; background: #fff; border: 1px solid #dbe3df; border-radius: 20px; }
+    .field-row { height: 48px; display: grid; grid-template-columns: 110px 1fr; align-items: center; border-bottom: 1px solid #e5ebe8; }
+    .field-row:last-child { border-bottom: 0; }
+    .field-name { font-size: 14px; font-weight: 800; color: #167a78; }
+    .field-value { font-size: 15px; color: #475552; }
+    .chat-panel { position: absolute; left: 558px; top: 178px; width: 656px; height: 342px; padding: 26px; background: #273432; border-radius: 20px; color: #fff; }
+    .chat-panel-label { font-size: 13px; font-weight: 800; letter-spacing: 1px; color: #8ed4cc; }
+    .bubble-user { position: absolute; right: 24px; top: 62px; width: 526px; padding: 18px 20px; border-radius: 18px 18px 4px 18px; background: #fff0df; color: #4b3526; font-size: 17px; line-height: 1.55; }
+    .bubble-system { position: absolute; left: 26px; bottom: 26px; width: 438px; padding: 14px 18px; border-radius: 18px 18px 18px 4px; background: #3b4b48; color: #d9e5e2; font-size: 14px; line-height: 1.45; }
+    .plan-card { position: absolute; top: 185px; width: 286px; height: 220px; padding: 22px; background: #fff; border: 1px solid #dbe3df; border-radius: 18px; }
+    .plan-card h2 { margin: 8px 0 8px; font-size: 21px; }
+    .plan-card p { margin: 0; font-size: 14px; line-height: 1.5; color: #5d6a68; }
+    .check-panel { position: absolute; left: 950px; top: 185px; width: 264px; height: 220px; padding: 20px; background: #283533; color: white; border-radius: 18px; }
+    .check-panel h2 { margin: 0 0 12px; font-size: 18px; color: #9adbd3; }
+    .check-line { margin: 8px 0; font-size: 14px; line-height: 1.35; }
+    .reply-row { position: absolute; left: 66px; top: 426px; width: 1148px; height: 92px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .reply-chip { display: flex; align-items: center; justify-content: center; padding: 12px; border-radius: 14px; background: #fff0df; color: #8a431b; font-size: 14px; font-weight: 800; text-align: center; }
+    .loop-card { position: absolute; top: 184px; width: 250px; height: 322px; padding: 22px 18px; background: #fff; border: 1px solid #dbe3df; border-radius: 18px; }
+    .loop-number { width: 38px; height: 38px; border-radius: 50%; background: #167a78; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 900; }
+    .loop-card h2 { margin: 16px 0 10px; font-size: 20px; line-height: 1.3; }
+    .loop-card p { margin: 0; font-size: 14px; line-height: 1.55; color: #5d6a68; }
+    .say-example { position: absolute; left: 18px; bottom: 18px; width: 214px; padding: 10px 12px; border-radius: 12px; background: #fff0df; color: #8a431b; font-size: 13px; line-height: 1.4; font-weight: 700; }
+    .launcher-center { position: absolute; left: 484px; top: 266px; width: 312px; height: 104px; padding: 20px; background: #167a78; color: #fff; border-radius: 18px; text-align: center; }
+    .launcher-center h2 { margin: 0 0 7px; font-size: 20px; }
+    .launcher-center p { margin: 0; font-size: 13px; line-height: 1.4; color: #d9f0ec; }
+    .screen-card { position: absolute; width: 276px; height: 150px; padding: 18px; background: #fff; border: 1px solid #dbe3df; border-radius: 16px; }
+    .screen-card h2 { margin: 0 0 8px; font-size: 17px; }
+    .screen-card p { margin: 0; font-size: 13px; line-height: 1.45; color: #5d6a68; }
+    .connector-line { position: absolute; height: 3px; background: #8abdb6; transform-origin: left center; }
+    .split-panel { position: absolute; top: 178px; width: 498px; height: 342px; padding: 26px; background: #fff; border-radius: 20px; border: 1px solid #dbe3df; }
+    .split-panel h2 { margin: 0 0 12px; font-size: 24px; }
+    .split-panel ul { margin: 14px 0 0; padding-left: 22px; }
+    .split-panel li { margin: 10px 0; font-size: 16px; line-height: 1.4; color: #4e5d5a; }
+    .speech-example { position: absolute; left: 26px; bottom: 24px; width: 444px; padding: 13px 16px; border-radius: 14px; background: #fff0df; color: #8a431b; font-size: 14px; font-weight: 800; }
+    .checkpoint { position: absolute; left: 594px; top: 282px; width: 92px; height: 92px; transform: rotate(45deg); background: #d66721; border-radius: 12px; }
+    .checkpoint-text { position: absolute; left: 572px; top: 310px; width: 136px; text-align: center; color: #fff; font-size: 13px; line-height: 1.25; font-weight: 900; }
+    .revision-path { position: absolute; top: 188px; width: 520px; height: 314px; padding: 26px; background: #fff; border: 1px solid #dbe3df; border-radius: 20px; }
+    .revision-path h2 { margin: 0 0 10px; font-size: 23px; }
+    .revision-path p { margin: 0; font-size: 15px; line-height: 1.5; color: #596663; }
+    .revision-say { position: absolute; left: 26px; top: 108px; width: 468px; padding: 14px 16px; border-radius: 14px; background: #fff0df; color: #8a431b; font-size: 15px; font-weight: 800; }
+    .revision-result { position: absolute; left: 26px; bottom: 24px; width: 468px; padding: 14px 16px; border-radius: 14px; background: #dff2ee; color: #116c69; font-size: 14px; line-height: 1.4; font-weight: 700; }
+    .verb { position: absolute; top: 184px; width: 260px; height: 180px; border-radius: 26px; display: flex; align-items: center; justify-content: center; flex-direction: column; }
+    .verb strong { font-size: 42px; line-height: 1; }
+    .verb span { margin-top: 14px; font-size: 15px; font-weight: 700; }
+    .quickline { position: absolute; left: 74px; top: 398px; width: 1132px; height: 82px; display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+    .quickstep { display: flex; align-items: center; justify-content: center; text-align: center; padding: 8px; border-radius: 12px; background: #edf1ef; color: #3b4946; font-size: 13px; line-height: 1.3; font-weight: 800; }
+    .takeaway { position: absolute; left: 134px; bottom: 64px; width: 1012px; padding: 18px 28px; border-radius: 16px; background: #283533; color: #fff; text-align: center; font-size: 18px; font-weight: 800; }
   </style>
 </head>
 <body>
-  <!-- Approved sections are added here as fixed 1280 x 720 <section class="slide"> elements. -->
+  <section class="slide" data-slide-id="demo-is-the-deck" data-section-id="promise" data-layout="custom">
+    <div class="top-rule" data-bento-id="s1-top-rule" data-bento-type="shape" data-bento-shape="rect"></div>
+    <div class="page" data-bento-id="s1-page" data-bento-type="text">01 / 09</div>
+    <h1 class="loop-hero-title" data-bento-id="s1-title">全体構成は先に。<br>制作は1 sectionずつ、HTMLからBentoSlideへ</h1>
+    <p class="loop-hero-sub" data-bento-id="s1-subtitle">全体を一度にHTML化しません。この資料も、sectionごとに同じ4工程を繰り返して作ります。</p>
+
+    <div class="loop-panel" style="left:68px;width:260px;" data-bento-id="s1-plan-panel" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-demo-flow">
+      <div class="card-label" data-bento-id="s1-plan-label" data-figure-id="fig-demo-flow">最初に1回</div>
+      <h2 data-bento-id="s1-plan-title" data-figure-id="fig-demo-flow">資料全体の構成</h2>
+      <p data-bento-id="s1-plan-copy" data-figure-id="fig-demo-flow">目的・読者・枚数・section分けを確認します。</p>
+      <div class="plan-lines" data-bento-id="s1-plan-lines" data-figure-id="fig-demo-flow">
+        <div class="plan-line active" data-bento-id="s1-plan-line1" data-figure-id="fig-demo-flow">Section 1　入口</div>
+        <div class="plan-line" data-bento-id="s1-plan-line2" data-figure-id="fig-demo-flow">Section 2　依頼と構成</div>
+        <div class="plan-line" data-bento-id="s1-plan-line3" data-figure-id="fig-demo-flow">Section 3　制作ループ</div>
+        <div class="plan-line" data-bento-id="s1-plan-line4" data-figure-id="fig-demo-flow">Section 4–5　仕上げ</div>
+      </div>
+    </div>
+
+    <div class="loop-panel" style="left:350px;width:580px;" data-bento-id="s1-loop-panel" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-demo-flow">
+      <div class="card-label" data-bento-id="s1-loop-label" data-figure-id="fig-demo-flow">SECTIONごとに反復</div>
+      <h2 data-bento-id="s1-loop-title" data-figure-id="fig-demo-flow">HTML → 確認 → BentoSlide → 確定</h2>
+      <div class="section-loop-grid" data-bento-id="s1-loop-grid" data-figure-id="fig-demo-flow">
+        <div class="loop-node" data-bento-id="s1-loop-html" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-demo-flow"><strong>HTML</strong><span>内容・順序・図を組む</span></div>
+        <div class="loop-arrow-small" data-bento-id="s1-loop-arrow1" data-figure-id="fig-demo-flow">→</div>
+        <div class="loop-node human-node" data-bento-id="s1-loop-review" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-demo-flow"><strong>確認</strong><span>見て、自然文で直す</span></div>
+        <div class="loop-arrow-small" data-bento-id="s1-loop-arrow2" data-figure-id="fig-demo-flow">→</div>
+        <div class="loop-node bento" data-bento-id="s1-loop-bento" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-demo-flow"><strong>BentoSlide</strong><span>編集可能な形へ昇格</span></div>
+        <div class="loop-arrow-small" data-bento-id="s1-loop-arrow3" data-figure-id="fig-demo-flow">→</div>
+        <div class="loop-node human-node" data-bento-id="s1-loop-accept" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-demo-flow"><strong>確定</strong><span>このsectionを承認</span></div>
+      </div>
+      <div class="repeat-note" data-bento-id="s1-repeat-note" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-demo-flow">確定したら次のsectionへ　↻　同じ4工程を繰り返す</div>
+    </div>
+
+    <div class="loop-panel" style="left:952px;width:260px;" data-bento-id="s1-next-panel" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-demo-flow">
+      <div class="card-label" data-bento-id="s1-next-label" data-figure-id="fig-demo-flow">確定したら</div>
+      <h2 data-bento-id="s1-next-title" data-figure-id="fig-demo-flow">次のsectionへ</h2>
+      <p data-bento-id="s1-next-copy" data-figure-id="fig-demo-flow">全体を一括変換せず、完成部分を積み上げます。</p>
+      <div class="next-list" data-bento-id="s1-next-list" data-figure-id="fig-demo-flow">
+        <div class="next-row done" data-bento-id="s1-next-row1" data-figure-id="fig-demo-flow"><span>Section 1</span><strong>確定</strong></div>
+        <div class="next-row next" data-bento-id="s1-next-row2" data-figure-id="fig-demo-flow"><span>Section 2</span><strong>NEXT</strong></div>
+        <div class="next-row" data-bento-id="s1-next-row3" data-figure-id="fig-demo-flow"><span>Section 3–5</span><strong>順番に</strong></div>
+      </div>
+    </div>
+
+    <div class="section-chain" data-bento-id="s1-section-chain" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-demo-flow">
+      <div class="chain-item plan" data-bento-id="s1-chain-plan" data-figure-id="fig-demo-flow">全体構成<br>1回だけ</div><div class="chain-arrow" data-bento-id="s1-chain-arrow1" data-figure-id="fig-demo-flow">→</div>
+      <div class="chain-item repeat" data-bento-id="s1-chain-s1" data-figure-id="fig-demo-flow">Section 1<br>HTML → BentoSlide</div><div class="chain-arrow" data-bento-id="s1-chain-arrow2" data-figure-id="fig-demo-flow">→</div>
+      <div class="chain-item repeat" data-bento-id="s1-chain-s2" data-figure-id="fig-demo-flow">Section 2<br>同じ工程</div><div class="chain-arrow" data-bento-id="s1-chain-arrow3" data-figure-id="fig-demo-flow">→</div>
+      <div class="chain-item repeat" data-bento-id="s1-chain-more" data-figure-id="fig-demo-flow">… Sectionごとに反復</div><div class="chain-arrow" data-bento-id="s1-chain-arrow4" data-figure-id="fig-demo-flow">→</div>
+      <div class="chain-item finish" data-bento-id="s1-chain-finish" data-figure-id="fig-demo-flow">全体確認<br>最終調整</div>
+    </div>
+  </section>
+
+  <section class="slide" data-slide-id="first-actions" data-section-id="promise" data-layout="grid">
+    <div class="top-rule" data-bento-id="s2-top-rule" data-bento-type="shape" data-bento-shape="rect"></div>
+    <div class="eyebrow" data-bento-id="s2-eyebrow">GET STARTED</div>
+    <div class="page" data-bento-id="s2-page">02 / 09</div>
+    <h1 class="slide-title" data-bento-id="s2-title">利用開始時に1度だけ行う準備は、4つ</h1>
+    <p class="slide-kicker" data-bento-id="s2-kicker">この準備と全体構成の確認後、sectionごとに「HTML → 確認 → BentoSlide → 確定」を繰り返します。</p>
+
+    <div class="step-card" style="left: 66px;" data-bento-id="s2-step1" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">
+      <div class="step-number" data-bento-id="s2-step1-num" data-figure-id="fig-first-actions">01</div>
+      <div class="step-icon" data-bento-id="s2-step1-icon" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">COPY</div>
+      <h2 data-bento-id="s2-step1-title" data-figure-id="fig-first-actions">資料ごとに複製</h2>
+      <p data-bento-id="s2-step1-copy" data-figure-id="fig-first-actions">このリポジトリを1資料につき1つ用意します。</p>
+      <div class="path-tag" data-bento-id="s2-step1-tag" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">新しい作業フォルダー</div>
+    </div>
+    <div class="step-card" style="left: 354px;" data-bento-id="s2-step2" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">
+      <div class="step-number" data-bento-id="s2-step2-num" data-figure-id="fig-first-actions">02</div>
+      <div class="step-icon" data-bento-id="s2-step2-icon" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">DOC</div>
+      <h2 data-bento-id="s2-step2-title" data-figure-id="fig-first-actions">一次資料を置く</h2>
+      <p data-bento-id="s2-step2-copy" data-figure-id="fig-first-actions">PDF、Markdown、既存資料など、内容の根拠を入れます。</p>
+      <div class="path-tag" data-bento-id="s2-step2-tag" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">sources/private/</div>
+    </div>
+    <div class="step-card" style="left: 642px;" data-bento-id="s2-step3" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">
+      <div class="step-number" data-bento-id="s2-step3-num" data-figure-id="fig-first-actions">03</div>
+      <div class="step-icon" data-bento-id="s2-step3-icon" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">IMG</div>
+      <h2 data-bento-id="s2-step3-title" data-figure-id="fig-first-actions">手持ち画像は任意</h2>
+      <p data-bento-id="s2-step3-copy" data-figure-id="fig-first-actions">使いたい写真や図がある場合だけ追加します。</p>
+      <div class="path-tag" data-bento-id="s2-step3-tag" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">images/user/</div>
+    </div>
+    <div class="step-card" style="left: 930px;" data-bento-id="s2-step4" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">
+      <div class="step-number" data-bento-id="s2-step4-num" data-figure-id="fig-first-actions">04</div>
+      <div class="step-icon" data-bento-id="s2-step4-icon" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">TALK</div>
+      <h2 data-bento-id="s2-step4-title" data-figure-id="fig-first-actions">希望を伝える</h2>
+      <p data-bento-id="s2-step4-copy" data-figure-id="fig-first-actions">ChatGPT Workでプロジェクトを開き、普段の言葉で依頼します。</p>
+      <div class="path-tag human-bg" data-bento-id="s2-step4-tag" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">「この資料で作りたい」</div>
+    </div>
+    <div class="operation-strip" style="bottom: 24px;" data-bento-id="s2-operation" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-first-actions">
+      <div class="operation-cell" data-bento-id="s2-op1" data-figure-id="fig-first-actions"><p class="operation-label">すること</p><p class="operation-text">資料を所定の場所へ置く</p></div>
+      <div class="operation-cell" data-bento-id="s2-op2" data-figure-id="fig-first-actions"><p class="operation-label">見ること</p><p class="operation-text">対象ファイルが入っている</p></div>
+      <div class="operation-cell" data-bento-id="s2-op3" data-figure-id="fig-first-actions"><p class="operation-label">伝えること</p><p class="operation-text">「この資料でスライドを作りたい」</p></div>
+    </div>
+  </section>
+
+  <section class="slide" data-slide-id="natural-request" data-section-id="request-and-plan" data-layout="two-column">
+    <div class="top-rule" data-bento-id="s3-top-rule" data-bento-type="shape" data-bento-shape="rect"></div>
+    <div class="eyebrow" data-bento-id="s3-eyebrow">REQUEST</div><div class="page" data-bento-id="s3-page">03 / 09</div>
+    <h1 class="slide-title" data-bento-id="s3-title">最初の依頼は、普段の言葉でよい</h1>
+    <p class="slide-kicker" data-bento-id="s3-kicker">目的と優先順位が伝われば、内部ファイル名やコマンドを指定する必要はありません。</p>
+    <div class="field-card" data-bento-id="s3-fields" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-natural-request">
+      <div class="card-label" data-bento-id="s3-fields-label" data-figure-id="fig-natural-request">依頼に入れる5要素</div>
+      <div class="field-row" data-bento-id="s3-field1" data-figure-id="fig-natural-request"><span class="field-name">目的</span><span class="field-value">何のための資料か</span></div>
+      <div class="field-row" data-bento-id="s3-field2" data-figure-id="fig-natural-request"><span class="field-name">想定読者</span><span class="field-value">誰が見るか</span></div>
+      <div class="field-row" data-bento-id="s3-field3" data-figure-id="fig-natural-request"><span class="field-name">分量</span><span class="field-value">枚数・発表時間</span></div>
+      <div class="field-row" data-bento-id="s3-field4" data-figure-id="fig-natural-request"><span class="field-name">残す要素</span><span class="field-value">数式・原図・用語など</span></div>
+      <div class="field-row" data-bento-id="s3-field5" data-figure-id="fig-natural-request"><span class="field-name">強調点</span><span class="field-value">最も伝えたいこと</span></div>
+    </div>
+    <div class="chat-panel" data-bento-id="s3-chat" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-natural-request">
+      <div class="chat-panel-label" data-bento-id="s3-chat-label" data-figure-id="fig-natural-request">今回の実際の依頼</div>
+      <div class="bubble-user" data-bento-id="s3-user-bubble" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-natural-request">このリポジトリの使い方を、初めての人向けの9枚のデモ資料にして。通常の作り方から完成後の直し方まで、操作例を中心に見せたい。</div>
+      <div class="bubble-system" data-bento-id="s3-system-bubble" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-natural-request">依頼は保存され、一次資料と一緒に制作の起点になります。通常の案件では、ここに論文・PDF・既存資料が入ります。</div>
+    </div>
+    <div class="operation-strip" data-bento-id="s3-operation" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-natural-request">
+      <div class="operation-cell" data-bento-id="s3-op1" data-figure-id="fig-natural-request"><p class="operation-label">すること</p><p class="operation-text">希望を普段の言葉で伝える</p></div>
+      <div class="operation-cell" data-bento-id="s3-op2" data-figure-id="fig-natural-request"><p class="operation-label">見ること</p><p class="operation-text">依頼が正しく理解されたか</p></div>
+      <div class="operation-cell" data-bento-id="s3-op3" data-figure-id="fig-natural-request"><p class="operation-label">伝えること</p><p class="operation-text">不足条件や優先順位</p></div>
+    </div>
+    <div class="journey" data-bento-id="s3-journey" data-bento-type="shape" data-bento-shape="rect" data-figure-id="fig-natural-request"><div class="journey-step active">依頼</div><div class="journey-step human-step">計画</div><div class="journey-step">section制作</div><div class="journey-step human-step">全体確認</div><div class="journey-step human-step">最終調整</div><div class="journey-step">完成後の修正</div></div>
+  </section>
+
+  <section class="slide" data-slide-id="review-the-plan" data-section-id="request-and-plan" data-layout="grid">
+    <div class="top-rule" data-bento-id="s4-top-rule" data-bento-type="shape" data-bento-shape="rect"></div>
+    <div class="eyebrow" data-bento-id="s4-eyebrow">PLAN REVIEW</div><div class="page" data-bento-id="s4-page">04 / 09</div>
+    <h1 class="slide-title" data-bento-id="s4-title">最初に確認するのは、完成版ではなく構成案</h1>
+    <p class="slide-kicker" data-bento-id="s4-kicker">内容の方向性を確認してから、セクションごとの制作へ進みます。</p>
+    <div class="plan-card" style="left:66px;" data-bento-id="s4-card1" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-review-plan"><div class="card-label">01</div><h2>説明方針</h2><p>誰に、どの深さで、何を持ち帰ってもらうか。</p></div>
+    <div class="plan-card" style="left:366px;" data-bento-id="s4-card2" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-review-plan"><div class="card-label">02</div><h2>ストーリー</h2><p>導入から結論まで、どの順序で理解をつなぐか。</p></div>
+    <div class="plan-card" style="left:666px;" data-bento-id="s4-card3" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-review-plan"><div class="card-label">03</div><h2>スライド構成</h2><p>各ページの主張、図、会話例、確認ポイント。</p></div>
+    <div class="check-panel" data-bento-id="s4-check" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-review-plan"><h2>見るポイント</h2><p class="check-line">✓ 事実に誤りがない</p><p class="check-line">✓ 順序が分かりやすい</p><p class="check-line">✓ 枚数と情報量が適切</p><p class="check-line">✓ 必要な図が含まれる</p></div>
+    <div class="reply-row" data-bento-id="s4-replies" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-review-plan"><div class="reply-chip">「結論を先に」</div><div class="reply-chip">「方法は2枚に」</div><div class="reply-chip">「この図は原図で」</div><div class="reply-chip">「この構成で進めて」</div></div>
+    <div class="operation-strip" data-bento-id="s4-operation" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-review-plan"><div class="operation-cell"><p class="operation-label">すること</p><p class="operation-text">構成を読む</p></div><div class="operation-cell"><p class="operation-label">見ること</p><p class="operation-text">抜け・順序・分量・図</p></div><div class="operation-cell"><p class="operation-label">伝えること</p><p class="operation-text">修正点、または「進めて」</p></div></div>
+    <div class="journey" data-bento-id="s4-journey" data-bento-type="shape" data-bento-shape="rect" data-figure-id="fig-review-plan"><div class="journey-step">依頼</div><div class="journey-step active human-step">計画</div><div class="journey-step">section制作</div><div class="journey-step human-step">全体確認</div><div class="journey-step human-step">最終調整</div><div class="journey-step">完成後の修正</div></div>
+  </section>
+
+  <section class="slide" data-slide-id="section-loop" data-section-id="section-work" data-layout="row">
+    <div class="top-rule" data-bento-id="s5-top-rule" data-bento-type="shape" data-bento-shape="rect"></div><div class="eyebrow" data-bento-id="s5-eyebrow">SECTION LOOP</div><div class="page" data-bento-id="s5-page">05 / 09</div>
+    <h1 class="slide-title" data-bento-id="s5-title">1 sectionずつ、見て・言って・触って・確定する</h1>
+    <p class="slide-kicker" data-bento-id="s5-kicker">全体を一括でやり直さず、現在のまとまりだけを小さく確認します。</p>
+    <div class="loop-card" style="left:66px;" data-bento-id="s5-loop1" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-section-loop"><div class="loop-number">1</div><h2>HTML previewを見る</h2><p>内容、読み順、文字量、図が初見で伝わるかを確認。</p><div class="say-example">見る：「図は主張を助けている？」</div></div>
+    <div class="native-arrow" style="left:322px;top:315px;" data-bento-id="s5-arrow1" data-figure-id="fig-section-loop">→</div>
+    <div class="loop-card" style="left:368px;" data-bento-id="s5-loop2" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-section-loop"><div class="loop-number">2</div><h2>自然な言葉で直す</h2><p>対象と、どうなってほしいかを具体的に伝える。</p><div class="say-example">「2枚目の説明を1行減らして」</div></div>
+    <div class="native-arrow" style="left:624px;top:315px;" data-bento-id="s5-arrow2" data-figure-id="fig-section-loop">→</div>
+    <div class="loop-card" style="left:670px;" data-bento-id="s5-loop3" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-section-loop"><div class="loop-number">3</div><h2>Bentoで編集する</h2><p>文章、図、スライド構造を編集可能な状態で確認。</p><div class="say-example">「図を大きく、説明を左へ」</div></div>
+    <div class="native-arrow" style="left:926px;top:315px;" data-bento-id="s5-arrow3" data-figure-id="fig-section-loop">→</div>
+    <div class="loop-card" style="left:972px;" data-bento-id="s5-loop4" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-section-loop"><div class="loop-number">4</div><h2>sectionを確定</h2><p>内容と構造に納得したら、次のsectionへ進む。</p><div class="say-example">「ここはこの内容でOK」</div></div>
+    <div class="operation-strip" data-bento-id="s5-operation" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-section-loop"><div class="operation-cell"><p class="operation-label">すること</p><p class="operation-text">画面を見てフィードバック</p></div><div class="operation-cell"><p class="operation-label">見ること</p><p class="operation-text">内容・順序・図・出典</p></div><div class="operation-cell"><p class="operation-label">伝えること</p><p class="operation-text">場所と期待する結果</p></div></div>
+    <div class="journey" data-bento-id="s5-journey" data-bento-type="shape" data-bento-shape="rect" data-figure-id="fig-section-loop"><div class="journey-step">依頼</div><div class="journey-step human-step">計画</div><div class="journey-step active">section制作</div><div class="journey-step human-step">全体確認</div><div class="journey-step human-step">最終調整</div><div class="journey-step">完成後の修正</div></div>
+  </section>
+
+  <section class="slide" data-slide-id="one-launcher" data-section-id="section-work" data-layout="custom">
+    <div class="top-rule" data-bento-id="s6-top-rule" data-bento-type="shape" data-bento-shape="rect"></div><div class="eyebrow" data-bento-id="s6-eyebrow">ONE ENTRY</div><div class="page" data-bento-id="s6-page">06 / 09</div>
+    <h1 class="slide-title" data-bento-id="s6-title">開く入口は同じ。画面は現在位置で変わる</h1>
+    <p class="slide-kicker" data-bento-id="s6-kicker">stage、port、出力ファイルを自分で選ぶ必要はありません。</p>
+    <div class="screen-card" style="left:76px;top:176px;" data-bento-id="s6-screen1" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-one-launcher"><h2>HTML preview</h2><p>構成、読み順、図、文字量を視覚確認する。</p></div>
+    <div class="screen-card" style="left:76px;top:382px;" data-bento-id="s6-screen2" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-one-launcher"><h2>Bento authoring</h2><p>文章、図、スライド構造を編集する。</p></div>
+    <div class="screen-card" style="right:76px;top:176px;" data-bento-id="s6-screen3" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-one-launcher"><h2>Final editor</h2><p>位置、サイズ、背景、重なりを仕上げる。</p></div>
+    <div class="screen-card" style="right:76px;top:382px;" data-bento-id="s6-screen4" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-one-launcher"><h2>完成版 viewer</h2><p>完成したBentoSlideを閲覧する。</p></div>
+    <div class="connector-line" style="left:352px;top:250px;width:150px;transform:rotate(13deg);" data-bento-id="s6-line1" data-bento-type="shape" data-bento-shape="connector" data-figure-id="fig-one-launcher"></div>
+    <div class="connector-line" style="left:352px;top:456px;width:150px;transform:rotate(-20deg);" data-bento-id="s6-line2" data-bento-type="shape" data-bento-shape="connector" data-figure-id="fig-one-launcher"></div>
+    <div class="connector-line" style="left:778px;top:282px;width:150px;transform:rotate(-14deg);" data-bento-id="s6-line3" data-bento-type="shape" data-bento-shape="connector" data-figure-id="fig-one-launcher"></div>
+    <div class="connector-line" style="left:778px;top:422px;width:150px;transform:rotate(20deg);" data-bento-id="s6-line4" data-bento-type="shape" data-bento-shape="connector" data-figure-id="fig-one-launcher"></div>
+    <div class="launcher-center" data-bento-id="s6-launcher" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-one-launcher"><h2>start_deck_workspace.cmd</h2><p>ダブルクリック → clipboardのURLを開く</p></div>
+    <div class="operation-strip" data-bento-id="s6-operation" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-one-launcher"><div class="operation-cell"><p class="operation-label">すること</p><p class="operation-text">同じlauncherを開く</p></div><div class="operation-cell"><p class="operation-label">見ること</p><p class="operation-text">表示された画面の役割</p></div><div class="operation-cell"><p class="operation-label">伝えること</p><p class="operation-text">画面を見た感想や修正</p></div></div>
+    <div class="journey" data-bento-id="s6-journey" data-bento-type="shape" data-bento-shape="rect" data-figure-id="fig-one-launcher"><div class="journey-step">依頼</div><div class="journey-step human-step">計画</div><div class="journey-step active">section制作</div><div class="journey-step human-step">全体確認</div><div class="journey-step human-step">最終調整</div><div class="journey-step">完成後の修正</div></div>
+  </section>
+
+  <section class="slide" data-slide-id="content-then-layout" data-section-id="approval-and-final" data-layout="two-column-contrast">
+    <div class="top-rule" data-bento-id="s7-top-rule" data-bento-type="shape" data-bento-shape="rect"></div><div class="eyebrow" data-bento-id="s7-eyebrow">CONTENT → FINAL</div><div class="page" data-bento-id="s7-page">07 / 09</div>
+    <h1 class="slide-title" data-bento-id="s7-title">内容を確定してから、見た目を仕上げる</h1>
+    <p class="slide-kicker" data-bento-id="s7-kicker">内容変更と最終レイアウト調整を分けることで、意図しない書き換えを防ぎます。</p>
+    <div class="split-panel" style="left:66px;" data-bento-id="s7-left" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-content-layout"><div class="card-label">BENTO AUTHORING</div><h2>内容と構造を確認</h2><ul><li>文章・数式</li><li>図表と出典</li><li>スライドの追加・順序</li><li>抜け・重複・表記統一</li></ul><div class="speech-example">「3枚目の説明を、初見向けに修正して」</div></div>
+    <div class="checkpoint" data-bento-id="s7-checkpoint" data-bento-type="shape" data-bento-shape="rect" data-figure-id="fig-content-layout"></div><div class="checkpoint-text" data-bento-id="s7-checkpoint-text" data-figure-id="fig-content-layout">資料全体の<br>内容確認</div>
+    <div class="split-panel" style="right:66px;" data-bento-id="s7-right" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-content-layout"><div class="card-label human">FINALIZATION</div><h2>見た目だけを仕上げる</h2><ul><li>位置・サイズ</li><li>style・背景</li><li>重なり・余白</li><li>全体の視覚的な統一</li></ul><div class="speech-example">「余白を揃えて、タイトル位置を整えて」</div></div>
+    <div class="operation-strip" data-bento-id="s7-operation" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-content-layout"><div class="operation-cell"><p class="operation-label">すること</p><p class="operation-text">内容を確定してから見た目を見る</p></div><div class="operation-cell"><p class="operation-label">見ること</p><p class="operation-text">内容か、見た目か</p></div><div class="operation-cell"><p class="operation-label">伝えること</p><p class="operation-text">修正の目的と対象</p></div></div>
+    <div class="journey" data-bento-id="s7-journey" data-bento-type="shape" data-bento-shape="rect" data-figure-id="fig-content-layout"><div class="journey-step">依頼</div><div class="journey-step human-step">計画</div><div class="journey-step">section制作</div><div class="journey-step active human-step">全体確認</div><div class="journey-step active human-step">最終調整</div><div class="journey-step">完成後の修正</div></div>
+  </section>
+
+  <section class="slide" data-slide-id="safe-revision" data-section-id="revision-and-summary" data-layout="two-column-contrast">
+    <div class="top-rule" data-bento-id="s8-top-rule" data-bento-type="shape" data-bento-shape="rect"></div><div class="eyebrow" data-bento-id="s8-eyebrow">SAFE REVISION</div><div class="page" data-bento-id="s8-page">08 / 09</div>
+    <h1 class="slide-title" data-bento-id="s8-title">完成後の修正にも、戻り道がある</h1>
+    <p class="slide-kicker" data-bento-id="s8-kicker">利用者は普通に修正内容を伝えるだけ。変更の種類に応じて安全な経路が選ばれます。</p>
+    <div class="revision-path" style="left:86px;" data-bento-id="s8-visual" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-safe-revision"><div class="card-label">見た目だけ</div><h2>最終調整へ戻る</h2><p>内容と構造は固定したまま、配置やstyleを直します。</p><div class="revision-say">「5枚目の図を少し右へ移動して」</div><div class="revision-result">位置・サイズ・背景・重なりだけを再調整</div></div>
+    <div class="revision-path" style="right:86px;" data-bento-id="s8-content" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-safe-revision"><div class="card-label human">内容を変更</div><h2>該当sectionへ戻る</h2><p>内容を更新し、sectionと資料全体をもう一度確認します。</p><div class="revision-say">「3枚目の説明を最新内容へ更新して」</div><div class="revision-result">旧finalを保持 → 再確認 → 旧版をarchiveして切替</div></div>
+    <div class="operation-strip" data-bento-id="s8-operation" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-safe-revision"><div class="operation-cell"><p class="operation-label">すること</p><p class="operation-text">直したい内容を普通に伝える</p></div><div class="operation-cell"><p class="operation-label">見ること</p><p class="operation-text">内容変更か、見た目変更か</p></div><div class="operation-cell"><p class="operation-label">伝えること</p><p class="operation-text">対象と期待する結果</p></div></div>
+    <div class="journey" data-bento-id="s8-journey" data-bento-type="shape" data-bento-shape="rect" data-figure-id="fig-safe-revision"><div class="journey-step">依頼</div><div class="journey-step human-step">計画</div><div class="journey-step">section制作</div><div class="journey-step human-step">全体確認</div><div class="journey-step human-step">最終調整</div><div class="journey-step active">完成後の修正</div></div>
+  </section>
+
+  <section class="slide" data-slide-id="quick-reference" data-section-id="revision-and-summary" data-layout="row">
+    <div class="top-rule" data-bento-id="s9-top-rule" data-bento-type="shape" data-bento-shape="rect"></div><div class="eyebrow" data-bento-id="s9-eyebrow">QUICK REFERENCE</div><div class="page" data-bento-id="s9-page">09 / 09</div>
+    <h1 class="slide-title" data-bento-id="s9-title">覚えるのは、資料を置く・話す・節目で確認する</h1>
+    <p class="slide-kicker" data-bento-id="s9-kicker">この資料自体が、ここで説明したworkflowから作られた完成例です。</p>
+    <div class="verb accent-bg" style="left:170px;" data-bento-id="s9-verb1" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-quick-reference"><strong>置く</strong><span>一次資料と任意の画像</span></div>
+    <div class="verb human-bg" style="left:510px;" data-bento-id="s9-verb2" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-quick-reference"><strong>話す</strong><span>希望と修正を普段の言葉で</span></div>
+    <div class="verb accent-bg" style="left:850px;" data-bento-id="s9-verb3" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-quick-reference"><strong>確認</strong><span>構成・section・全体・final</span></div>
+    <div class="quickline" data-bento-id="s9-quickline" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-quick-reference"><div class="quickstep">複製する</div><div class="quickstep">資料を置く</div><div class="quickstep">希望を話す</div><div class="quickstep">構成を確認</div><div class="quickstep">section確認</div><div class="quickstep">全体を確認</div><div class="quickstep">見た目を仕上げる</div></div>
+    <div class="takeaway" data-bento-id="s9-takeaway" data-bento-type="shape" data-bento-shape="rounded" data-figure-id="fig-quick-reference">BentoSlide0は、変換器ではなく、完成まで戻れる共同制作workflow。</div>
+  </section>
 </body>
 </html>

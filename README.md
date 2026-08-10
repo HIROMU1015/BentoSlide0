@@ -10,10 +10,11 @@
 4. ChatGPT Workへ、作りたい資料を普段の言葉で伝えます。
 5. Workが依頼を`REQUEST.md`へ保存し、曖昧でなければsource manifestも準備します。
 6. Workが各slideで図の有効性も判断し、必要ならnative図・出典付き原図・生成visualを提案します。
-7. 構成を確認します。
-8. 各sectionをHTML確認、Bento昇格、Bento編集、section確定の順で仕上げます。
-9. 全section確定後に資料全体の内容を確認します。
-10. 最終調整ではレイアウト・styleだけを仕上げます。
+7. 構成を確認したら、Work/GPTが資料全体のHTMLを作ります。
+8. 全体previewを見て、気になる箇所を普段の言葉で伝えます。
+9. Work/GPTが修正案と、関連slide・構成・共通styleへの影響を先に示します。確認後だけ候補版を適用します。
+10. HTML全体を承認してBentoへ変換し、Bento内容を確認します。
+11. 最終調整ではレイアウト・styleだけを仕上げます。
 
 ファイル名、section番号、状態更新、ログ、port、変換コマンドはエージェントが`deck.yaml`から判断します。`deck.yaml`はschema v2の唯一の機械状態です。Windowsでは`start_deck_workspace.cmd`がstageに応じてHTML preview、authoring editor、final editor、完成版viewerを選びます。従来の短文コマンドも互換経路として維持しています。
 
@@ -28,7 +29,7 @@ sources + planning
   -> output/presentation.final.bento.* + frozen final registry + baseline
 ```
 
-詳細なstage、承認、短文コマンドは[workflow/WORKFLOW.md](workflow/WORKFLOW.md)、正本ルールは[docs/source-of-truth-policy.md](docs/source-of-truth-policy.md)、保存保証は[docs/artifact-transactions.md](docs/artifact-transactions.md)を参照してください。
+詳細なstageと承認は[workflow/WORKFLOW.md](workflow/WORKFLOW.md)、HTML修正の確認契約は[docs/html-change-review.md](docs/html-change-review.md)、正本ルールは[docs/source-of-truth-policy.md](docs/source-of-truth-policy.md)、保存保証は[docs/artifact-transactions.md](docs/artifact-transactions.md)を参照してください。
 
 図の自動提案、`source-original` / `source-derived` / `generated`、PDF figure切り出し、asset登録、捏造防止ルールは[docs/visual-workflow.md](docs/visual-workflow.md)を参照してください。
 
@@ -66,7 +67,7 @@ python -m scripts.build_bento_from_html `
 
 編集反復では同じ出力先へ`--incremental`を付けると、slide DOM、関連registry/assets、global CSS/theme、runtime、browser/font environmentが一致するslideだけ`output/.bento-cache/`から再利用します。source/Bento PNGはrecord内SHA-256と一致する場合だけ再利用され、不一致や中断recordはcache missになります。通常buildはcacheを再利用せずfull evidenceを再生成し、workflowの変換・承認gateでも必ずfull build/full validationを使います。cacheは正本でも承認証跡でもありません。
 
-section承認はsection DOM、参照registry projection、参照asset content、global CSS/themeから決定論的digestを作ります。承認後の変更は該当section（global CSS/themeは全section）を未承認へ戻し、変換を拒否します。
+whole-deck HTML承認は、各section DOM、参照registry projection、参照asset content、global CSS/themeから決定論的digestを一括記録します。承認後の変更は該当section（global CSS/themeは全section）を未承認へ戻し、変換を拒否します。修正候補は承認前に正本へ入らず、関連slideを含む影響範囲を提示してから適用されます。
 
 ## Bento authoringとfinalization
 

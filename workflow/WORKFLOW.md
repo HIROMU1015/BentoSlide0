@@ -9,8 +9,8 @@
 | `initialized` | Work | sources | primary source resolved |
 | `planning` | Work | sources + planning | policy, story, slide plan, section list exist |
 | `awaiting_plan_approval` | Work | planning | user approves material plan |
-| `html_authoring` | Work | single HTML/registry or migrated chapters | current section/chapter complete |
-| `html_review` | Work | same HTML/registry | current visual composition approved at current digest |
+| `html_authoring` | Work | single HTML/registry or migrated chapters | complete deck or current compatibility unit is ready |
+| `html_review` | Work | same HTML/registry | exact whole-deck candidate or compatibility unit is approved |
 | `ready_for_conversion` | Codex | all approved HTML units | every approval digest remains current |
 | `converting` | Codex | approved HTML units | deterministic build/evidence exists |
 | `bento_validation` | Codex | generated Bento + generated registry | generated bundle passes and authoring artifacts initialize/retain safely |
@@ -22,9 +22,24 @@
 
 Expected owner/source and real artifacts are invariant checked. Approval stages are never crossed automatically.
 
-## Rolling section lifecycle (primary UX)
+## Whole-deck HTML lifecycle (primary UX)
 
-New schema v2 single/imported decks are normally completed section by section:
+New schema v2 single/imported decks normally use `authoring.strategy: whole_deck`:
+
+```text
+planning -> complete HTML/registry -> whole-deck preview
+         -> reviewed change proposals -> one HTML approval -> deterministic conversion
+```
+
+The first HTML review registers every slide under its planned section, but the user reviews the deck as one story. Later natural-language edits never overwrite reviewed canonical HTML immediately. The agent creates a temporary candidate and a machine-readable `bento/html-change-proposal/v1` report containing the requested, changed, related, added, removed, reordered, and affected slides; section, registry, structural, and global-style impact; and human-facing summaries. Global CSS/theme or structural changes conservatively require whole-deck review. Registry changes expand review to every affected section.
+
+The user is told what the candidate changes and whether it can affect other slides before confirmation. `approve-html-change` binds confirmation to the current canonical HTML/registry revisions, exact candidate revisions, and recomputed impact. `apply-html-change` is the only route that replaces canonical HTML/registry, does so transactionally, and returns the complete deck to HTML review. A stale or tampered proposal is rejected; cancellation remains safe because it never installs candidate bytes. The preview sidebar can switch between current and candidate versions and lists every affected slide. See `docs/html-change-review.md`.
+
+Sections are still required for planning order, provenance closure, approval digests, impact reporting, and optional targeted work, but they are not separate user approval gates in whole-deck mode. One final HTML approval stores every current section digest and opens conversion.
+
+## Rolling section lifecycle (optional compatibility route)
+
+`authoring.strategy: rolling_sections` retains section-by-section production for migrated work, very large decks, or an explicitly chosen incremental process:
 
 ```text
 planned -> html_authoring -> html_review -> bento_integration -> bento_authoring -> accepted
@@ -34,12 +49,13 @@ planned -> html_authoring -> html_review -> bento_integration -> bento_authoring
 
 A content/structure request made in finalization or after completion reopens the affected authoring section. It invalidates whole-deck/final approval and requires section acceptance plus whole-deck approval again. After that approval, finalization restarts by archiving the complete previous final/baseline set and transactionally installing the newly approved authoring set. It never enables content edits in final mode or silently discards an existing final.
 
-Natural conversation is routed internally to the high-level operations below. `advance` performs safe mechanical work only and stops at human approval checkpoints.
+Natural conversation is routed internally to the high-level operations below. `advance` performs safe mechanical work only and stops at human approval checkpoints. Whole-deck proposal commands are agent-facing mechanics; users see the proposed change and impact in ordinary language.
 
 ```text
 advance / approve-current / promote-current-section / edit-current
 finish-current-section / reopen-current-section / review-whole-deck
 capture-request / route / status [--json]
+propose-html-change / approve-html-change / apply-html-change / cancel-html-change
 ```
 
 ## State commands
@@ -50,6 +66,13 @@ route [--json]                  deterministic primary-workspace route
 capture-request --text ...      persist the conversational brief in REQUEST.md
 advance                         move to the next human checkpoint, never approve
 approve-current                 approve only the displayed plan/HTML/content checkpoint
+adopt-whole-deck                adopt an existing complete HTML deck without rewriting it
+complete-html-deck              validate the complete deck and open one HTML review
+approve-html-deck               bind one approval to all current section digests
+propose-html-change             snapshot and analyze a candidate; canonical stays unchanged
+approve-html-change             confirm the exact current proposal and impact
+apply-html-change               transactionally install only the approved candidate
+cancel-html-change              close a proposal without changing canonical HTML
 promote-current-section         section-only conversion and authoring transaction
 promote-section --section ...   explicit-ID compatibility form of the same transaction
 edit-current                    resolve the current editable workspace
@@ -90,7 +113,7 @@ State writes are atomic. Artifact-changing state transitions use the durable mul
 
 ## Standard single-HTML route
 
-`authoring.mode: single` uses `deck/deck.preview.html` and `deck/deck.registry.json`. Each planned section is a stable grouping of slide IDs. Its approval digest includes canonical section DOM, referenced registry projection, referenced asset bytes, and global CSS/theme. A changed section/registry/asset invalidates that section; changed global CSS/theme invalidates every section. Conversion rechecks all digests.
+`authoring.mode: single` uses `deck/deck.preview.html` and `deck/deck.registry.json`. New projects pair it with `authoring.strategy: whole_deck`; states created before the strategy field remain `rolling_sections` for backward compatibility. Each planned section is a stable grouping of slide IDs. Its approval digest includes canonical section DOM, referenced registry projection, referenced asset bytes, and global CSS/theme. A changed section/registry/asset invalidates that section; changed global CSS/theme invalidates every section. Conversion rechecks all digests.
 
 Planning may include the internal `planning/visual-plan.yaml` contract. For every slide, Work decides whether prose is sufficient, a diagram improves understanding, the original source figure is required, an editable native diagram can express it, or a generated image is justified. Native text/shape/connector diagrams are preferred; a source-derived native diagram uses one assetless figure and carries its `figureId` on every component. Source/generated image registration and PDF cropping use `scripts.register_visual_asset`, which commits the local asset, SHA-256 content digest, and registry together. Visual origin metadata and transitive figure-to-asset/source dependencies participate in section digests; unrelated visual definitions do not. Never generate data, experimental/measurement/benchmark results, quantitative plots, or equations. See `docs/visual-workflow.md`.
 

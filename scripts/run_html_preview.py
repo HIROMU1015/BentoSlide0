@@ -18,6 +18,25 @@ from scripts.deck_workflow import WorkflowError, load_state, repository_root
 
 
 STATUS_FORMAT = "bento/html-preview-status/v1"
+ACTIVE_HTML_CHANGE_STATUSES = {"proposed", "approved"}
+
+
+def _html_change_preview(state: dict[str, Any]) -> dict[str, Any] | None:
+    proposal = state.get("authoring", {}).get("htmlChange")
+    if not isinstance(proposal, dict) or proposal.get("status") not in ACTIVE_HTML_CHANGE_STATUSES:
+        return None
+    candidate = str(proposal.get("candidateHtml") or "")
+    return {
+        "proposalId": proposal.get("proposalId"),
+        "status": proposal.get("status"),
+        "scope": proposal.get("scope"),
+        "summary": proposal.get("summary"),
+        "impactSummary": proposal.get("impactSummary"),
+        "affectedSlideIds": list(proposal.get("affectedSlideIds") or []),
+        "slideTitles": dict(proposal.get("slideTitles") or {}),
+        "candidatePath": candidate,
+        "candidateUrl": "/" + quote(candidate.replace("\\", "/"), safe="/"),
+    }
 
 
 def _preview_snapshot(repository: Path) -> tuple[dict[str, Any], list[str], str | None]:
@@ -54,15 +73,32 @@ def _index_html(repository: Path) -> bytes:
             for slide_id in section["slideIds"]:
                 slides.append(f'<li><a href="#slide={quote(slide_id, safe="")}">{html.escape(slide_id)}</a></li>')
         source_url = "/" + quote((current_path or "").replace("\\", "/"), safe="/")
+        change = _html_change_preview(state)
+        change_panel = ""
+        if change:
+            affected = "".join(
+                f"<li>{html.escape(str(change['slideTitles'].get(slide_id, slide_id)))}</li>"
+                for slide_id in change["affectedSlideIds"]
+            )
+            change_panel = f"""
+<section class="change-review" id="html-change-review">
+<h2>変更案の確認</h2>
+<p><code>{html.escape(str(change['status']))}</code> / <code>{html.escape(str(change['scope']))}</code></p>
+<p>{html.escape(str(change['summary']))}</p>
+<p>{html.escape(str(change['impactSummary']))}</p>
+<details><summary>確認が必要なスライド ({len(change['affectedSlideIds'])})</summary><ul>{affected}</ul></details>
+<p><button id="show-candidate" type="button" data-url="{html.escape(change['candidateUrl'], quote=True)}">変更案を見る</button>
+<button id="show-canonical" type="button" data-url="{html.escape(source_url, quote=True)}">現在版へ戻る</button></p>
+</section>"""
         payload = f"""<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>BentoSlide deck preview</title>
-<style>html,body{{height:100%;margin:0}}body{{font:14px/1.5 system-ui,sans-serif;color:#172033;display:grid;grid-template-columns:260px 1fr}}aside{{padding:18px;overflow:auto;border-right:1px solid #ccd5e1;background:#f8fafc}}iframe{{width:100%;height:100%;border:0;background:white}}code{{background:#e7edf5;padding:2px 5px;border-radius:4px}}li{{margin:5px 0}}button{{padding:6px 10px}}strong{{color:#1d4ed8}}</style>
+<style>html,body{{height:100%;margin:0}}body{{font:14px/1.5 system-ui,sans-serif;color:#172033;display:grid;grid-template-columns:300px 1fr}}aside{{padding:18px;overflow:auto;border-right:1px solid #ccd5e1;background:#f8fafc}}iframe{{width:100%;height:100%;border:0;background:white}}code{{background:#e7edf5;padding:2px 5px;border-radius:4px}}li{{margin:5px 0}}button{{padding:6px 10px}}strong{{color:#1d4ed8}}.change-review{{margin:16px -6px;padding:12px;border:1px solid #93c5fd;border-radius:8px;background:#eff6ff}}.change-review h2{{margin-top:0}}</style>
 </head><body><aside><h1>BentoSlide</h1><p>stage: <code>{stage}</code><br>current section: <code>{current_section}</code></p>
-<button id="reload" type="button">Reload</button><h2>Sections</h2><ul>{''.join(sections) or '<li>No sections</li>'}</ul>
+<button id="reload" type="button">Reload</button>{change_panel}<h2>Sections</h2><ul>{''.join(sections) or '<li>No sections</li>'}</ul>
 <h2>Slides</h2><ul>{''.join(slides) or '<li>No registered slides</li>'}</ul></aside>
 <iframe id="deck" title="Deck preview" src="{source_url}"></iframe>
-<script>const frame=document.getElementById('deck');function navigate(){{const match=location.hash.match(/^#(section|slide)=(.+)$/);if(!match)return;const attr=match[1]==='section'?'data-section-id':'data-slide-id';const apply=()=>{{const node=frame.contentDocument&&frame.contentDocument.querySelector('['+attr+'="'+CSS.escape(decodeURIComponent(match[2]))+'"]');if(node)node.scrollIntoView({{block:'start'}});}};if(frame.contentDocument)apply();else frame.addEventListener('load',apply,{{once:true}});}}window.addEventListener('hashchange',navigate);frame.addEventListener('load',navigate);document.getElementById('reload').onclick=()=>{{frame.contentWindow.location.reload();}};navigate();</script>
+<script>const frame=document.getElementById('deck');function navigate(){{const match=location.hash.match(/^#(section|slide)=(.+)$/);if(!match)return;const attr=match[1]==='section'?'data-section-id':'data-slide-id';const apply=()=>{{const node=frame.contentDocument&&frame.contentDocument.querySelector('['+attr+'="'+CSS.escape(decodeURIComponent(match[2]))+'"]');if(node)node.scrollIntoView({{block:'start'}});}};if(frame.contentDocument)apply();else frame.addEventListener('load',apply,{{once:true}});}}window.addEventListener('hashchange',navigate);frame.addEventListener('load',navigate);document.getElementById('reload').onclick=()=>{{frame.contentWindow.location.reload();}};for(const id of ['show-candidate','show-canonical']){{const button=document.getElementById(id);if(button)button.onclick=()=>{{frame.src=button.dataset.url;}};}}navigate();</script>
 </body></html>"""
         return payload.encode("utf-8")
     current_id = html.escape(state["workflow"].get("currentChapter") or "-")
@@ -166,6 +202,7 @@ class HtmlPreviewHandler(BaseHTTPRequestHandler):
                 "mode": state["authoring"]["mode"] if single else "modular",
                 "sections": list(state["sections"]) if single else [],
                 "slides": [slide for section in state["sections"].values() for slide in section["slideIds"]] if single else [],
+                "htmlChange": _html_change_preview(state) if single else None,
                 "url": f"http://{host}:{port}/",
             })
             return

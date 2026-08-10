@@ -14,7 +14,7 @@ Work/Codexは自分で`deck.yaml`と`python -m scripts.deck_workflow status --js
 - ChatGPT Workは資料理解、説明方針、story、single HTML/registry、視覚review、Bento内容編集、最終layout判断を担当します。
 - Codexは状態管理、HTML-first変換、diagnostics、browser evidence、transaction/recovery、launcher、技術検証を担当します。
 
-通常はsectionを1つずつ、`HTML作成→見た目確認→Bentoへ昇格→Bento編集→section確定`の順で仕上げます。人が判断するのは各sectionのHTML昇格可否とBento版の確定、最後の資料全体の内容、finalの仕上がりです。承認は自動で通過しません。
+通常はまず資料全体のHTMLを作り、1つのpreviewで流れと見た目を確認します。気になる箇所を普段の言葉で伝えると、Work/GPTは正本を直接変更せず候補版を作り、「どこをどう直すか」「構成・共通style・関連説明のため他のどのslideも確認が必要か」を先に示します。ユーザーがその案を確認した後だけ候補を適用し、影響対象をまとめて再確認します。sectionは内部の整理・出典・影響範囲に使い、通常はsectionごとの承認を求めません。最後にHTML全体、Bento内容、finalの仕上がりをそれぞれ承認します。
 
 Workは各slideで「文章だけより図が理解を助けるか」も判断します。単純な構造・関係・flow・比較・状態変化は編集可能なBento native図を優先し、原図そのものが重要なら出典付きでPDF等から切り出し、視覚的な比喩が必要な場合だけ生成画像をlocal assetとして使います。架空のデータ、実験・benchmark結果、定量plot、数式画像は生成しません。詳細は`docs/visual-workflow.md`です。
 

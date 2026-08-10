@@ -11,9 +11,13 @@
 
 HTML and generated registries remain historical evidence. Authoring saves never rewrite either. Finalization begins only by transactionally snapshotting the approved authoring artifacts.
 
-## Rolling section handoff
+## Whole-deck HTML review (standard)
 
-The primary new-deck route repeats `HTML authoring -> HTML review -> promotion -> Bento authoring -> accepted` for each planned section. Promotion builds a section-only HTML/registry candidate, inserts it at planning order, or replaces the section's prior contiguous Bento range with an N-to-M range. `slideIds` follows the current canonical source; `bentoSlideIds` preserves the installed range while an accepted section is redesigned through HTML. The replacement may change every section-local slide/element ID, but it rejects collisions and dangling external references, removes obsolete protected membership, merges the candidate registry, and commits authoring HTML/JSON/registry with workflow state. Unrelated slide hashes and generated/final artifacts must remain unchanged. HTML approval and Bento acceptance are distinct human decisions; neither is inferred by `advance`.
+New single/imported decks create the complete HTML/registry pair before conversion. The first review covers the whole story. Later HTML corrections use immutable temporary candidates: impact is calculated across slide DOM, order, section membership, registry, assets, and global CSS/theme; the user sees both the requested edit and every other slide that may need review; and canonical HTML changes only after explicit revision-bound confirmation. Application is a two-artifact/state/report transaction and invalidates all HTML approval digests. Generated, authoring, and final artifacts remain untouched. See `html-change-review.md`.
+
+## Rolling section handoff (optional)
+
+The optional rolling route repeats `HTML authoring -> HTML review -> promotion -> Bento authoring -> accepted` for each planned section. Promotion builds a section-only HTML/registry candidate, inserts it at planning order, or replaces the section's prior contiguous Bento range with an N-to-M range. `slideIds` follows the current canonical source; `bentoSlideIds` preserves the installed range while an accepted section is redesigned through HTML. The replacement may change every section-local slide/element ID, but it rejects collisions and dangling external references, removes obsolete protected membership, merges the candidate registry, and commits authoring HTML/JSON/registry with workflow state. Unrelated slide hashes and generated/final artifacts must remain unchanged. HTML approval and Bento acceptance are distinct human decisions; neither is inferred by `advance`.
 
 For section-local registry definitions, replacement may update or remove the same equation, chart, table, figure, asset, or provenance-source ID only when no slide outside the target section depends on it. A definition shared with another section remains immutable during targeted replacement.
 

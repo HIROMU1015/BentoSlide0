@@ -34,9 +34,56 @@
       "required": ["mode", "entryHtml", "registry", "currentSection"],
       "properties": {
         "mode": {"enum": ["single", "modular", "imported"]},
+        "strategy": {"enum": ["whole_deck", "rolling_sections"]},
         "entryHtml": {"type": ["string", "null"], "minLength": 1},
         "registry": {"type": ["string", "null"], "minLength": 1},
-        "currentSection": {"type": ["string", "null"]}
+        "currentSection": {"type": ["string", "null"]},
+        "htmlChange": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": [
+            "format", "proposalId", "status", "baseHtmlRevision", "baseRegistryRevision",
+            "candidateHtml", "candidateRegistry", "candidateHtmlRevision", "candidateRegistryRevision",
+            "proposalPath", "request", "summary", "impactSummary", "scope",
+            "requestedSlideIds", "relatedSlideIds", "changedSlideIds", "affectedSlideIds",
+            "addedSlideIds", "removedSlideIds", "changedSectionIds", "slideTitles",
+            "reordered", "sectionMembershipChanged", "structuralImpact", "globalStyleChanged",
+            "registryChanged", "proposedAt", "approvedAt", "appliedAt", "cancelledAt"
+          ],
+          "properties": {
+            "format": {"const": "bento/html-change-proposal/v1"},
+            "proposalId": {"type": "string", "pattern": "^[a-f0-9]{12}$"},
+            "status": {"enum": ["proposed", "approved", "applied", "cancelled"]},
+            "baseHtmlRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "baseRegistryRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "candidateHtml": {"type": "string", "minLength": 1},
+            "candidateRegistry": {"type": "string", "minLength": 1},
+            "candidateHtmlRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "candidateRegistryRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "proposalPath": {"type": "string", "minLength": 1},
+            "request": {"type": "string", "minLength": 1},
+            "summary": {"type": "string", "minLength": 1},
+            "impactSummary": {"type": "string", "minLength": 1},
+            "scope": {"enum": ["local", "related", "global"]},
+            "requestedSlideIds": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+            "relatedSlideIds": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+            "changedSlideIds": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+            "affectedSlideIds": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+            "addedSlideIds": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+            "removedSlideIds": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+            "changedSectionIds": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+            "slideTitles": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+            "reordered": {"type": "boolean"},
+            "sectionMembershipChanged": {"type": "boolean"},
+            "structuralImpact": {"type": "boolean"},
+            "globalStyleChanged": {"type": "boolean"},
+            "registryChanged": {"type": "boolean"},
+            "proposedAt": {"type": "string", "format": "date-time"},
+            "approvedAt": {"type": ["string", "null"], "format": "date-time"},
+            "appliedAt": {"type": ["string", "null"], "format": "date-time"},
+            "cancelledAt": {"type": ["string", "null"], "format": "date-time"}
+          }
+        }
       }
     },
     "workflow": {

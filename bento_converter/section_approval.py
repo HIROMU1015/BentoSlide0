@@ -77,6 +77,18 @@ class SectionApprovalEvidence:
     global_css_digest: str
 
 
+@dataclass(frozen=True)
+class HtmlDeckStructureEvidence:
+    """Canonical slide-level structure used for reviewed HTML change proposals."""
+
+    ordered_slide_ids: tuple[str, ...]
+    slide_section_ids: dict[str, str]
+    slide_digests: dict[str, str]
+    slide_titles: dict[str, str]
+    section_digests: dict[str, str]
+    global_css_digest: str
+
+
 def _walk(node: HtmlNode) -> Iterable[HtmlNode]:
     yield node
     for child in node.children:
@@ -145,6 +157,15 @@ def _node_text(node: HtmlNode) -> str:
         _node_text(child) if isinstance(child, HtmlNode) else child
         for child in node.children
     )
+
+
+def _slide_title(node: HtmlNode, slide_id: str) -> str:
+    for item in _walk(node):
+        if item.tag in {"h1", "h2", "h3"}:
+            value = " ".join(_node_text(item).split())
+            if value:
+                return value
+    return slide_id
 
 
 def _global_css_payload(root_node: HtmlNode, *, html_path: Path, repository: Path, registry: dict[str, Any]) -> dict[str, Any]:
@@ -321,3 +342,48 @@ def compute_section_approval_evidence(
             section_id, tuple(section_slides[section_id]), digest, asset_hashes, references, global_css_digest,
         )
     return evidence
+
+
+def compute_html_deck_structure_evidence(
+    html_path: str | Path,
+    registry: dict[str, Any],
+    *,
+    repository: str | Path,
+) -> HtmlDeckStructureEvidence:
+    """Return deterministic per-slide evidence after full section validation."""
+
+    source = Path(html_path).resolve()
+    evidence = compute_section_approval_evidence(source, registry, repository=repository)
+    parser = _DocumentParser()
+    try:
+        parser.feed(source.read_text(encoding="utf-8-sig"))
+        parser.close()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise BentoConverterError(f"Cannot read single HTML source {source}: {exc}") from exc
+
+    ordered: list[str] = []
+    slide_sections: dict[str, str] = {}
+    slide_digests: dict[str, str] = {}
+    slide_titles: dict[str, str] = {}
+    for node in _walk(parser.root):
+        slide_id = node.attrs.get("data-slide-id")
+        if not slide_id:
+            continue
+        section_id = node.attrs.get("data-section-id")
+        if not section_id:  # compute_section_approval_evidence already reports this precisely.
+            raise BentoConverterError(f"Slide {slide_id!r} has no data-section-id")
+        ordered.append(slide_id)
+        slide_sections[slide_id] = section_id
+        slide_digests[slide_id] = _sha256_bytes(
+            _canonical_json(_canonical_node(node)).encode("utf-8")
+        )
+        slide_titles[slide_id] = _slide_title(node, slide_id)
+
+    return HtmlDeckStructureEvidence(
+        ordered_slide_ids=tuple(ordered),
+        slide_section_ids=slide_sections,
+        slide_digests=slide_digests,
+        slide_titles=slide_titles,
+        section_digests={section_id: item.digest for section_id, item in evidence.items()},
+        global_css_digest=next(iter(evidence.values())).global_css_digest,
+    )

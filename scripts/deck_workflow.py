@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -33,6 +34,7 @@ from bento_converter.authoring_storage import (
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
+from bento_converter.html_change import HTML_CHANGE_FORMAT, HtmlChangeImpact, analyze_html_change
 from bento_converter.html_pipeline import build_from_html
 from bento_converter.html_source import REGISTRY_FORMAT
 from bento_converter.registry_document import (
@@ -101,6 +103,10 @@ STAGE_SOURCE = {
     "complete": "final",
 }
 
+WHOLE_DECK_STRATEGY = "whole_deck"
+ROLLING_SECTIONS_STRATEGY = "rolling_sections"
+ACTIVE_HTML_CHANGE_STATUSES = {"proposed", "approved"}
+
 LEGACY_STAGE_SOURCE = {
     **STAGE_SOURCE,
     "html_authoring": "chapters",
@@ -112,6 +118,22 @@ LEGACY_STAGE_SOURCE = {
 
 class WorkflowError(RuntimeError):
     """A requested workflow operation is unsafe or invalid."""
+
+
+def _authoring_strategy(state: dict[str, Any]) -> str:
+    """Return an explicit strategy while preserving older v2 rolling states."""
+
+    return str(state.get("authoring", {}).get("strategy") or ROLLING_SECTIONS_STRATEGY)
+
+
+def _html_change(state: dict[str, Any]) -> dict[str, Any] | None:
+    value = state.get("authoring", {}).get("htmlChange")
+    return value if isinstance(value, dict) else None
+
+
+def _has_active_html_change(state: dict[str, Any]) -> bool:
+    proposal = _html_change(state)
+    return bool(proposal and proposal.get("status") in ACTIVE_HTML_CHANGE_STATUSES)
 
 
 def _expected_handoff(state: dict[str, Any], *, stage: str | None = None) -> dict[str, bool]:
@@ -399,9 +421,14 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
         if manifest_path.is_file():
             load_source_manifest(root, state)
         mode = state["authoring"]["mode"]
+        strategy = _authoring_strategy(state)
         if mode == "modular":
             if state["authoring"]["entryHtml"] is not None or state["authoring"]["registry"] is not None:
                 raise WorkflowError("Modular authoring must use chapters rather than authoring.entryHtml/registry")
+            if state["authoring"].get("strategy") is not None:
+                raise WorkflowError("Modular authoring cannot declare a single-HTML authoring strategy")
+            if state["authoring"].get("htmlChange") is not None:
+                raise WorkflowError("Modular authoring cannot retain an HTML change proposal")
         else:
             if state["authoring"]["entryHtml"] is None or state["authoring"]["registry"] is None:
                 raise WorkflowError(f"{mode} authoring requires entryHtml and registry")
@@ -411,6 +438,45 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                 raise WorkflowError(f"{mode} authoring must use sections rather than chapters")
             if workflow["currentChapter"] is not None:
                 raise WorkflowError(f"{mode} authoring cannot have a current chapter")
+            if strategy == WHOLE_DECK_STRATEGY and stage in {
+                "html_authoring", "html_review", "ready_for_conversion", "converting",
+            } and workflow["currentSection"] is not None:
+                raise WorkflowError("Whole-deck HTML authoring cannot expose a current section")
+            proposal = _html_change(state)
+            if proposal is not None:
+                if strategy != WHOLE_DECK_STRATEGY:
+                    raise WorkflowError("HTML change proposals require whole-deck authoring")
+                for field in ("candidateHtml", "candidateRegistry", "proposalPath"):
+                    proposal_path = _repo_path(
+                        root, proposal[field], field=f"authoring.htmlChange.{field}",
+                    )
+                    if field != "proposalPath" and proposal_path in {
+                        _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml"),
+                        _repo_path(root, state["authoring"]["registry"], field="authoring.registry"),
+                    }:
+                        raise WorkflowError("An HTML change candidate cannot overwrite the canonical source")
+                proposal_status = proposal["status"]
+                if proposal_status in ACTIVE_HTML_CHANGE_STATUSES and stage != "html_review":
+                    raise WorkflowError("An active HTML change proposal is allowed only during whole-deck HTML review")
+                if proposal_status == "proposed" and any(
+                    proposal[field] is not None for field in ("approvedAt", "appliedAt", "cancelledAt")
+                ):
+                    raise WorkflowError("A proposed HTML change cannot retain approval or completion timestamps")
+                if proposal_status == "approved" and (
+                    proposal["approvedAt"] is None
+                    or proposal["appliedAt"] is not None
+                    or proposal["cancelledAt"] is not None
+                ):
+                    raise WorkflowError("An approved HTML change requires only approvedAt")
+                if proposal_status == "applied" and (
+                    proposal["approvedAt"] is None or proposal["appliedAt"] is None
+                    or proposal["cancelledAt"] is not None
+                ):
+                    raise WorkflowError("An applied HTML change requires approvedAt and appliedAt")
+                if proposal_status == "cancelled" and (
+                    proposal["cancelledAt"] is None or proposal["appliedAt"] is not None
+                ):
+                    raise WorkflowError("A cancelled HTML change requires cancelledAt and cannot be applied")
             registered_slides: set[str] = set()
             registered_bento_slides: set[str] = set()
             for section_id, section in state["sections"].items():
@@ -782,7 +848,11 @@ def validate_sections(root: Path, state: dict[str, Any], *, require_approved: bo
         )
     for section_id, entry in state["sections"].items():
         actual_slides = list(evidence[section_id].slide_ids)
-        if entry.get("canonical") != "bento" and entry["slideIds"] != actual_slides:
+        if (
+            entry.get("canonical") == "html"
+            and entry["status"] != "html_authoring"
+            and entry["slideIds"] != actual_slides
+        ):
             raise WorkflowError(
                 f"Section {section_id!r} slideIds differ from HTML: "
                 f"state={entry['slideIds']}, HTML={actual_slides}"
@@ -1491,6 +1561,12 @@ def user_status_summary(state: dict[str, Any]) -> dict[str, Any]:
         "complete": ("資料は完成", "完成版を閲覧できます"),
         "blocked": ("処理を停止中", "原因を解消して再開します"),
     }
+    if _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
+        labels.update({
+            "html_authoring": ("資料全体のHTMLを作成中", "資料全体を確認できる状態にします"),
+            "html_review": ("資料全体のHTML確認", "変更案を確認するか、全体をBentoへ進めます"),
+            "ready_for_conversion": ("資料全体のHTML承認済み", "BentoSlideへ変換します"),
+        })
     current, next_action = labels.get(stage, (stage, "状態を確認します"))
     current_id = state["workflow"].get("currentSection") or state["workflow"].get("currentChapter")
     section = state.get("sections", {}).get(current_id, {}).get("title") if current_id else None
@@ -1514,6 +1590,13 @@ def valid_actions(state: dict[str, Any]) -> list[str]:
     if stage == "html_authoring":
         return ["edit-current", "advance"]
     if stage == "html_review":
+        if _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
+            proposal = _html_change(state)
+            if proposal and proposal.get("status") == "proposed":
+                return ["approve-html-change", "cancel-html-change"]
+            if proposal and proposal.get("status") == "approved":
+                return ["apply-html-change", "cancel-html-change"]
+            return ["approve-current", "edit-current", "propose-html-change"]
         current = state["workflow"].get("currentSection")
         entry = state.get("sections", {}).get(current, {}) if current else {}
         return (
@@ -1577,6 +1660,9 @@ def command_advance(
         command_submit_plan(root, state)
         return
     if stage == "html_authoring":
+        if _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
+            command_complete_html_deck(root, state)
+            return
         section_id, entry = _rolling_section(state)
         if entry["status"] == "planned":
             command_begin_section(root, state, section_id)
@@ -1584,6 +1670,12 @@ def command_advance(
         command_complete_section(root, state, section_id)
         return
     if stage == "html_review":
+        if _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
+            proposal = _html_change(state)
+            if proposal and proposal.get("status") == "approved":
+                command_apply_html_change(root, state)
+                return
+            raise WorkflowError("The whole-deck HTML or its pending change still needs explicit approval")
         _, entry = _rolling_section(state)
         if entry["status"] == "bento_integration":
             command_promote_current_section(
@@ -1716,9 +1808,15 @@ def command_approve_plan(root: Path, state: dict[str, Any]) -> None:
     for key in ("explanationPolicy", "storyOutline", "slidePlan"):
         state["approvals"][key] = "approved"
     first = next(iter(planned_units))
-    if single and state["sections"][first].get("canonical") is not None:
-        state["sections"][first].update({"status": "html_authoring", "canonical": "html"})
-    _transition(state, "html_authoring", "in_progress", current=first)
+    if single and _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
+        state["authoring"]["htmlChange"] = None
+        for entry in state["sections"].values():
+            entry.update({"status": "html_authoring", "canonical": "html", "approvalDigest": None})
+        _transition(state, "html_authoring", "in_progress", current=None)
+    else:
+        if single and state["sections"][first].get("canonical") is not None:
+            state["sections"][first].update({"status": "html_authoring", "canonical": "html"})
+        _transition(state, "html_authoring", "in_progress", current=first)
     atomic_write_state(root, state)
     append_work_log(root, "Recorded plan approval and opened HTML authoring")
 
@@ -1823,6 +1921,366 @@ def command_unlock_section(root: Path, state: dict[str, Any], section_id: str) -
     append_work_log(root, f"Unlocked section {section_id} for HTML authoring")
 
 
+def _whole_deck_evidence(
+    root: Path, state: dict[str, Any], *, html_path: Path | None = None,
+    registry: dict[str, Any] | None = None,
+) -> dict[str, SectionApprovalEvidence]:
+    if state.get("schemaVersion") != 2 or state["authoring"]["mode"] not in {"single", "imported"}:
+        raise WorkflowError("Whole-deck HTML authoring requires schema v2 single/imported mode")
+    source = html_path or _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    registry_value = registry or _read_json(
+        _repo_path(root, state["authoring"]["registry"], field="authoring.registry"),
+        label="single HTML registry",
+    )
+    evidence = compute_section_approval_evidence(source, registry_value, repository=root)
+    if set(evidence) != set(state["sections"]):
+        raise WorkflowError(
+            "Whole-deck HTML section IDs must exactly match deck.yaml: "
+            f"state={sorted(state['sections'])}, HTML={sorted(evidence)}"
+        )
+    return evidence
+
+
+def _set_whole_deck_html_review(
+    state: dict[str, Any], evidence: dict[str, SectionApprovalEvidence],
+) -> None:
+    for section_id, item in evidence.items():
+        state["sections"][section_id].update({
+            "status": "html_review", "canonical": "html",
+            "slideIds": list(item.slide_ids), "bentoSlideIds": [],
+            "approvalDigest": None, "bentoDocumentRevision": None,
+            "bentoRegistryRevision": None, "bentoSectionDigest": None,
+            "acceptedAt": None,
+        })
+    state["handoff"]["readyForCodex"] = False
+    _transition(state, "html_review", "awaiting_approval", current=None)
+
+
+def command_adopt_whole_deck(root: Path, state: dict[str, Any]) -> None:
+    """Adopt an existing pre-conversion full HTML deck without touching its bytes."""
+
+    _require_stage(state, "html_authoring", "html_review")
+    if any(
+        entry["status"] in {"bento_integration", "bento_authoring", "accepted"}
+        or entry.get("bentoSlideIds")
+        for entry in state["sections"].values()
+    ):
+        raise WorkflowError("Cannot adopt whole-deck authoring after section Bento promotion has begun")
+    evidence = _whole_deck_evidence(root, state)
+    next_state = copy.deepcopy(state)
+    next_state["authoring"]["strategy"] = WHOLE_DECK_STRATEGY
+    next_state["authoring"]["htmlChange"] = None
+    _set_whole_deck_html_review(next_state, evidence)
+    atomic_write_state(root, next_state)
+    append_work_log(root, "Adopted the existing full HTML deck as one review checkpoint")
+
+
+def command_complete_html_deck(root: Path, state: dict[str, Any]) -> None:
+    _require_stage(state, "html_authoring")
+    if _authoring_strategy(state) != WHOLE_DECK_STRATEGY:
+        raise WorkflowError("complete-html-deck requires whole-deck authoring")
+    if _has_active_html_change(state):
+        raise WorkflowError("Resolve the active HTML change proposal before completing the deck")
+    evidence = _whole_deck_evidence(root, state)
+    next_state = copy.deepcopy(state)
+    _set_whole_deck_html_review(next_state, evidence)
+    atomic_write_state(root, next_state)
+    append_work_log(root, "Validated the complete HTML deck and opened one whole-deck review")
+
+
+def command_approve_html_deck(root: Path, state: dict[str, Any]) -> None:
+    _require_stage(state, "html_review")
+    if _authoring_strategy(state) != WHOLE_DECK_STRATEGY:
+        raise WorkflowError("approve-html-deck requires whole-deck authoring")
+    if _has_active_html_change(state):
+        raise WorkflowError("Resolve the active HTML change proposal before approving the whole deck")
+    incomplete = [
+        section_id for section_id, entry in state["sections"].items()
+        if entry["status"] != "html_review" or entry.get("canonical") != "html"
+    ]
+    if incomplete:
+        raise WorkflowError(
+            "Every section must be in the current whole-deck HTML review: "
+            + ", ".join(incomplete)
+        )
+    evidence = _whole_deck_evidence(root, state)
+    next_state = copy.deepcopy(state)
+    for section_id, item in evidence.items():
+        next_state["sections"][section_id].update({
+            "status": "approved", "canonical": "html",
+            "slideIds": list(item.slide_ids), "approvalDigest": item.digest,
+        })
+    next_state["handoff"]["readyForCodex"] = True
+    _transition(next_state, "ready_for_conversion", "ready", current=None)
+    atomic_write_state(root, next_state)
+    append_work_log(root, "Approved the complete HTML deck at one human checkpoint")
+
+
+def _clean_proposal_text(value: str, *, field: str) -> str:
+    cleaned = " ".join(str(value).split())
+    if not cleaned:
+        raise WorkflowError(f"{field} must not be blank")
+    return cleaned
+
+
+def _proposal_report_payload(proposal: dict[str, Any]) -> bytes:
+    return (json.dumps(proposal, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _proposal_impact_payload(
+    impact: HtmlChangeImpact,
+    evidence: dict[str, SectionApprovalEvidence],
+) -> dict[str, Any]:
+    payload = impact.as_dict()
+    if payload["globalStyleChanged"]:
+        # A shared-style edit changes every section digest by contract.
+        payload["changedSectionIds"] = list(evidence)
+    return payload
+
+
+def _proposal_paths(root: Path, state: dict[str, Any], proposal_id: str) -> tuple[Path, Path, Path]:
+    html_path = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    registry_path = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    candidate_html = html_path.with_name(f".bento-html-change-{proposal_id}.candidate.html")
+    candidate_registry = registry_path.with_name(f".bento-html-change-{proposal_id}.candidate.registry.json")
+    proposal_path = root / "output" / "html-change-proposals" / f"{proposal_id}.json"
+    return candidate_html, candidate_registry, proposal_path
+
+
+def _relative(root: Path, path: Path) -> str:
+    return path.resolve().relative_to(root.resolve()).as_posix()
+
+
+def command_propose_html_change(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    candidate_html: Path,
+    candidate_registry: Path | None,
+    request: str,
+    summary: str,
+    impact_summary: str,
+    requested_slide_ids: Iterable[str],
+    related_slide_ids: Iterable[str],
+) -> dict[str, Any]:
+    """Snapshot a candidate and calculate impact without mutating canonical HTML."""
+
+    _require_stage(state, "html_review")
+    if _authoring_strategy(state) != WHOLE_DECK_STRATEGY:
+        raise WorkflowError("HTML change proposals require whole-deck authoring")
+    if _has_active_html_change(state):
+        raise WorkflowError("Resolve the active HTML change proposal before creating another")
+    source_candidate = _repo_path(root, str(candidate_html), field="html-change.candidateHtml")
+    if not source_candidate.is_file():
+        raise WorkflowError(f"HTML change candidate does not exist: {source_candidate}")
+    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    if source_candidate == canonical_html:
+        raise WorkflowError("Create an HTML change candidate instead of editing the canonical HTML directly")
+    source_registry = (
+        _repo_path(root, str(candidate_registry), field="html-change.candidateRegistry")
+        if candidate_registry is not None else canonical_registry
+    )
+    if not source_registry.is_file():
+        raise WorkflowError(f"HTML change candidate registry does not exist: {source_registry}")
+
+    base_registry = _read_json(canonical_registry, label="canonical HTML registry")
+    candidate_registry_value = _read_json(source_registry, label="candidate HTML registry")
+    candidate_html_payload = source_candidate.read_bytes()
+    candidate_registry_payload = source_registry.read_bytes()
+    proposal_id = uuid.uuid4().hex[:12]
+    snapshot_html, snapshot_registry, proposal_path = _proposal_paths(root, state, proposal_id)
+    temporary = tempfile.NamedTemporaryFile(
+        prefix=f".html-change-{proposal_id}-", suffix=".candidate.html",
+        dir=canonical_html.parent, delete=False,
+    )
+    temporary_path = Path(temporary.name)
+    try:
+        with temporary:
+            temporary.write(candidate_html_payload)
+        impact = analyze_html_change(
+            base_html=canonical_html,
+            base_registry=base_registry,
+            candidate_html=temporary_path,
+            candidate_registry=candidate_registry_value,
+            repository=root,
+            requested_slide_ids=requested_slide_ids,
+            related_slide_ids=related_slide_ids,
+        )
+        evidence = _whole_deck_evidence(
+            root, state, html_path=temporary_path, registry=candidate_registry_value,
+        )
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+    proposal = {
+        "format": HTML_CHANGE_FORMAT,
+        "proposalId": proposal_id,
+        "status": "proposed",
+        "baseHtmlRevision": file_revision(canonical_html),
+        "baseRegistryRevision": file_revision(canonical_registry),
+        "candidateHtml": _relative(root, snapshot_html),
+        "candidateRegistry": _relative(root, snapshot_registry),
+        "candidateHtmlRevision": bytes_revision(candidate_html_payload),
+        "candidateRegistryRevision": bytes_revision(candidate_registry_payload),
+        "proposalPath": _relative(root, proposal_path),
+        "request": _clean_proposal_text(request, field="request"),
+        "summary": _clean_proposal_text(summary, field="summary"),
+        "impactSummary": _clean_proposal_text(impact_summary, field="impact-summary"),
+        **_proposal_impact_payload(impact, evidence),
+        "proposedAt": utc_now(),
+        "approvedAt": None,
+        "appliedAt": None,
+        "cancelledAt": None,
+    }
+    next_state = copy.deepcopy(state)
+    next_state["authoring"]["htmlChange"] = proposal
+    validate_state(root, next_state)
+    state_path = root / STATE_RELATIVE
+    payloads = {
+        snapshot_html: candidate_html_payload,
+        snapshot_registry: candidate_registry_payload,
+        proposal_path: _proposal_report_payload(proposal),
+        state_path: yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8"),
+    }
+    ArtifactTransactionStore(root, tuple(payloads)).commit(
+        payloads, operation="propose-whole-deck-html-change",
+    )
+    append_work_log(
+        root,
+        f"Proposed HTML change {proposal_id} ({proposal['scope']}); canonical HTML remains unchanged",
+    )
+    return proposal
+
+
+def _verified_html_change(
+    root: Path, state: dict[str, Any], *, required_status: str,
+) -> tuple[dict[str, Any], Path, Path, Path]:
+    proposal = _html_change(state)
+    if not proposal or proposal.get("status") != required_status:
+        raise WorkflowError(f"HTML change proposal must be {required_status!r}")
+    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    snapshot_html = _repo_path(root, proposal["candidateHtml"], field="authoring.htmlChange.candidateHtml")
+    snapshot_registry = _repo_path(
+        root, proposal["candidateRegistry"], field="authoring.htmlChange.candidateRegistry",
+    )
+    proposal_path = _repo_path(root, proposal["proposalPath"], field="authoring.htmlChange.proposalPath")
+    checks = (
+        (canonical_html, proposal["baseHtmlRevision"], "canonical HTML"),
+        (canonical_registry, proposal["baseRegistryRevision"], "canonical registry"),
+        (snapshot_html, proposal["candidateHtmlRevision"], "candidate HTML"),
+        (snapshot_registry, proposal["candidateRegistryRevision"], "candidate registry"),
+    )
+    for path, expected, label in checks:
+        if file_revision(path) != expected:
+            raise WorkflowError(f"The {label} changed after the proposal; create a fresh proposal")
+    base_registry = _read_json(canonical_registry, label="canonical HTML registry")
+    candidate_registry = _read_json(snapshot_registry, label="candidate HTML registry")
+    evidence = _whole_deck_evidence(root, state, html_path=snapshot_html, registry=candidate_registry)
+    recomputed = _proposal_impact_payload(
+        analyze_html_change(
+            base_html=canonical_html,
+            base_registry=base_registry,
+            candidate_html=snapshot_html,
+            candidate_registry=candidate_registry,
+            repository=root,
+            requested_slide_ids=proposal["requestedSlideIds"],
+            related_slide_ids=proposal["relatedSlideIds"],
+        ),
+        evidence,
+    )
+    changed_fields = [
+        field for field, value in recomputed.items()
+        if proposal.get(field) != value
+    ]
+    if changed_fields:
+        raise WorkflowError(
+            "HTML change impact no longer matches the reviewed proposal: "
+            + ", ".join(changed_fields)
+        )
+    return proposal, snapshot_html, snapshot_registry, proposal_path
+
+
+def _commit_proposal_state(
+    root: Path, state: dict[str, Any], proposal: dict[str, Any], proposal_path: Path, *, operation: str,
+) -> None:
+    next_state = copy.deepcopy(state)
+    next_state["authoring"]["htmlChange"] = proposal
+    validate_state(root, next_state)
+    state_path = root / STATE_RELATIVE
+    payloads = {
+        proposal_path: _proposal_report_payload(proposal),
+        state_path: yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8"),
+    }
+    ArtifactTransactionStore(root, tuple(payloads)).commit(payloads, operation=operation)
+
+
+def command_approve_html_change(root: Path, state: dict[str, Any]) -> None:
+    _require_stage(state, "html_review")
+    proposal, _, _, proposal_path = _verified_html_change(root, state, required_status="proposed")
+    approved = copy.deepcopy(proposal)
+    approved["status"] = "approved"
+    approved["approvedAt"] = utc_now()
+    _commit_proposal_state(
+        root, state, approved, proposal_path, operation="approve-whole-deck-html-change",
+    )
+    append_work_log(root, f"Approved HTML change proposal {approved['proposalId']}")
+
+
+def command_apply_html_change(root: Path, state: dict[str, Any]) -> None:
+    _require_stage(state, "html_review")
+    proposal, snapshot_html, snapshot_registry, proposal_path = _verified_html_change(
+        root, state, required_status="approved",
+    )
+    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    candidate_registry = _read_json(snapshot_registry, label="candidate HTML registry")
+    evidence = _whole_deck_evidence(
+        root, state, html_path=snapshot_html, registry=candidate_registry,
+    )
+    applied = copy.deepcopy(proposal)
+    applied["status"] = "applied"
+    applied["appliedAt"] = utc_now()
+    next_state = copy.deepcopy(state)
+    next_state["authoring"]["htmlChange"] = applied
+    _set_whole_deck_html_review(next_state, evidence)
+    validate_state(root, next_state)
+    state_path = root / STATE_RELATIVE
+    payloads = {
+        canonical_html: snapshot_html.read_bytes(),
+        canonical_registry: snapshot_registry.read_bytes(),
+        proposal_path: _proposal_report_payload(applied),
+        state_path: yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8"),
+    }
+    ArtifactTransactionStore(root, tuple(payloads)).commit(
+        payloads, operation="apply-approved-whole-deck-html-change",
+    )
+    append_work_log(
+        root,
+        f"Applied approved HTML change {applied['proposalId']} and returned the whole deck to review",
+    )
+
+
+def command_cancel_html_change(root: Path, state: dict[str, Any]) -> None:
+    _require_stage(state, "html_review")
+    proposal = _html_change(state)
+    if not proposal or proposal.get("status") not in ACTIVE_HTML_CHANGE_STATUSES:
+        raise WorkflowError("There is no active HTML change proposal to cancel")
+    # Cancellation never applies candidate bytes, so it remains available even
+    # when either side became stale after the proposal was created.
+    proposal_path = _repo_path(
+        root, proposal["proposalPath"], field="authoring.htmlChange.proposalPath",
+    )
+    cancelled = copy.deepcopy(proposal)
+    cancelled["status"] = "cancelled"
+    cancelled["cancelledAt"] = utc_now()
+    _commit_proposal_state(
+        root, state, cancelled, proposal_path, operation="cancel-whole-deck-html-change",
+    )
+    append_work_log(root, f"Cancelled HTML change proposal {cancelled['proposalId']}; canonical HTML was unchanged")
+
+
 def _section_digest(
     document: dict[str, Any], registry: dict[str, Any], slide_ids: Iterable[str],
 ) -> str:
@@ -1899,6 +2357,13 @@ def command_approve_current(root: Path, state: dict[str, Any]) -> None:
         command_approve_plan(root, state)
         return
     if stage == "html_review" and state["authoring"]["mode"] in {"single", "imported"}:
+        if _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
+            proposal = _html_change(state)
+            if proposal and proposal.get("status") == "proposed":
+                command_approve_html_change(root, state)
+            else:
+                command_approve_html_deck(root, state)
+            return
         section_id, entry = _rolling_section(state)
         if entry["status"] not in {"html_review", "review"}:
             raise WorkflowError(f"Current section is not awaiting HTML approval: {section_id}")
@@ -3048,6 +3513,20 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("chapters", nargs="+")
     configure_sections = commands.add_parser("configure-sections")
     configure_sections.add_argument("sections", nargs="+")
+    commands.add_parser("adopt-whole-deck")
+    commands.add_parser("complete-html-deck")
+    commands.add_parser("approve-html-deck")
+    propose_html_change = commands.add_parser("propose-html-change")
+    propose_html_change.add_argument("--candidate-html", required=True, type=Path)
+    propose_html_change.add_argument("--candidate-registry", type=Path)
+    propose_html_change.add_argument("--request", required=True)
+    propose_html_change.add_argument("--summary", required=True)
+    propose_html_change.add_argument("--impact-summary", required=True)
+    propose_html_change.add_argument("--target-slide", action="append", required=True, dest="target_slides")
+    propose_html_change.add_argument("--related-slide", action="append", default=[], dest="related_slides")
+    commands.add_parser("approve-html-change")
+    commands.add_parser("apply-html-change")
+    commands.add_parser("cancel-html-change")
     commands.add_parser("submit-plan")
     commands.add_parser("approve-plan")
     advance = commands.add_parser("advance")
@@ -3131,6 +3610,30 @@ def run(args: argparse.Namespace) -> int:
         command_configure_chapters(root, state, args.chapters)
     elif command == "configure-sections":
         command_configure_sections(root, state, args.sections)
+    elif command == "adopt-whole-deck":
+        command_adopt_whole_deck(root, state)
+    elif command == "complete-html-deck":
+        command_complete_html_deck(root, state)
+    elif command == "approve-html-deck":
+        command_approve_html_deck(root, state)
+    elif command == "propose-html-change":
+        proposal = command_propose_html_change(
+            root, state,
+            candidate_html=args.candidate_html,
+            candidate_registry=args.candidate_registry,
+            request=args.request,
+            summary=args.summary,
+            impact_summary=args.impact_summary,
+            requested_slide_ids=args.target_slides,
+            related_slide_ids=args.related_slides,
+        )
+        print(json.dumps(proposal, ensure_ascii=False, indent=2))
+    elif command == "approve-html-change":
+        command_approve_html_change(root, state)
+    elif command == "apply-html-change":
+        command_apply_html_change(root, state)
+    elif command == "cancel-html-change":
+        command_cancel_html_change(root, state)
     elif command == "submit-plan":
         command_submit_plan(root, state)
     elif command == "approve-plan":

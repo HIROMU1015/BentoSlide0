@@ -1,0 +1,65 @@
+schemaVersion: 1
+slides:
+  - id: demo-is-the-deck
+    purpose: この資料自体がリポジトリの制作フローで作られる自己実証型デモだと伝える
+    visual:
+      recommended: true
+      type: native-diagram
+      intent: リポジトリ内文書から会話を経てBentoSlideになる流れを3段の編集可能な図で示す
+      originKind: source-derived
+  - id: first-actions
+    purpose: 利用開始時に行う4つの操作をそのまま真似できるようにする
+    visual:
+      recommended: true
+      type: native-diagram
+      intent: 複製、一次資料、任意画像、依頼をフォルダーと画面のカードで示す
+      originKind: source-derived
+  - id: natural-request
+    purpose: 自然な言葉で依頼するときに含める要素を具体化する
+    visual:
+      recommended: true
+      type: native-diagram
+      intent: 依頼の型と実際の会話例を編集可能な入力欄と吹き出しで示す
+      originKind: source-derived
+  - id: review-the-plan
+    purpose: 構成案で何を確認し何と返答するかを示す
+    visual:
+      recommended: true
+      type: native-diagram
+      intent: 説明方針、ストーリー、スライド構成と確認チェックリストをカードで示す
+      originKind: source-derived
+  - id: section-loop
+    purpose: セクションごとの確認と編集の反復を理解できるようにする
+    visual:
+      recommended: true
+      type: native-diagram
+      intent: HTML確認、修正依頼、Bento編集、確定の4場面を横方向の流れで示す
+      originKind: source-derived
+  - id: one-launcher
+    purpose: 同じ入口から現在位置に合う画面が選ばれることを示す
+    visual:
+      recommended: true
+      type: native-diagram
+      intent: launcherから4つの画面へつながる分岐を編集可能なUIモックで示す
+      originKind: source-derived
+  - id: content-then-layout
+    purpose: 内容確認と最終レイアウト調整の役割を区別する
+    visual:
+      recommended: true
+      type: native-diagram
+      intent: 内容と構造を扱う領域と見た目だけを扱う領域を左右比較で示す
+      originKind: source-derived
+  - id: safe-revision
+    purpose: 完成後の修正が内容と見た目で異なる経路を通ることを示す
+    visual:
+      recommended: true
+      type: native-diagram
+      intent: 見た目変更と内容変更の2分岐と旧版保持を状態遷移図で示す
+      originKind: source-derived
+  - id: quick-reference
+    purpose: 利用者が覚える最短の操作を持ち帰れるようにする
+    visual:
+      recommended: true
+      type: native-diagram
+      intent: 複製から仕上げまでのチェックリストと置く、話す、確認するの3動詞をまとめる
+      originKind: source-derived

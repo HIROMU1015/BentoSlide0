@@ -13,19 +13,21 @@ authoring:
   entryHtml: deck/deck.preview.html
   registry: deck/deck.registry.json
   currentSection: null
+  strategy: whole_deck
+  htmlChange: null
 workflow:
-  stage: awaiting_plan_approval
+  stage: html_review
   status: awaiting_approval
   owner: work
-  sourceOfTruth: planning
+  sourceOfTruth: html
   currentChapter: null
   currentSection: null
   blockingReason: null
   blockedFrom: null
 approvals:
-  explanationPolicy: pending
-  storyOutline: pending
-  slidePlan: pending
+  explanationPolicy: approved
+  storyOutline: approved
+  slidePlan: approved
   bentoContent:
     status: pending
     documentRevision: null
@@ -36,9 +38,11 @@ approvals:
 sections:
   promise:
     title: promise
-    status: planned
-    canonical: planning
-    slideIds: []
+    status: html_review
+    canonical: html
+    slideIds:
+    - demo-is-the-deck
+    - first-actions
     bentoSlideIds: []
     approvalDigest: null
     bentoDocumentRevision: null
@@ -47,9 +51,11 @@ sections:
     acceptedAt: null
   request-and-plan:
     title: request-and-plan
-    status: planned
-    canonical: planning
-    slideIds: []
+    status: html_review
+    canonical: html
+    slideIds:
+    - natural-request
+    - review-the-plan
     bentoSlideIds: []
     approvalDigest: null
     bentoDocumentRevision: null
@@ -58,9 +64,11 @@ sections:
     acceptedAt: null
   section-work:
     title: section-work
-    status: planned
-    canonical: planning
-    slideIds: []
+    status: html_review
+    canonical: html
+    slideIds:
+    - section-loop
+    - one-launcher
     bentoSlideIds: []
     approvalDigest: null
     bentoDocumentRevision: null
@@ -69,9 +77,10 @@ sections:
     acceptedAt: null
   approval-and-final:
     title: approval-and-final
-    status: planned
-    canonical: planning
-    slideIds: []
+    status: html_review
+    canonical: html
+    slideIds:
+    - content-then-layout
     bentoSlideIds: []
     approvalDigest: null
     bentoDocumentRevision: null
@@ -80,9 +89,11 @@ sections:
     acceptedAt: null
   revision-and-summary:
     title: revision-and-summary
-    status: planned
-    canonical: planning
-    slideIds: []
+    status: html_review
+    canonical: html
+    slideIds:
+    - safe-revision
+    - quick-reference
     bentoSlideIds: []
     approvalDigest: null
     bentoDocumentRevision: null
@@ -108,7 +119,7 @@ outputs:
 preview:
   htmlPort: 4173
   bentoPort: 8765
-  currentUrl: null
+  currentUrl: http://127.0.0.1:4173/
 validation:
   finalStatus: pending
   checkedAt: null
