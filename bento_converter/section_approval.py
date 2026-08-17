@@ -17,6 +17,7 @@ from .segment import registry_dependency_closure
 
 
 SECTION_DIGEST_FORMAT = "bento/section-approval/v1"
+HTML_DECK_REVIEW_DIGEST_FORMAT = "bento/html-deck-review-evidence/v1"
 REFERENCE_ATTRIBUTES = {
     "data-equation-id": "equations",
     "data-figure-id": "figures",
@@ -26,6 +27,9 @@ REFERENCE_ATTRIBUTES = {
 }
 URL_ATTRIBUTES = {"src", "href", "poster", "data-src"}
 URL_PATTERN = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.IGNORECASE)
+CSS_IMPORT_PATTERN = re.compile(
+    r"@import\s+(?:url\(\s*)?['\"]?([^'\"\s);]+)", re.IGNORECASE,
+)
 VOID_TAGS = {
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
     "param", "source", "track", "wbr",
@@ -87,6 +91,17 @@ class HtmlDeckStructureEvidence:
     slide_titles: dict[str, str]
     section_digests: dict[str, str]
     global_css_digest: str
+    dependency_hashes: dict[str, str]
+    review_digest: str
+
+
+@dataclass(frozen=True)
+class HtmlDeckOutline:
+    """Version-specific slide order and labels for HTML review navigation."""
+
+    ordered_slide_ids: tuple[str, ...]
+    slide_section_ids: dict[str, str]
+    slide_titles: dict[str, str]
 
 
 def _walk(node: HtmlNode) -> Iterable[HtmlNode]:
@@ -168,6 +183,85 @@ def _slide_title(node: HtmlNode, slide_id: str) -> str:
     return slide_id
 
 
+def read_html_deck_outline(html_path: str | Path) -> HtmlDeckOutline:
+    """Read the ordered slide/section/title outline from one HTML deck version."""
+
+    source = Path(html_path).resolve()
+    parser = _DocumentParser()
+    try:
+        parser.feed(source.read_text(encoding="utf-8-sig"))
+        parser.close()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise BentoConverterError(f"Cannot read single HTML source {source}: {exc}") from exc
+
+    ordered: list[str] = []
+    slide_sections: dict[str, str] = {}
+    slide_titles: dict[str, str] = {}
+    for node in _walk(parser.root):
+        slide_id = node.attrs.get("data-slide-id")
+        if not slide_id:
+            continue
+        if slide_id in slide_sections:
+            raise BentoConverterError(f"Duplicate data-slide-id in HTML source: {slide_id!r}")
+        section_id = node.attrs.get("data-section-id")
+        if not section_id:
+            raise BentoConverterError(f"Slide {slide_id!r} has no data-section-id")
+        ordered.append(slide_id)
+        slide_sections[slide_id] = section_id
+        slide_titles[slide_id] = _slide_title(node, slide_id)
+
+    return HtmlDeckOutline(
+        ordered_slide_ids=tuple(ordered),
+        slide_section_ids=slide_sections,
+        slide_titles=slide_titles,
+    )
+
+
+def _collect_stylesheet_dependencies(
+    stylesheet: Path,
+    *,
+    repository: Path,
+    linked: dict[str, str],
+    assets: dict[str, str],
+    visiting: set[Path],
+) -> None:
+    """Hash a local stylesheet and its recursive imports/resources exactly once."""
+
+    resolved_path = stylesheet.resolve()
+    if resolved_path in visiting:
+        return
+    visiting.add(resolved_path)
+    try:
+        relative = resolved_path.relative_to(repository).as_posix()
+    except ValueError as exc:
+        raise BentoConverterError(f"Stylesheet escapes the repository: {stylesheet}") from exc
+    if not resolved_path.is_file():
+        raise BentoConverterError(f"Referenced section resource does not exist: {resolved_path}")
+    linked[relative] = _sha256_bytes(resolved_path.read_bytes())
+    try:
+        css_text = resolved_path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise BentoConverterError(f"Cannot read stylesheet {resolved_path}: {exc}") from exc
+    imported_urls = {match.group(1) for match in CSS_IMPORT_PATTERN.finditer(css_text)}
+    for raw_url in imported_urls:
+        imported = _local_path(raw_url, base=resolved_path.parent, root=repository)
+        if imported is not None:
+            _collect_stylesheet_dependencies(
+                imported,
+                repository=repository,
+                linked=linked,
+                assets=assets,
+                visiting=visiting,
+            )
+    for match in URL_PATTERN.finditer(css_text):
+        raw_url = match.group(2)
+        if raw_url in imported_urls:
+            continue
+        asset = _hash_local_url(raw_url, base=resolved_path.parent, root=repository)
+        if asset:
+            assets[asset[0]] = asset[1]
+
+
 def _global_css_payload(root_node: HtmlNode, *, html_path: Path, repository: Path, registry: dict[str, Any]) -> dict[str, Any]:
     styles: list[str] = []
     linked: dict[str, str] = {}
@@ -178,19 +272,37 @@ def _global_css_payload(root_node: HtmlNode, *, html_path: Path, repository: Pat
             styles.append(_node_text(node))
         if node.tag == "link" and "stylesheet" in (node.attrs.get("rel") or "").lower().split():
             href = node.attrs.get("href") or ""
-            resolved = _hash_local_url(href, base=html_path.parent, root=repository)
-            if resolved:
-                relative, digest = resolved
-                linked[relative] = digest
-                css_text = (repository / relative).read_text(encoding="utf-8-sig")
-                for match in URL_PATTERN.finditer(css_text):
-                    asset = _hash_local_url(match.group(2), base=(repository / relative).parent, root=repository)
-                    if asset:
-                        css_assets[asset[0]] = asset[1]
+            stylesheet = _local_path(href, base=html_path.parent, root=repository)
+            if stylesheet is not None:
+                _collect_stylesheet_dependencies(
+                    stylesheet,
+                    repository=repository,
+                    linked=linked,
+                    assets=css_assets,
+                    visiting=set(),
+                )
         if node.tag in {"html", "body"} or (node.tag == "main" and "data-bento-deck" in node.attrs):
             theme_nodes.append({"tag": node.tag, "attrs": [[key, node.attrs[key]] for key in sorted(node.attrs)]})
+            inline_style = node.attrs.get("style") or ""
+            for match in URL_PATTERN.finditer(inline_style):
+                asset = _hash_local_url(match.group(2), base=html_path.parent, root=repository)
+                if asset:
+                    css_assets[asset[0]] = asset[1]
     for style in styles:
+        imported_urls = {match.group(1) for match in CSS_IMPORT_PATTERN.finditer(style)}
+        for raw_url in imported_urls:
+            stylesheet = _local_path(raw_url, base=html_path.parent, root=repository)
+            if stylesheet is not None:
+                _collect_stylesheet_dependencies(
+                    stylesheet,
+                    repository=repository,
+                    linked=linked,
+                    assets=css_assets,
+                    visiting=set(),
+                )
         for match in URL_PATTERN.finditer(style):
+            if match.group(2) in imported_urls:
+                continue
             asset = _hash_local_url(match.group(2), base=html_path.parent, root=repository)
             if asset:
                 css_assets[asset[0]] = asset[1]
@@ -379,6 +491,28 @@ def compute_html_deck_structure_evidence(
         )
         slide_titles[slide_id] = _slide_title(node, slide_id)
 
+    global_payload = _global_css_payload(
+        parser.root, html_path=source, repository=Path(repository).resolve(), registry=registry,
+    )
+    dependency_hashes = {
+        **global_payload["linkedStylesheets"],
+        **global_payload["stylesheetAssets"],
+    }
+    for item in evidence.values():
+        dependency_hashes.update(item.asset_hashes)
+    review_payload = {
+        "format": HTML_DECK_REVIEW_DIGEST_FORMAT,
+        "orderedSlideIds": ordered,
+        "slideDigests": slide_digests,
+        "sectionDigests": {
+            section_id: item.digest for section_id, item in evidence.items()
+        },
+        "globalCssDigest": next(iter(evidence.values())).global_css_digest,
+        "dependencies": dependency_hashes,
+    }
+    review_digest = _sha256_bytes(
+        (HTML_DECK_REVIEW_DIGEST_FORMAT + "\0" + _canonical_json(review_payload)).encode("utf-8")
+    )
     return HtmlDeckStructureEvidence(
         ordered_slide_ids=tuple(ordered),
         slide_section_ids=slide_sections,
@@ -386,4 +520,6 @@ def compute_html_deck_structure_evidence(
         slide_titles=slide_titles,
         section_digests={section_id: item.digest for section_id, item in evidence.items()},
         global_css_digest=next(iter(evidence.values())).global_css_digest,
+        dependency_hashes=dict(sorted(dependency_hashes.items())),
+        review_digest=review_digest,
     )

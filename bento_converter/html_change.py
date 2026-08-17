@@ -13,19 +13,30 @@ from .registry_document import registry_revision
 from .section_approval import HtmlDeckStructureEvidence, compute_html_deck_structure_evidence
 
 
-HTML_CHANGE_FORMAT = "bento/html-change-proposal/v2"
-HTML_CHANGE_DIGEST_FORMAT = "bento/html-change-proposal-digest/v1"
+HTML_CHANGE_FORMAT = "bento/html-change-proposal/v3"
+HTML_CHANGE_DIGEST_FORMAT = "bento/html-change-proposal-digest/v2"
+LEGACY_HTML_CHANGE_FORMAT = "bento/html-change-proposal/v2"
+LEGACY_HTML_CHANGE_DIGEST_FORMAT = "bento/html-change-proposal-digest/v1"
 HTML_CHANGE_SCOPES = {"local", "related", "global"}
 PROPOSAL_DIGEST_FIELDS = (
     "format", "proposalId",
     "baseHtmlRevision", "baseRegistryRevision",
+    "baseReviewDigest", "baseDependencyRevisions",
     "candidateHtml", "candidateRegistry",
     "candidateHtmlRevision", "candidateRegistryRevision",
+    "candidateReviewDigest", "candidateDependencyRevisions",
     "request", "summary", "impactSummary", "scope",
     "requestedSlideIds", "relatedSlideIds", "changedSlideIds", "affectedSlideIds",
     "addedSlideIds", "removedSlideIds", "changedSectionIds", "slideTitles",
     "reordered", "sectionMembershipChanged", "structuralImpact",
     "globalStyleChanged", "registryChanged",
+)
+LEGACY_PROPOSAL_DIGEST_FIELDS = tuple(
+    field for field in PROPOSAL_DIGEST_FIELDS
+    if field not in {
+        "baseReviewDigest", "baseDependencyRevisions",
+        "candidateReviewDigest", "candidateDependencyRevisions",
+    }
 )
 
 
@@ -76,12 +87,15 @@ class HtmlChangeImpact:
 def html_change_proposal_digest(proposal: dict[str, Any]) -> str:
     """Bind human explanation and machine impact to the exact candidate bytes."""
 
-    missing = [field for field in PROPOSAL_DIGEST_FIELDS if field not in proposal]
+    legacy = proposal.get("format") == LEGACY_HTML_CHANGE_FORMAT
+    fields = LEGACY_PROPOSAL_DIGEST_FIELDS if legacy else PROPOSAL_DIGEST_FIELDS
+    digest_format = LEGACY_HTML_CHANGE_DIGEST_FORMAT if legacy else HTML_CHANGE_DIGEST_FORMAT
+    missing = [field for field in fields if field not in proposal]
     if missing:
         raise BentoConverterError(f"HTML change proposal digest fields are missing: {missing}")
     payload = {
-        "format": HTML_CHANGE_DIGEST_FORMAT,
-        "proposal": {field: proposal[field] for field in PROPOSAL_DIGEST_FIELDS},
+        "format": digest_format,
+        "proposal": {field: proposal[field] for field in fields},
     }
     encoded = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,

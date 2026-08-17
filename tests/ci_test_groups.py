@@ -32,6 +32,8 @@ CLASS_GROUPS = {
     "tests.test_html_import.HtmlImportCliTests": "unit",
     "tests.test_html_preview.HtmlPreviewTests": "unit",
     "tests.test_html_preview.SingleHtmlPreviewTests": "unit",
+    "tests.test_html_preview.HtmlPreviewActionTests": "unit",
+    "tests.test_html_preview.HtmlPreviewBrowserTests": "browser",
     "tests.test_media_poster.MediaPosterTests": "unit",
     "tests.test_native_compatibility.NativeCompatibilityTests": "unit",
     "tests.test_overlap_policy.OverlapPolicyTests": "unit",

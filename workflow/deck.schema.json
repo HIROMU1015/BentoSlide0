@@ -38,6 +38,27 @@
         "entryHtml": {"type": ["string", "null"], "minLength": 1},
         "registry": {"type": ["string", "null"], "minLength": 1},
         "currentSection": {"type": ["string", "null"]},
+        "htmlReview": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": [
+            "format", "htmlRevision", "registryRevision", "evidenceDigest",
+            "dependencyRevisions", "source", "proposalDigest", "openedAt"
+          ],
+          "properties": {
+            "format": {"const": "bento/html-deck-review-baseline/v1"},
+            "htmlRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "registryRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "evidenceDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "dependencyRevisions": {
+              "type": "object",
+              "additionalProperties": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            },
+            "source": {"enum": ["completed-authoring", "adopted-deck", "applied-change"]},
+            "proposalDigest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+            "openedAt": {"type": "string", "format": "date-time"}
+          }
+        },
         "htmlChange": {
           "type": ["object", "null"],
           "additionalProperties": false,
@@ -52,15 +73,25 @@
             "registryChanged", "proposedAt", "approvedAt", "appliedAt", "cancelledAt"
           ],
           "properties": {
-            "format": {"const": "bento/html-change-proposal/v2"},
+            "format": {"enum": ["bento/html-change-proposal/v2", "bento/html-change-proposal/v3"]},
             "proposalId": {"type": "string", "pattern": "^[a-f0-9]{12}$"},
             "status": {"enum": ["proposed", "approved", "applied", "cancelled"]},
             "baseHtmlRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
             "baseRegistryRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "baseReviewDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "baseDependencyRevisions": {
+              "type": "object",
+              "additionalProperties": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            },
             "candidateHtml": {"type": "string", "minLength": 1},
             "candidateRegistry": {"type": "string", "minLength": 1},
             "candidateHtmlRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
             "candidateRegistryRevision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "candidateReviewDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "candidateDependencyRevisions": {
+              "type": "object",
+              "additionalProperties": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            },
             "proposalPath": {"type": "string", "minLength": 1},
             "request": {"type": "string", "minLength": 1},
             "summary": {"type": "string", "minLength": 1},
@@ -120,7 +151,14 @@
             "approvedAt": {"type": ["string", "null"], "format": "date-time"},
             "appliedAt": {"type": ["string", "null"], "format": "date-time"},
             "cancelledAt": {"type": ["string", "null"], "format": "date-time"}
-          }
+          },
+          "allOf": [{
+            "if": {"properties": {"format": {"const": "bento/html-change-proposal/v3"}}},
+            "then": {"required": [
+              "baseReviewDigest", "baseDependencyRevisions",
+              "candidateReviewDigest", "candidateDependencyRevisions"
+            ]}
+          }]
         }
       }
     },

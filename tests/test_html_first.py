@@ -13,7 +13,11 @@ from PIL import Image
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError, BrowserCheckError
 from bento_converter.html_converter import convert_html_layout
-from bento_converter.html_change_review import collect_html_change_browser_evidence
+from bento_converter.html_change_review import (
+    _frame_issue,
+    _overflow_issue,
+    collect_html_change_browser_evidence,
+)
 from bento_converter.html_layout import LayoutResult
 from bento_converter.html_pipeline import build_from_html
 from bento_converter.html_source import SourceChapter, discover_chapters, discover_source_unit, merge_registries
@@ -158,6 +162,25 @@ class HtmlConversionTests(unittest.TestCase):
         self.assertEqual(result.report["summary"]["imageFallback"], 1)
         self.assertEqual(result.report["summary"]["strategies"]["ignore"], 1)
 
+    def test_post_apply_bounds_use_the_visible_rotated_bounding_frame(self) -> None:
+        issue = _frame_issue(element(
+            "rotated", "shape", x=1100, y=100, w=180, h=180,
+            boundingFrame={"x": 1062, "y": 62, "w": 255, "h": 255},
+        ))
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["kind"], "element-out-of-bounds")
+        self.assertEqual(issue["frame"]["x"], 1062.0)
+        self.assertEqual(issue["geometryFrame"]["x"], 1100.0)
+
+    def test_post_apply_overflow_checks_text_bearing_shapes(self) -> None:
+        issue = _overflow_issue(element(
+            "shape-label", "shape", text="A clipped label",
+            w=100, h=30, clientWidth=100, clientHeight=30,
+            scrollWidth=180, scrollHeight=30,
+        ))
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["kind"], "element-content-overflow")
+
     def test_explicit_native_still_falls_back_for_impossible_css(self) -> None:
         unsafe = element(
             "clipped", "text", exportMode="native",
@@ -230,6 +253,43 @@ class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
             self.assertEqual(set(evidence.screenshots), {"two"})
             self.assertTrue(evidence.screenshots["two"].is_file())
             self.assertTrue(evidence.environment["environmentDigest"].startswith("sha256:"))
+
+    def test_post_apply_review_rejects_rotated_bounds_and_shape_text_clipping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "deck.preview.html"
+            registry_path = root / "deck.registry.json"
+            source.write_text(
+                "<!doctype html><style>html,body{margin:0}.slide{position:relative;width:1280px;"
+                "height:720px;overflow:hidden;background:#fff}.item{position:absolute}"
+                ".rotated{left:1100px;top:100px;width:180px;height:180px;transform:rotate(45deg)}"
+                ".clipped{left:80px;top:80px;width:100px;height:30px;overflow:hidden;white-space:nowrap}"
+                "</style><main data-bento-deck>"
+                "<section class='slide' data-slide-id='rotated' data-section-id='intro'>"
+                "<div class='item rotated' data-bento-id='rotated-shape' data-bento-type='shape'></div>"
+                "</section><section class='slide' data-slide-id='clipped' data-section-id='method'>"
+                "<div class='item clipped' data-bento-id='clipped-shape' data-bento-type='shape'>"
+                "This label is intentionally much wider than its shape</div></section></main>",
+                encoding="utf-8",
+            )
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "deck", "sources": {},
+                "document": {"title": "Strict post-apply review"},
+                "assets": {}, "fonts": {}, "equations": {}, "figures": {},
+                "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                BrowserCheckError,
+                r"rotated \(element-out-of-bounds\).*clipped \(element-content-overflow\)",
+            ):
+                collect_html_change_browser_evidence(
+                    html_path=source,
+                    registry_path=registry_path,
+                    affected_slide_ids=["rotated", "clipped"],
+                    screenshots_dir=root / "screenshots",
+                )
 
     def test_visual_origins_embed_images_and_native_diagram_without_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

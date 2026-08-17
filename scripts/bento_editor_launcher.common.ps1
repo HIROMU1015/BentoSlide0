@@ -227,6 +227,47 @@ function ConvertTo-BentoProcessArgument {
     return $Argument
 }
 
+function Start-BentoDetachedProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+    )
+
+    $resolvedFile = [System.IO.Path]::GetFullPath($FilePath)
+    $resolvedWorkingDirectory = [System.IO.Path]::GetFullPath($WorkingDirectory)
+    if (-not (Test-Path -LiteralPath $resolvedFile -PathType Leaf)) {
+        throw "Detached process executable does not exist: $resolvedFile"
+    }
+    if (-not (Test-Path -LiteralPath $resolvedWorkingDirectory -PathType Container)) {
+        throw "Detached process working directory does not exist: $resolvedWorkingDirectory"
+    }
+
+    $commandLine = ConvertTo-BentoProcessArgument -Argument $resolvedFile
+    if ($Arguments.Count -gt 0) {
+        $commandLine += ' ' + (($Arguments | ForEach-Object {
+            ConvertTo-BentoProcessArgument -Argument ([string]$_)
+        }) -join ' ')
+    }
+    try {
+        $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+            CommandLine = $commandLine
+            CurrentDirectory = $resolvedWorkingDirectory
+        } -ErrorAction Stop
+    }
+    catch {
+        throw "Cannot start a detached Windows process: $($_.Exception.Message)"
+    }
+    if ([int]$created.ReturnValue -ne 0 -or [int]$created.ProcessId -lt 1) {
+        throw "Detached Windows process creation failed with Win32 code $($created.ReturnValue)."
+    }
+    return [pscustomobject]@{
+        Id = [int]$created.ProcessId
+        CommandLine = $commandLine
+        LaunchMode = 'wmi-detached'
+    }
+}
+
 function Copy-BentoUrlToClipboard {
     param([Parameter(Mandatory = $true)][string]$Url)
 

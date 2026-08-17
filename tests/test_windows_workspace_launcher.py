@@ -141,6 +141,21 @@ class WindowsWorkspaceLauncherTests(unittest.TestCase):
         self.assertEqual(status["format"], "bento/html-preview-status/v1")
         session = json.loads((repository / "output/html-preview-session.json").read_text(encoding="utf-8-sig"))
         first_pid = session["pid"]
+        self.assertEqual(session["launchMode"], "wmi-detached")
+        parent_name = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-Command",
+                f"$p=Get-CimInstance Win32_Process -Filter \"ProcessId = {first_pid}\"; "
+                "$parent=Get-CimInstance Win32_Process -Filter (\"ProcessId = {0}\" -f $p.ParentProcessId); "
+                "$parent.Name",
+            ],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(parent_name.lower(), "wmiprvse.exe")
+        self.assertIn(
+            "BentoSlide HTML preview:",
+            (repository / "output/html-preview.stdout.log").read_text(encoding="utf-8-sig"),
+        )
         self.assertEqual(status["currentChapter"], "chapter-01")
         duplicate = self.run_cmd(repository / "start_html_preview.cmd", "-NoClipboard")
         self.assertEqual(duplicate.returncode, 0, duplicate.stdout)

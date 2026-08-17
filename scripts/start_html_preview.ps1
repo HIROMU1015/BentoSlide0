@@ -19,7 +19,7 @@ $logPath = Join-Path $stateDirectory 'html-preview.log'
 $stdoutLogPath = Join-Path $stateDirectory 'html-preview.stdout.log'
 $errorLogPath = Join-Path $stateDirectory 'html-preview.error.log'
 $lockHandle = $null
-$startedProcess = $null
+$startedProcessId = 0
 $sessionCreatedByThisInvocation = $false
 $pidCreatedByThisInvocation = $false
 
@@ -126,54 +126,52 @@ try {
         "repository=$repository", "host=$hostAddress", "port=$Port", "url=$url", 'status=starting'
     ) -Encoding utf8
 
-    $arguments = @('-u', '-m', 'scripts.run_html_preview', '--root', $repository, '--host', $hostAddress, '--port', [string]$Port)
-    $argumentLine = ($arguments | ForEach-Object { ConvertTo-BentoProcessArgument -Argument ([string]$_) }) -join ' '
-    $previousPythonUtf8 = $env:PYTHONUTF8
-    $previousPythonIoEncoding = $env:PYTHONIOENCODING
-    $env:PYTHONUTF8 = '1'; $env:PYTHONIOENCODING = 'utf-8'
-    try {
-        $startedProcess = Start-Process -FilePath $python.Executable -ArgumentList $argumentLine -WorkingDirectory $repository `
-            -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutLogPath -RedirectStandardError $errorLogPath
+    $arguments = @(
+        '-X', 'utf8', '-u', '-m', 'scripts.run_html_preview',
+        '--root', $repository, '--host', $hostAddress, '--port', [string]$Port,
+        '--stdout-log', $stdoutLogPath, '--stderr-log', $errorLogPath
+    )
+    $detachedPython = Join-Path (Split-Path -Parent $python.Executable) 'pythonw.exe'
+    if (-not (Test-Path -LiteralPath $detachedPython -PathType Leaf)) {
+        $detachedPython = $python.Executable
     }
-    finally {
-        if ($null -eq $previousPythonUtf8) { Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue } else { $env:PYTHONUTF8 = $previousPythonUtf8 }
-        if ($null -eq $previousPythonIoEncoding) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $previousPythonIoEncoding }
-    }
+    $detached = Start-BentoDetachedProcess -FilePath $detachedPython -Arguments $arguments -WorkingDirectory $repository
+    $startedProcessId = [int]$detached.Id
 
     $deadline = [System.DateTime]::UtcNow.AddSeconds($StartupTimeoutSeconds)
     $startedStatus = $null
     do {
         Start-Sleep -Milliseconds 200
-        $startedProcess.Refresh()
-        if ($startedProcess.HasExited) { break }
+        $startedSnapshot = Get-BentoProcessSnapshot -ProcessId $startedProcessId
+        if (-not $startedSnapshot.Exists) { break }
         $startedStatus = Get-HtmlPreviewStatus -StatusPort $Port -TimeoutSeconds 1
         if ($null -ne $startedStatus) { break }
     } while ([System.DateTime]::UtcNow -lt $deadline)
     if ($null -eq $startedStatus) { throw "HTML preview did not become ready within $StartupTimeoutSeconds seconds." }
 
-    $snapshot = Get-BentoProcessSnapshot -ProcessId $startedProcess.Id
+    $snapshot = Get-BentoProcessSnapshot -ProcessId $startedProcessId
     if (-not $snapshot.Exists -or [string]::IsNullOrWhiteSpace([string]$snapshot.StartTimeUtc)) { throw 'Cannot capture the HTML preview process identity.' }
     $record = [ordered]@{
-        format = 'bento/html-preview-session/v1'; pid = $startedProcess.Id; startedAt = [System.DateTimeOffset]::Now.ToString('o')
-        processStartTimeUtc = $snapshot.StartTimeUtc; repository = $repository; python = $python.Executable
-        host = $hostAddress; port = $Port; url = $url
+        format = 'bento/html-preview-session/v1'; pid = $startedProcessId; startedAt = [System.DateTimeOffset]::Now.ToString('o')
+        processStartTimeUtc = $snapshot.StartTimeUtc; repository = $repository; python = $detachedPython
+        host = $hostAddress; port = $Port; url = $url; launchMode = [string]$detached.LaunchMode
     }
     $temporary = $sessionPath + '.tmp'
     $record | ConvertTo-Json | Set-Content -LiteralPath $temporary -Encoding utf8
     Move-Item -LiteralPath $temporary -Destination $sessionPath -Force
     $sessionCreatedByThisInvocation = $true
-    Set-Content -LiteralPath $pidPath -Value ([string]$startedProcess.Id) -Encoding ascii
+    Set-Content -LiteralPath $pidPath -Value ([string]$startedProcessId) -Encoding ascii
     $pidCreatedByThisInvocation = $true
     & $python.Executable -m scripts.deck_workflow --root $repository set-current-url --url $url | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Cannot update preview.currentUrl.' }
-    Add-HtmlPreviewLog -Lines @("pid=$($startedProcess.Id)", 'status=started')
+    Add-HtmlPreviewLog -Lines @("pid=$startedProcessId", "launchMode=$($detached.LaunchMode)", 'status=started')
     if (-not $NoClipboard -and -not (Copy-BentoUrlToClipboard -Url $url)) { Write-Host 'Clipboard copy failed; the preview remains running.' -ForegroundColor Yellow }
     Write-Host "BentoSlide HTML preview started.`n$url`nOpen or reload this URL in the ChatGPT Work browser."
     exit 0
 }
 catch {
-    if ($null -ne $startedProcess) {
-        try { $startedProcess.Refresh(); if (-not $startedProcess.HasExited) { Stop-Process -Id $startedProcess.Id -Force -ErrorAction SilentlyContinue } } catch { }
+    if ($startedProcessId -gt 0) {
+        try { Stop-Process -Id $startedProcessId -Force -ErrorAction SilentlyContinue } catch { }
     }
     if ($pidCreatedByThisInvocation) {
         Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue

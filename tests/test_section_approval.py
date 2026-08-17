@@ -16,7 +16,10 @@ from bento_converter.html_change_review import (
     HtmlChangeBrowserEvidence,
     POST_APPLY_REPORT_FORMAT,
 )
-from bento_converter.section_approval import compute_section_approval_evidence
+from bento_converter.section_approval import (
+    compute_html_deck_structure_evidence,
+    compute_section_approval_evidence,
+)
 from scripts.deck_workflow import (
     WorkflowError,
     atomic_write_state,
@@ -112,6 +115,34 @@ class SectionDigestTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(Exception, "Duplicate slide id"):
             self.evidence()
+
+    def test_review_evidence_tracks_recursive_stylesheet_dependencies(self) -> None:
+        (self.root / "deck/styles").mkdir()
+        (self.root / "deck/theme.css").write_text(
+            '@import "styles/base.css"; .slide{background-image:url("assets/図 表.png")}',
+            encoding="utf-8",
+        )
+        nested = self.root / "deck/styles/base.css"
+        nested.write_text(".slide{color:#123456}", encoding="utf-8")
+        self.html_path.write_text(
+            html().replace(
+                "<style>.slide{width:1280px;height:720px}</style>",
+                '<link rel="stylesheet" href="theme.css">',
+            ),
+            encoding="utf-8",
+        )
+        first = compute_html_deck_structure_evidence(
+            self.html_path, registry(), repository=self.root,
+        )
+        self.assertEqual(
+            set(first.dependency_hashes),
+            {"deck/theme.css", "deck/styles/base.css", "deck/assets/図 表.png"},
+        )
+        nested.write_text(".slide{color:#654321}", encoding="utf-8")
+        second = compute_html_deck_structure_evidence(
+            self.html_path, registry(), repository=self.root,
+        )
+        self.assertNotEqual(second.review_digest, first.review_digest)
 
 
 class SingleHtmlWorkflowTests(unittest.TestCase):
@@ -274,6 +305,57 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
         self.assertIsNone(adopted["workflow"]["currentSection"])
         self.assertEqual((self.root / "deck/deck.preview.html").read_bytes(), before)
         self.assertEqual(adopted["sections"]["method"]["slideIds"], ["method-1"])
+        self.assertEqual(
+            adopted["authoring"]["htmlReview"]["format"],
+            "bento/html-deck-review-baseline/v1",
+        )
+
+    def test_direct_canonical_edit_cannot_be_approved_as_the_reviewed_deck(self) -> None:
+        state = self.whole_deck_review()
+        canonical_path = self.root / "deck/deck.preview.html"
+        canonical_path.write_text(
+            canonical_path.read_text(encoding="utf-8").replace("Method", "Unreviewed edit"),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(WorkflowError, "review baseline is stale"):
+            command_approve_html_deck(self.root, state)
+
+    def test_external_css_change_invalidates_an_approved_proposal(self) -> None:
+        canonical_path = self.root / "deck/deck.preview.html"
+        canonical = canonical_path.read_text(encoding="utf-8")
+        canonical_path.write_text(
+            re.sub(
+                r"<style>.*?</style>",
+                '<link rel="stylesheet" href="theme.css">',
+                canonical,
+                flags=re.DOTALL,
+            ),
+            encoding="utf-8",
+        )
+        stylesheet = self.root / "deck/theme.css"
+        stylesheet.write_text(
+            '.slide{width:1280px;height:720px;background-image:url("assets/図 表.png")}',
+            encoding="utf-8",
+        )
+        state = self.whole_deck_review()
+        candidate = self.candidate(
+            canonical_path.read_text(encoding="utf-8").replace("Method", "Updated method")
+        )
+        command_propose_html_change(
+            self.root, state, candidate_html=candidate, candidate_registry=None,
+            request="方法を変更", summary="方法説明を変更します",
+            impact_summary="方法スライドだけに影響します",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        command_approve_html_change(self.root, load_state(self.root))
+        stylesheet.write_text(
+            ".slide{width:1280px;height:720px;color:red}", encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(WorkflowError, "dependency changed"):
+            command_apply_html_change(self.root, load_state(self.root))
+        self.assertNotIn("Updated method", canonical_path.read_text(encoding="utf-8"))
 
     def test_reviewed_local_change_does_not_mutate_canonical_until_apply(self) -> None:
         state = self.whole_deck_review()
@@ -461,6 +543,7 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
 
         self.assertIn(snapshot_html, observed_artifacts)
         self.assertIn(snapshot_registry, observed_artifacts)
+        self.assertIn((self.root / "deck/assets/図 表.png").resolve(), observed_artifacts)
         self.assertIn("Concurrent canonical edit", canonical_path.read_text(encoding="utf-8"))
         self.assertEqual(
             load_state(self.root)["authoring"]["htmlChange"]["status"],

@@ -53,7 +53,12 @@ from bento_converter.registry_document import (
     registry_revision,
     validate_registry,
 )
-from bento_converter.section_approval import SectionApprovalEvidence, compute_section_approval_evidence
+from bento_converter.section_approval import (
+    HtmlDeckStructureEvidence,
+    SectionApprovalEvidence,
+    compute_html_deck_structure_evidence,
+    compute_section_approval_evidence,
+)
 from bento_converter.section_candidate import write_section_candidate
 from bento_converter.segment import (
     canonical_projection_hash,
@@ -115,6 +120,7 @@ STAGE_SOURCE = {
 WHOLE_DECK_STRATEGY = "whole_deck"
 ROLLING_SECTIONS_STRATEGY = "rolling_sections"
 ACTIVE_HTML_CHANGE_STATUSES = {"proposed", "approved"}
+HTML_DECK_REVIEW_FORMAT = "bento/html-deck-review-baseline/v1"
 
 LEGACY_STAGE_SOURCE = {
     **STAGE_SOURCE,
@@ -137,6 +143,11 @@ def _authoring_strategy(state: dict[str, Any]) -> str:
 
 def _html_change(state: dict[str, Any]) -> dict[str, Any] | None:
     value = state.get("authoring", {}).get("htmlChange")
+    return value if isinstance(value, dict) else None
+
+
+def _html_review_baseline(state: dict[str, Any]) -> dict[str, Any] | None:
+    value = state.get("authoring", {}).get("htmlReview")
     return value if isinstance(value, dict) else None
 
 
@@ -453,6 +464,8 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                 raise WorkflowError("Modular authoring cannot declare a single-HTML authoring strategy")
             if state["authoring"].get("htmlChange") is not None:
                 raise WorkflowError("Modular authoring cannot retain an HTML change proposal")
+            if state["authoring"].get("htmlReview") is not None:
+                raise WorkflowError("Modular authoring cannot retain a whole-deck HTML review baseline")
         else:
             if state["authoring"]["entryHtml"] is None or state["authoring"]["registry"] is None:
                 raise WorkflowError(f"{mode} authoring requires entryHtml and registry")
@@ -466,6 +479,17 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                 "html_authoring", "html_review", "ready_for_conversion", "converting",
             } and workflow["currentSection"] is not None:
                 raise WorkflowError("Whole-deck HTML authoring cannot expose a current section")
+            review_baseline = _html_review_baseline(state)
+            if review_baseline is not None:
+                if strategy != WHOLE_DECK_STRATEGY:
+                    raise WorkflowError("An HTML review baseline requires whole-deck authoring")
+                if review_baseline["format"] != HTML_DECK_REVIEW_FORMAT:
+                    raise WorkflowError("Unknown whole-deck HTML review baseline format")
+                for relative in review_baseline["dependencyRevisions"]:
+                    _repo_path(
+                        root, relative,
+                        field=f"authoring.htmlReview.dependencyRevisions.{relative}",
+                    )
             proposal = _html_change(state)
             if proposal is not None:
                 if strategy != WHOLE_DECK_STRATEGY:
@@ -479,6 +503,13 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                         _repo_path(root, state["authoring"]["registry"], field="authoring.registry"),
                     }:
                         raise WorkflowError("An HTML change candidate cannot overwrite the canonical source")
+                if proposal["format"] == HTML_CHANGE_FORMAT:
+                    for manifest_field in ("baseDependencyRevisions", "candidateDependencyRevisions"):
+                        for relative in proposal[manifest_field]:
+                            _repo_path(
+                                root, relative,
+                                field=f"authoring.htmlChange.{manifest_field}.{relative}",
+                            )
                 proposal_status = proposal["status"]
                 try:
                     current_proposal_digest = html_change_proposal_digest(proposal)
@@ -488,6 +519,16 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                     raise WorkflowError("HTML change proposalDigest does not match its explanation and impact")
                 if proposal_status in ACTIVE_HTML_CHANGE_STATUSES and stage != "html_review":
                     raise WorkflowError("An active HTML change proposal is allowed only during whole-deck HTML review")
+                if proposal["format"] == HTML_CHANGE_FORMAT and proposal_status in {"proposed", "approved"} and (
+                    not review_baseline
+                    or review_baseline["evidenceDigest"] != proposal["baseReviewDigest"]
+                ):
+                    raise WorkflowError("An active HTML change must remain bound to its base review baseline")
+                if proposal["format"] == HTML_CHANGE_FORMAT and proposal_status == "applied" and (
+                    not review_baseline
+                    or review_baseline["evidenceDigest"] != proposal["candidateReviewDigest"]
+                ):
+                    raise WorkflowError("An applied HTML change must open its candidate review baseline")
                 if proposal_status == "proposed" and any(
                     proposal[field] is not None for field in ("approvedAt", "appliedAt", "cancelledAt")
                 ):
@@ -1704,13 +1745,21 @@ def valid_actions(state: dict[str, Any]) -> list[str]:
         if _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
             proposal = _html_change(state)
             if proposal and proposal.get("status") == "proposed":
+                if proposal.get("format") != HTML_CHANGE_FORMAT:
+                    return ["cancel-html-change"]
                 return ["approve-html-change", "cancel-html-change"]
             if proposal and proposal.get("status") == "approved":
+                if proposal.get("format") != HTML_CHANGE_FORMAT:
+                    return ["cancel-html-change"]
                 return ["apply-html-change", "cancel-html-change"]
             if proposal and proposal.get("status") == "applied":
+                if proposal.get("format") != HTML_CHANGE_FORMAT:
+                    return ["adopt-whole-deck"]
                 review = _post_apply_review(proposal)
                 if not review or review.get("status") != "checked":
                     return ["check-html-change"]
+            if _html_review_baseline(state) is None:
+                return ["adopt-whole-deck"]
             return ["approve-current", "edit-current", "propose-html-change"]
         current = state["workflow"].get("currentSection")
         entry = state.get("sections", {}).get(current, {}) if current else {}
@@ -1932,6 +1981,7 @@ def command_approve_plan(root: Path, state: dict[str, Any]) -> None:
     first = next(iter(planned_units))
     if single and _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
         state["authoring"]["htmlChange"] = None
+        state["authoring"]["htmlReview"] = None
         for entry in state["sections"].values():
             entry.update({"status": "html_authoring", "canonical": "html", "approvalDigest": None})
         _transition(state, "html_authoring", "in_progress", current=None)
@@ -2046,7 +2096,7 @@ def command_unlock_section(root: Path, state: dict[str, Any], section_id: str) -
 def _whole_deck_evidence(
     root: Path, state: dict[str, Any], *, html_path: Path | None = None,
     registry: dict[str, Any] | None = None,
-) -> dict[str, SectionApprovalEvidence]:
+) -> HtmlDeckStructureEvidence:
     if state.get("schemaVersion") != 2 or state["authoring"]["mode"] not in {"single", "imported"}:
         raise WorkflowError("Whole-deck HTML authoring requires schema v2 single/imported mode")
     source = html_path or _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
@@ -2054,26 +2104,104 @@ def _whole_deck_evidence(
         _repo_path(root, state["authoring"]["registry"], field="authoring.registry"),
         label="single HTML registry",
     )
-    evidence = compute_section_approval_evidence(source, registry_value, repository=root)
-    if set(evidence) != set(state["sections"]):
+    evidence = compute_html_deck_structure_evidence(source, registry_value, repository=root)
+    if set(evidence.section_digests) != set(state["sections"]):
         raise WorkflowError(
             "Whole-deck HTML section IDs must exactly match deck.yaml: "
-            f"state={sorted(state['sections'])}, HTML={sorted(evidence)}"
+            f"state={sorted(state['sections'])}, HTML={sorted(evidence.section_digests)}"
         )
     return evidence
 
 
+def _review_dependency_paths(root: Path, revisions: dict[str, str]) -> tuple[Path, ...]:
+    return tuple(
+        _repo_path(root, relative, field=f"HTML review dependency {relative}")
+        for relative in sorted(revisions)
+    )
+
+
+def _whole_deck_review_record(
+    root: Path,
+    state: dict[str, Any],
+    evidence: HtmlDeckStructureEvidence,
+    *,
+    source: str,
+    proposal_digest: str | None = None,
+    html_revision: str | None = None,
+    registry_revision_value: str | None = None,
+) -> dict[str, Any]:
+    html_path = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    registry_path = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    return {
+        "format": HTML_DECK_REVIEW_FORMAT,
+        "htmlRevision": html_revision or file_revision(html_path),
+        "registryRevision": registry_revision_value or file_revision(registry_path),
+        "evidenceDigest": evidence.review_digest,
+        "dependencyRevisions": dict(evidence.dependency_hashes),
+        "source": source,
+        "proposalDigest": proposal_digest,
+        "openedAt": utc_now(),
+    }
+
+
+def _require_current_html_review(
+    root: Path, state: dict[str, Any],
+) -> HtmlDeckStructureEvidence:
+    baseline = _html_review_baseline(state)
+    if not baseline:
+        raise WorkflowError(
+            "Open a whole-deck HTML review before approval or proposing changes"
+        )
+    html_path = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    registry_path = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    if file_revision(html_path) != baseline["htmlRevision"]:
+        raise WorkflowError("Whole-deck HTML review baseline is stale for the canonical HTML")
+    if file_revision(registry_path) != baseline["registryRevision"]:
+        raise WorkflowError("Whole-deck HTML review baseline is stale for the canonical registry")
+    for relative, expected in baseline["dependencyRevisions"].items():
+        path = _repo_path(root, relative, field=f"authoring.htmlReview dependency {relative}")
+        if file_revision(path) != expected:
+            raise WorkflowError(f"Whole-deck HTML review dependency changed after review opened: {relative}")
+    registry = _read_json(registry_path, label="canonical HTML registry")
+    evidence = _whole_deck_evidence(root, state, html_path=html_path, registry=registry)
+    if evidence.review_digest != baseline["evidenceDigest"]:
+        raise WorkflowError("Whole-deck HTML review evidence changed after review opened")
+    if evidence.dependency_hashes != baseline["dependencyRevisions"]:
+        raise WorkflowError("Whole-deck HTML review dependency set changed after review opened")
+    return evidence
+
+
 def _set_whole_deck_html_review(
-    state: dict[str, Any], evidence: dict[str, SectionApprovalEvidence],
+    root: Path,
+    state: dict[str, Any],
+    evidence: HtmlDeckStructureEvidence,
+    *,
+    source: str,
+    proposal_digest: str | None = None,
+    html_revision: str | None = None,
+    registry_revision_value: str | None = None,
 ) -> None:
-    for section_id, item in evidence.items():
+    for section_id, section_digest in evidence.section_digests.items():
+        slide_ids = [
+            slide_id for slide_id in evidence.ordered_slide_ids
+            if evidence.slide_section_ids[slide_id] == section_id
+        ]
         state["sections"][section_id].update({
             "status": "html_review", "canonical": "html",
-            "slideIds": list(item.slide_ids), "bentoSlideIds": [],
+            "slideIds": slide_ids, "bentoSlideIds": [],
             "approvalDigest": None, "bentoDocumentRevision": None,
             "bentoRegistryRevision": None, "bentoSectionDigest": None,
             "acceptedAt": None,
         })
+    state["authoring"]["htmlReview"] = _whole_deck_review_record(
+        root,
+        state,
+        evidence,
+        source=source,
+        proposal_digest=proposal_digest,
+        html_revision=html_revision,
+        registry_revision_value=registry_revision_value,
+    )
     state["handoff"]["readyForCodex"] = False
     _transition(state, "html_review", "awaiting_approval", current=None)
 
@@ -2082,6 +2210,22 @@ def command_adopt_whole_deck(root: Path, state: dict[str, Any]) -> None:
     """Adopt an existing pre-conversion full HTML deck without touching its bytes."""
 
     _require_stage(state, "html_authoring", "html_review")
+    proposal = _html_change(state)
+    adoptable_legacy_apply = bool(
+        proposal
+        and proposal.get("format") != HTML_CHANGE_FORMAT
+        and proposal.get("status") == "applied"
+    )
+    if _has_unfinished_html_change(state) and not adoptable_legacy_apply:
+        raise WorkflowError("Resolve the current HTML change before adopting the deck")
+    if (
+        state["workflow"]["stage"] == "html_review"
+        and _authoring_strategy(state) == WHOLE_DECK_STRATEGY
+        and _html_review_baseline(state) is not None
+    ):
+        raise WorkflowError(
+            "A whole-deck review is already open; use a reviewed candidate for changes"
+        )
     if any(
         entry["status"] in {"bento_integration", "bento_authoring", "accepted"}
         or entry.get("bentoSlideIds")
@@ -2092,7 +2236,7 @@ def command_adopt_whole_deck(root: Path, state: dict[str, Any]) -> None:
     next_state = copy.deepcopy(state)
     next_state["authoring"]["strategy"] = WHOLE_DECK_STRATEGY
     next_state["authoring"]["htmlChange"] = None
-    _set_whole_deck_html_review(next_state, evidence)
+    _set_whole_deck_html_review(root, next_state, evidence, source="adopted-deck")
     atomic_write_state(root, next_state)
     append_work_log(root, "Adopted the existing full HTML deck as one review checkpoint")
 
@@ -2105,7 +2249,7 @@ def command_complete_html_deck(root: Path, state: dict[str, Any]) -> None:
         raise WorkflowError("Resolve the active HTML change proposal before completing the deck")
     evidence = _whole_deck_evidence(root, state)
     next_state = copy.deepcopy(state)
-    _set_whole_deck_html_review(next_state, evidence)
+    _set_whole_deck_html_review(root, next_state, evidence, source="completed-authoring")
     atomic_write_state(root, next_state)
     append_work_log(root, "Validated the complete HTML deck and opened one whole-deck review")
 
@@ -2126,12 +2270,16 @@ def command_approve_html_deck(root: Path, state: dict[str, Any]) -> None:
             "Every section must be in the current whole-deck HTML review: "
             + ", ".join(incomplete)
         )
-    evidence = _whole_deck_evidence(root, state)
+    evidence = _require_current_html_review(root, state)
     next_state = copy.deepcopy(state)
-    for section_id, item in evidence.items():
+    for section_id, section_digest in evidence.section_digests.items():
+        slide_ids = [
+            slide_id for slide_id in evidence.ordered_slide_ids
+            if evidence.slide_section_ids[slide_id] == section_id
+        ]
         next_state["sections"][section_id].update({
             "status": "approved", "canonical": "html",
-            "slideIds": list(item.slide_ids), "approvalDigest": item.digest,
+            "slideIds": slide_ids, "approvalDigest": section_digest,
         })
     next_state["handoff"]["readyForCodex"] = True
     _transition(next_state, "ready_for_conversion", "ready", current=None)
@@ -2152,12 +2300,12 @@ def _proposal_report_payload(proposal: dict[str, Any]) -> bytes:
 
 def _proposal_impact_payload(
     impact: HtmlChangeImpact,
-    evidence: dict[str, SectionApprovalEvidence],
+    evidence: HtmlDeckStructureEvidence,
 ) -> dict[str, Any]:
     payload = impact.as_dict()
     if payload["globalStyleChanged"]:
         # A shared-style edit changes every section digest by contract.
-        payload["changedSectionIds"] = list(evidence)
+        payload["changedSectionIds"] = list(evidence.section_digests)
     return payload
 
 
@@ -2193,6 +2341,7 @@ def command_propose_html_change(
         raise WorkflowError("HTML change proposals require whole-deck authoring")
     if _has_unfinished_html_change(state):
         raise WorkflowError("Resolve the active HTML change proposal before creating another")
+    base_evidence = _require_current_html_review(root, state)
     source_candidate = _repo_path(root, str(candidate_html), field="html-change.candidateHtml")
     if not source_candidate.is_file():
         raise WorkflowError(f"HTML change candidate does not exist: {source_candidate}")
@@ -2230,7 +2379,7 @@ def command_propose_html_change(
             requested_slide_ids=requested_slide_ids,
             related_slide_ids=related_slide_ids,
         )
-        evidence = _whole_deck_evidence(
+        candidate_evidence = _whole_deck_evidence(
             root, state, html_path=temporary_path, registry=candidate_registry_value,
         )
     finally:
@@ -2242,15 +2391,19 @@ def command_propose_html_change(
         "status": "proposed",
         "baseHtmlRevision": file_revision(canonical_html),
         "baseRegistryRevision": file_revision(canonical_registry),
+        "baseReviewDigest": base_evidence.review_digest,
+        "baseDependencyRevisions": dict(base_evidence.dependency_hashes),
         "candidateHtml": _relative(root, snapshot_html),
         "candidateRegistry": _relative(root, snapshot_registry),
         "candidateHtmlRevision": bytes_revision(candidate_html_payload),
         "candidateRegistryRevision": bytes_revision(candidate_registry_payload),
+        "candidateReviewDigest": candidate_evidence.review_digest,
+        "candidateDependencyRevisions": dict(candidate_evidence.dependency_hashes),
         "proposalPath": _relative(root, proposal_path),
         "request": _clean_proposal_text(request, field="request"),
         "summary": _clean_proposal_text(summary, field="summary"),
         "impactSummary": _clean_proposal_text(impact_summary, field="impact-summary"),
-        **_proposal_impact_payload(impact, evidence),
+        **_proposal_impact_payload(impact, candidate_evidence),
         "proposalDigest": None,
         "approvedProposalDigest": None,
         "postApplyReview": None,
@@ -2270,8 +2423,39 @@ def command_propose_html_change(
         proposal_path: _proposal_report_payload(proposal),
         state_path: yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8"),
     }
-    ArtifactTransactionStore(root, tuple(payloads)).commit(
-        payloads, operation="propose-whole-deck-html-change",
+    dependency_paths = _review_dependency_paths(
+        root,
+        {**proposal["baseDependencyRevisions"], **proposal["candidateDependencyRevisions"]},
+    )
+    input_revisions = {
+        canonical_html: proposal["baseHtmlRevision"],
+        canonical_registry: proposal["baseRegistryRevision"],
+        source_candidate: bytes_revision(candidate_html_payload),
+        source_registry: bytes_revision(candidate_registry_payload),
+    }
+
+    def validate_base() -> None:
+        for path, expected in input_revisions.items():
+            if file_revision(path) != expected:
+                raise WorkflowError(f"HTML change input changed while creating the proposal: {path.name}")
+        current_state = load_state(root)
+        current_evidence = _require_current_html_review(root, current_state)
+        if current_evidence.review_digest != proposal["baseReviewDigest"]:
+            raise WorkflowError("Whole-deck HTML review changed while creating the proposal")
+        for relative, expected in {
+            **proposal["baseDependencyRevisions"],
+            **proposal["candidateDependencyRevisions"],
+        }.items():
+            if file_revision(_repo_path(root, relative, field="proposal dependency")) != expected:
+                raise WorkflowError(f"HTML change dependency changed while creating the proposal: {relative}")
+
+    ArtifactTransactionStore(
+        root,
+        (*payloads, *input_revisions, *dependency_paths),
+    ).commit(
+        payloads,
+        operation="propose-whole-deck-html-change",
+        validate_base=validate_base,
     )
     append_work_log(
         root,
@@ -2286,6 +2470,11 @@ def _verified_html_change(
     proposal = _html_change(state)
     if not proposal or proposal.get("status") != required_status:
         raise WorkflowError(f"HTML change proposal must be {required_status!r}")
+    if proposal.get("format") != HTML_CHANGE_FORMAT:
+        raise WorkflowError(
+            "This legacy HTML change proposal predates dependency-bound review; "
+            "cancel it and create a fresh proposal"
+        )
     current_digest = html_change_proposal_digest(proposal)
     if proposal.get("proposalDigest") != current_digest:
         raise WorkflowError("HTML change proposal explanation or impact changed after it was created")
@@ -2307,9 +2496,25 @@ def _verified_html_change(
     for path, expected, label in checks:
         if file_revision(path) != expected:
             raise WorkflowError(f"The {label} changed after the proposal; create a fresh proposal")
+    base_evidence = _require_current_html_review(root, state)
+    if base_evidence.review_digest != proposal["baseReviewDigest"]:
+        raise WorkflowError("The canonical review evidence changed after the proposal")
+    if base_evidence.dependency_hashes != proposal["baseDependencyRevisions"]:
+        raise WorkflowError("The canonical dependency manifest changed after the proposal")
+    for manifest_field in ("baseDependencyRevisions", "candidateDependencyRevisions"):
+        for relative, expected in proposal[manifest_field].items():
+            path = _repo_path(root, relative, field=f"authoring.htmlChange.{manifest_field}")
+            if file_revision(path) != expected:
+                raise WorkflowError(
+                    f"The HTML change dependency changed after the proposal: {relative}"
+                )
     base_registry = _read_json(canonical_registry, label="canonical HTML registry")
     candidate_registry = _read_json(snapshot_registry, label="candidate HTML registry")
     evidence = _whole_deck_evidence(root, state, html_path=snapshot_html, registry=candidate_registry)
+    if evidence.review_digest != proposal["candidateReviewDigest"]:
+        raise WorkflowError("The candidate review evidence changed after the proposal")
+    if evidence.dependency_hashes != proposal["candidateDependencyRevisions"]:
+        raise WorkflowError("The candidate dependency manifest changed after the proposal")
     recomputed = _proposal_impact_payload(
         analyze_html_change(
             base_html=canonical_html,
@@ -2400,7 +2605,15 @@ def command_apply_html_change(root: Path, state: dict[str, Any]) -> None:
     }
     next_state = copy.deepcopy(state)
     next_state["authoring"]["htmlChange"] = applied
-    _set_whole_deck_html_review(next_state, evidence)
+    _set_whole_deck_html_review(
+        root,
+        next_state,
+        evidence,
+        source="applied-change",
+        proposal_digest=applied["proposalDigest"],
+        html_revision=applied["candidateHtmlRevision"],
+        registry_revision_value=applied["candidateRegistryRevision"],
+    )
     validate_state(root, next_state)
     state_path = root / STATE_RELATIVE
     base_state_revision = file_revision(state_path)
@@ -2410,8 +2623,12 @@ def command_apply_html_change(root: Path, state: dict[str, Any]) -> None:
         proposal_path: _proposal_report_payload(applied),
         state_path: yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8"),
     }
+    dependency_paths = _review_dependency_paths(
+        root,
+        {**applied["baseDependencyRevisions"], **applied["candidateDependencyRevisions"]},
+    )
     transaction = ArtifactTransactionStore(
-        root, (*payloads, snapshot_html, snapshot_registry),
+        root, (*payloads, snapshot_html, snapshot_registry, *dependency_paths),
     )
 
     def validate_base() -> None:
@@ -2438,6 +2655,7 @@ def command_apply_html_change(root: Path, state: dict[str, Any]) -> None:
             raise WorkflowError("Committed canonical HTML differs from the approved candidate")
         if file_revision(canonical_registry) != current_proposal["candidateRegistryRevision"]:
             raise WorkflowError("Committed canonical registry differs from the approved candidate")
+        _require_current_html_review(root, committed)
 
     transaction.commit(
         payloads,
@@ -2474,6 +2692,7 @@ def _require_current_post_apply_review(root: Path, state: dict[str, Any]) -> Non
     proposal = _html_change(state)
     if not proposal or proposal.get("status") != "applied":
         return
+    _require_current_html_review(root, state)
     review = _post_apply_review(proposal)
     if not review or review.get("status") != "checked":
         raise WorkflowError("Affected slides need current post-apply browser review before whole-deck approval")
@@ -2530,6 +2749,7 @@ def command_check_html_change(
     if review.get("status") != "pending":
         _require_current_post_apply_review(root, state)
         return
+    _require_current_html_review(root, state)
     canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
     canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
     if file_revision(canonical_html) != review["htmlRevision"]:
@@ -2600,8 +2820,11 @@ def command_check_html_change(
             proposal_path: _proposal_report_payload(checked),
             state_path: yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8"),
         }
+        dependency_paths = _review_dependency_paths(
+            root, _html_review_baseline(state)["dependencyRevisions"],
+        )
         transaction = ArtifactTransactionStore(
-            root, (*payloads, canonical_html, canonical_registry),
+            root, (*payloads, canonical_html, canonical_registry, *dependency_paths),
         )
 
         def validate_base() -> None:
@@ -2621,6 +2844,7 @@ def command_check_html_change(
                 raise WorkflowError("Canonical HTML changed during browser inspection")
             if file_revision(canonical_registry) != review["registryRevision"]:
                 raise WorkflowError("Canonical registry changed during browser inspection")
+            _require_current_html_review(root, current)
 
         def validate_committed() -> None:
             _require_current_post_apply_review(root, load_state(root))
