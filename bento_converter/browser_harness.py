@@ -24,7 +24,33 @@ NETWORK_POLICY_FORMAT = "bento/local-only/v1"
 # but the known failed probe is not evidence that deck content depends on it.
 EXPECTED_BLOCKED_REQUESTS = {
     ("bentoCheck", "https", "bento.page", "/releases/slides/manifest.json", "fetch", "GET"),
+    ("bentoBrowserEdit", "https", "bento.page", "/releases/slides/manifest.json", "fetch", "GET"),
 }
+
+
+def _is_expected_blocked_request(
+    profile: str,
+    scheme: str,
+    host: str,
+    path: str,
+    resource_type: str,
+    method: str,
+) -> bool:
+    key = (profile, scheme, host, path, resource_type, method)
+    if key in EXPECTED_BLOCKED_REQUESTS:
+        return True
+    # Saved Bento documents may contain an opt-in collaboration room.  Local
+    # rendering never joins that room: the request remains blocked.  The
+    # narrowly matched read-only room probe is expected runtime behavior, not
+    # evidence that the slide depends on remote content.
+    return (
+        profile in {"bentoCheck", "bentoBrowserEdit"}
+        and scheme == "https"
+        and host == "sync.bento.page"
+        and path.startswith("/d/")
+        and resource_type == "fetch"
+        and method == "GET"
+    )
 
 PROFILE_CONFIGS: dict[str, dict[str, Any]] = {
     "sourceLayout": {
@@ -36,6 +62,14 @@ PROFILE_CONFIGS: dict[str, dict[str, Any]] = {
         "viewport": {"width": 1600, "height": 1000},
         "deviceScaleFactor": 1,
         "networkPolicy": {"allowedSchemes": ["file", "data", "blob", "about"]},
+    },
+    "bentoBrowserEdit": {
+        "viewport": {"width": 1600, "height": 1000},
+        "deviceScaleFactor": 1,
+        "networkPolicy": {
+            "allowedSchemes": ["http", "data", "blob", "about"],
+            "allowedHosts": ["127.0.0.1", "localhost", "::1"],
+        },
     },
 }
 
@@ -189,8 +223,12 @@ class BrowserHarness:
         if profile not in PROFILE_CONFIGS:
             return False
         parsed = urlsplit(url)
-        allowed = set(PROFILE_CONFIGS[profile]["networkPolicy"]["allowedSchemes"])
-        return parsed.scheme in allowed
+        policy = PROFILE_CONFIGS[profile]["networkPolicy"]
+        allowed = set(policy["allowedSchemes"])
+        if parsed.scheme not in allowed:
+            return False
+        allowed_hosts = set(policy.get("allowedHosts", []))
+        return not allowed_hosts or parsed.hostname in allowed_hosts
 
     def _route(self, profile: str, route: Any, request: Any) -> None:
         if self._request_allowed(request.url, profile):
@@ -212,7 +250,7 @@ class BrowserHarness:
             "path": key[3],
             "resourceType": request.resource_type,
             "method": request.method,
-            "expected": key in EXPECTED_BLOCKED_REQUESTS,
+            "expected": _is_expected_blocked_request(*key),
         })
         route.abort("blockedbyclient")
 

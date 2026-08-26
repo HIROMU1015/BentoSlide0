@@ -27,6 +27,13 @@ class WorkEditorClient:
             raise BentoConverterError(f"Work editor API {path} returned a non-object")
         return value
 
+    def get_text(self, path: str) -> str:
+        try:
+            with urlopen(self.base_url + path, timeout=10) as response:
+                return response.read().decode("utf-8")
+        except (OSError, URLError, UnicodeDecodeError) as exc:
+            raise BentoConverterError(f"Cannot read Work editor resource {path}: {exc}") from exc
+
     def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = Request(
             self.base_url + path,

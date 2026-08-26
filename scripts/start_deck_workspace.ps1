@@ -20,7 +20,7 @@ try {
     $deck = ($payload -join "`n") | ConvertFrom-Json
     $stage = [string]$deck.workflow.stage
     switch ($stage) {
-        { $_ -in @('planning', 'html_authoring', 'html_review') } {
+        { $_ -in @('planning', 'html_authoring', 'html_review', 'ready_for_conversion') } {
             if ($NoClipboard) {
                 & (Join-Path $PSScriptRoot 'start_html_preview.ps1') -Port ([int]$deck.preview.htmlPort) -NoClipboard
             }
@@ -87,7 +87,7 @@ try {
             & $python.Executable -m scripts.deck_workflow --root $repository set-current-url --url $url | Out-Null
             exit $LASTEXITCODE
         }
-        { $_ -in @('ready_for_conversion', 'converting', 'bento_validation') } {
+        { $_ -in @('converting', 'bento_validation') } {
             Write-Host "Current stage is $stage. Codex conversion/validation work is required; no server was started."
             exit 0
         }

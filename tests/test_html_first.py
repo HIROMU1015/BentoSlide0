@@ -11,13 +11,15 @@ from pathlib import Path
 from PIL import Image
 
 from bento_converter.bento_validator import validate_bento_doc
+from bento_converter.browser_harness import BrowserHarness
 from bento_converter.errors import BentoConverterError, BrowserCheckError
-from bento_converter.html_converter import convert_html_layout
+from bento_converter.html_converter import convert_html_layout, sanitize_inline_html
 from bento_converter.html_change_review import (
     _frame_issue,
     _overflow_issue,
     collect_html_change_browser_evidence,
 )
+from bento_converter.html_document import extract_bento_doc, write_embedded_document
 from bento_converter.html_layout import LayoutResult
 from bento_converter.html_pipeline import build_from_html
 from bento_converter.html_source import SourceChapter, discover_chapters, discover_source_unit, merge_registries
@@ -118,11 +120,125 @@ class HtmlConversionTests(unittest.TestCase):
         },), (), {}, "test Chromium")
         return convert_html_layout(layout, self.registry, [self.chapter])
 
+    def test_marked_inline_math_becomes_bento_inline_latex(self) -> None:
+        markup = (
+            '<strong>意味：</strong>'
+            '<span data-bento-inline-math="v1" class="bento-inline-math">'
+            'R<sub>m</sub><sup>PR</sup></span> と '
+            '<span class="bento-inline-math">κ</span>、'
+            '<span data-bento-inline-math="v1">C<sub>partial</sub></span>、'
+            '<span data-bento-inline-math="v1">κt<sub>R,m</sub></span>'
+        )
+
+        converted = sanitize_inline_html(markup)
+
+        self.assertEqual(
+            converted,
+            '<strong>意味：</strong>$R_{m}^{\\mathrm{PR}}$ と $\\kappa$、'
+            '$C_{\\mathrm{partial}}$、$\\kappa t_{R,m}$',
+        )
+        self.assertNotIn("bento-inline-math", converted)
+
+    def test_inline_math_drops_unsafe_nested_markup(self) -> None:
+        converted = sanitize_inline_html(
+            '<span data-bento-inline-math="v1">κ<script>alert(1)</script><sup>2</sup></span>'
+        )
+        self.assertEqual(converted, r"$\kappa^{2}$")
+
+    def test_table_inline_math_becomes_editable_text_overlay(self) -> None:
+        table = element(
+            "math-table", "table", x=100, y=120, w=600, h=100,
+            table={
+                "rows": [[{
+                    "html": 'Candidate <span data-bento-inline-math="v1">K<sub>m</sub></span>',
+                    "align": "left", "color": "#10243e", "bg": "#eef2f7", "bold": False,
+                    "rect": {"x": 0, "y": 0, "w": 600, "h": 100},
+                    "style": {"fontFamily": "Arial", "fontSize": 20, "fontWeight": 400},
+                }]],
+                "headerRows": 0,
+            },
+        )
+
+        result = self.convert([table])
+
+        output = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+        self.assertEqual(output["math-table"]["type"], "shape")
+        self.assertEqual(output["math-table--cell-r0-c0-bg"]["type"], "shape")
+        overlay = output["math-table--cell-r0-c0-text"]
+        self.assertEqual(overlay["type"], "text")
+        self.assertEqual(overlay["html"], r"Candidate $K_{m}$")
+        self.assertEqual(overlay["valign"], "middle")
+        decision = result.report["elements"][0]
+        self.assertEqual(decision["strategy"], "native-decomposition")
+        self.assertEqual(
+            decision["emittedIds"],
+            ["math-table", "math-table--cell-r0-c0-bg", "math-table--cell-r0-c0-text"],
+        )
+
+    def test_background_fallback_keeps_owned_and_descendant_text_editable(self) -> None:
+        parent = element(
+            "card", "shape", text="Protected label", html="Protected label",
+            residualText="Card heading", residualHtml="Card heading",
+            hasExplicitDescendants=True, explicitDescendantIds=["card-label"],
+            fallbackScope="background",
+            fallbackCapture={
+                "scope": "background", "excludedElementIds": ["card-label"], "ownedTextExcluded": True,
+            },
+            style={**element("unused", "shape")["style"], "filter": "blur(2px)"},
+        )
+        child = element(
+            "card-label", "text", domIndex=1, z=1, text="Protected label", html="Protected label",
+            ancestorIds=["card"],
+        )
+        layout = LayoutResult(({
+            "id": "slide", "background": "rgb(255, 255, 255)", "transition": "none", "notes": "note",
+            "layout": "free", "elements": [parent, child],
+        },), (), {"slide/card": "data:image/png;base64,AAAA"}, "test Chromium")
+
+        result = convert_html_layout(layout, self.registry, [self.chapter])
+
+        output = result.document["slides"][0]["elements"]
+        self.assertEqual(
+            [item["id"] for item in output],
+            ["card", "card--label", "card-label--decoration", "card-label"],
+        )
+        self.assertEqual(output[0]["type"], "image")
+        self.assertNotIn("sourceText", output[0])
+        self.assertEqual(output[1]["type"], "text")
+        self.assertEqual(output[-1]["type"], "text")
+        decisions = {item["elementId"]: item for item in result.report["elements"]}
+        self.assertEqual(decisions["card"]["strategy"], "background-image")
+        self.assertEqual(decisions["card"]["editableOverlayIds"], ["card--label"])
+        self.assertEqual(decisions["card-label"]["strategy"], "native-decomposition")
+        self.assertEqual(result.report["summary"]["bakedTextCount"], 0)
+        self.assertEqual(result.report["summary"]["coveredEditableElementCount"], 0)
+        validation = validate_bento_doc(result.document)
+        self.assertEqual(validation.warnings, ())
+
+    def test_flex_text_children_keep_separate_native_positions(self) -> None:
+        source = element(
+            "footer", "text", text="PR+DF コスト評価 15", html="<span>PR+DF コスト評価</span><span>15</span>",
+            textFragments=[
+                {"x": 64, "y": 680, "w": 300, "h": 20, "scrollWidth": 300, "scrollHeight": 20,
+                 "text": "PR+DF コスト評価", "html": "PR+DF コスト評価", "style": {}},
+                {"x": 1170, "y": 680, "w": 46, "h": 20, "scrollWidth": 46, "scrollHeight": 20,
+                 "text": "15", "html": "15", "style": {"textAlign": "right"}},
+            ],
+            style={**element("unused", "text")["style"], "display": "flex", "justifyContent": "space-between"},
+        )
+        result = self.convert([source])
+        output = result.document["slides"][0]["elements"]
+        parts = {item["id"]: item for item in output}
+        self.assertNotIn("footer", parts)
+        self.assertEqual(parts["footer--part-1"]["x"], 64)
+        self.assertEqual(parts["footer--part-2"]["x"], 1170)
+        self.assertEqual(parts["footer--part-2"]["align"], "right")
+
     def test_native_text_equation_shape_table_chart_svg_and_media(self) -> None:
         values = [
             element("text", "text", html="<strong>Safe</strong><script>bad()</script>"),
             element("eq", "equation", equationId="eq"),
-            element("shape", "shape", shape="rounded"),
+            element("shape", "shape", shape="rounded", text="", html=""),
             element("table", "table", table={"rows": [["A", "B"], ["1", "2"]], "headerRows": 1}),
             element("chart", "chart", chartOption={"_bentoPreset": "line", "series": [{"type": "line", "data": [1]}]}),
             element("svg", "svg", svg="<svg xmlns='http://www.w3.org/2000/svg' style='position:absolute;left:100px' viewBox='0 0 200 100'></svg>"),
@@ -151,7 +267,7 @@ class HtmlConversionTests(unittest.TestCase):
         self.assertEqual(result.report["corrections"][0]["contentChanged"], False)
 
     def test_explicit_image_and_ignore_modes_are_reported(self) -> None:
-        raster = element("raster", "complex", exportMode="image")
+        raster = element("raster", "complex", exportMode="image", text="", html="")
         ignored = element("guide", "text", exportMode="ignore", domIndex=1)
         layout = LayoutResult(({
             "id": "slide", "background": "rgb(255, 255, 255)", "transition": "none", "notes": "",
@@ -216,6 +332,166 @@ class HtmlConversionTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("BENTO_BROWSER_TEST") == "1", "Set BENTO_BROWSER_TEST=1 for Chromium HTML-first integration.")
 class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
+    def test_table_inline_math_renders_without_visible_delimiters_and_survives_serialize(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output/presentation.generated.bento.html"
+            source_element = element(
+                "math-table", "table", x=100, y=120, w=600, h=100,
+                table={
+                    "rows": [[{
+                        "html": (
+                            'Candidate <span data-bento-inline-math="v1">K<sub>m</sub></span> and '
+                            '<span data-bento-inline-math="v1">&#954;</span>'
+                        ),
+                        "align": "left", "color": "#10243e", "bg": "#eef2f7", "bold": False,
+                        "rect": {"x": 0, "y": 0, "w": 600, "h": 100},
+                        "style": {"fontFamily": "Arial", "fontSize": 20, "fontWeight": 400},
+                    }]],
+                    "headerRows": 0,
+                },
+            )
+            layout = LayoutResult(({
+                "id": "table-math", "background": "rgb(255, 255, 255)", "transition": "none",
+                "notes": "", "layout": "free", "elements": [source_element],
+            },), (), {}, "test Chromium")
+            registry = {
+                "document": {"title": "Table inline math"}, "assets": {}, "fonts": {},
+                "equations": {}, "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }
+            chapter = SourceChapter("table-math", root / "table.html", root / "table.json", {})
+            result = convert_html_layout(layout, registry, [chapter])
+            write_embedded_document(ROOT / "Bento_Slides.base.bento.html", output, result.document)
+
+            with BrowserHarness() as harness:
+                with harness.page("bentoCheck") as page:
+                    page.goto(output.resolve().as_uri(), wait_until="load")
+                    page.wait_for_selector(".ed-root")
+                    harness.settle(page)
+                    overlay = page.locator(
+                        '.ed-stage [data-el-id="math-table--cell-r0-c0-text"]'
+                    )
+                    self.assertIn(
+                        "bento-el-shape",
+                        page.locator('.ed-stage [data-el-id="math-table"]').get_attribute("class") or "",
+                    )
+                    self.assertIn(
+                        "bento-el-shape",
+                        page.locator('.ed-stage [data-el-id="math-table--cell-r0-c0-bg"]').get_attribute("class") or "",
+                    )
+                    self.assertEqual(overlay.locator("math").count(), 2)
+                    self.assertNotIn("$", overlay.text_content() or "")
+                    bounds = page.evaluate(
+                        """() => {
+                          const text = document.querySelector('.ed-stage [data-el-id="math-table--cell-r0-c0-text"]')
+                            .getBoundingClientRect();
+                          const cell = document.querySelector('.ed-stage [data-el-id="math-table--cell-r0-c0-bg"]')
+                            .getBoundingClientRect();
+                          return {
+                            left: text.left >= cell.left - 1,
+                            top: text.top >= cell.top - 1,
+                            right: text.right <= cell.right + 1,
+                            bottom: text.bottom <= cell.bottom + 1,
+                          };
+                        }"""
+                    )
+                    self.assertTrue(all(bounds.values()))
+                    serialized = page.evaluate("window.bento.serialize()")
+                    serialized_doc = extract_bento_doc(serialized)
+                    elements = {item["id"]: item for item in serialized_doc["slides"][0]["elements"]}
+                    self.assertEqual(elements["math-table"]["type"], "shape")
+                    self.assertEqual(
+                        elements["math-table--cell-r0-c0-text"]["html"],
+                        r"Candidate $K_{m}$ and $\kappa$",
+                    )
+
+    def test_inline_math_renders_as_math_and_survives_serialize(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output/presentation.generated.bento.html"
+            source_element = element(
+                "inline-title", "text", x=100, y=100, w=900, h=100,
+                text="RmPR と κ の意味",
+                html=(
+                    "<span data-bento-inline-math='v1'>R<sub>m</sub><sup>PR</sup></span> と "
+                    "<span data-bento-inline-math='v1'>κ</span> の意味"
+                ),
+            )
+            layout = LayoutResult(({
+                "id": "inline", "background": "rgb(255, 255, 255)", "transition": "none",
+                "notes": "", "layout": "free", "elements": [source_element],
+            },), (), {}, "test Chromium")
+            registry = {
+                "document": {"title": "Inline math"}, "assets": {}, "fonts": {},
+                "equations": {}, "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }
+            chapter = SourceChapter("inline", root / "inline.html", root / "inline.json", {})
+            result = convert_html_layout(layout, registry, [chapter])
+            write_embedded_document(ROOT / "Bento_Slides.base.bento.html", output, result.document)
+
+            inline = result.document["slides"][0]["elements"][-1]
+            self.assertEqual(inline["id"], "inline-title")
+            self.assertEqual(inline["html"], r"$R_{m}^{\mathrm{PR}}$ と $\kappa$ の意味")
+            with BrowserHarness() as harness:
+                with harness.page("bentoCheck") as page:
+                    page.goto(output.resolve().as_uri(), wait_until="load")
+                    page.wait_for_selector(".ed-root")
+                    harness.settle(page)
+                    rendered = page.locator('.ed-stage [data-el-id="inline-title"]')
+                    self.assertEqual(rendered.locator("math").count(), 2)
+                    serialized = page.evaluate("window.bento.serialize()")
+                    self.assertIsInstance(serialized, str)
+                    serialized_doc = extract_bento_doc(serialized)
+                    serialized_inline = serialized_doc["slides"][0]["elements"][-1]
+                    self.assertEqual(
+                        serialized_inline["html"],
+                        r"$R_{m}^{\mathrm{PR}}$ と $\kappa$ の意味",
+                    )
+
+    def test_complex_background_keeps_text_and_equation_native(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "editable.preview.html"
+            registry_path = root / "editable.registry.json"
+            source.write_text(
+                "<!doctype html><style>body{margin:0}.slide{position:relative;width:1280px;height:720px;background:#fff}"
+                ".card{position:absolute;left:180px;top:120px;width:700px;height:360px;padding:32px;"
+                "box-sizing:border-box;background:#fee2e2;border:3px solid #b91c1c;filter:drop-shadow(0 12px 8px #999);"
+                "font:700 30px Arial;color:#111}.eq{position:absolute;left:70px;top:130px;width:400px;height:90px;"
+                "font:400 28px Arial;color:#111}</style>"
+                "<section class='slide' data-slide-id='editable'>"
+                "<div class='card' data-bento-id='card' data-bento-type='shape'>Card heading"
+                "<div class='eq' data-bento-id='equation' data-bento-type='equation' data-equation-id='eq'>x²</div>"
+                "</div></section>",
+                encoding="utf-8",
+            )
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "editable", "sources": {},
+                "document": {"title": "Editable fallback"}, "assets": {}, "fonts": {},
+                "equations": {"eq": {"latex": "x^2"}}, "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": ["equation"], "requiredText": []},
+            }), encoding="utf-8")
+
+            result = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html",
+                output_path=root / "output/presentation.generated.bento.html",
+            )
+
+            by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+            self.assertEqual(by_id["card"]["type"], "image")
+            self.assertNotIn("sourceText", by_id["card"])
+            self.assertEqual(by_id["card--label"]["type"], "text")
+            self.assertEqual(by_id["equation"]["type"], "text")
+            self.assertEqual(by_id["equation"]["latexSource"], "x^2")
+            self.assertEqual(result.report["summary"]["backgroundImageWithNativeOverlay"], 1)
+            self.assertEqual(result.report["summary"]["bakedTextCount"], 0)
+            self.assertEqual(result.report["summary"]["bakedEquationCount"], 0)
+            self.assertEqual(result.report["summary"]["coveredEditableElementCount"], 0)
+            self.assertTrue(result.report["browserCheck"]["serialize_roundtrip"])
+
     def test_post_apply_review_captures_only_affected_slides(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from bento_converter.artifact_transaction import (
     ArtifactLeaseConflict,
@@ -13,8 +15,10 @@ from bento_converter.artifact_transaction import (
     ArtifactReportError,
     ArtifactTransactionStore,
     WriterLease,
+    _replace_with_retry,
     recover_repository_transactions,
 )
+from bento_converter.errors import BentoConverterError
 
 
 class SimulatedCrash(BaseException):
@@ -39,6 +43,128 @@ class ArtifactTransactionTests(unittest.TestCase):
 
     def store(self, fault=None) -> ArtifactTransactionStore:
         return ArtifactTransactionStore(self.root, self.artifacts, fault_injector=fault)
+
+    @staticmethod
+    def access_denied() -> PermissionError:
+        error = PermissionError(13, "Access is denied")
+        error.winerror = 5
+        return error
+
+    def test_atomic_replace_retries_transient_windows_access_denied(self) -> None:
+        source = self.root / "source.tmp"
+        destination = self.root / "destination.json"
+        source.write_bytes(b"new")
+        destination.write_bytes(b"old")
+        original_replace = os.replace
+        calls = 0
+
+        def flaky_replace(current_source, current_destination):
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                raise self.access_denied()
+            return original_replace(current_source, current_destination)
+
+        with patch("bento_converter.artifact_transaction.os.replace", side_effect=flaky_replace), patch(
+            "bento_converter.artifact_transaction.time.sleep"
+        ) as sleep:
+            _replace_with_retry(source, destination)
+
+        self.assertEqual(calls, 3)
+        self.assertEqual(destination.read_bytes(), b"new")
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.05, 0.1])
+
+    def test_atomic_replace_stops_after_five_transient_retries(self) -> None:
+        source = self.root / "source.tmp"
+        destination = self.root / "destination.json"
+        source.write_bytes(b"new")
+        destination.write_bytes(b"old")
+
+        with patch(
+            "bento_converter.artifact_transaction.os.replace", side_effect=self.access_denied()
+        ) as replace, patch("bento_converter.artifact_transaction.time.sleep") as sleep:
+            with self.assertRaises(PermissionError):
+                _replace_with_retry(source, destination)
+
+        self.assertEqual(replace.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
+        self.assertEqual(destination.read_bytes(), b"old")
+        self.assertEqual(source.read_bytes(), b"new")
+
+    def test_atomic_replace_does_not_retry_unrelated_errors(self) -> None:
+        with patch(
+            "bento_converter.artifact_transaction.os.replace", side_effect=FileNotFoundError("missing")
+        ) as replace, patch("bento_converter.artifact_transaction.time.sleep") as sleep:
+            with self.assertRaises(FileNotFoundError):
+                _replace_with_retry(self.root / "missing.tmp", self.root / "destination.json")
+
+        self.assertEqual(replace.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_commit_retries_a_transient_journal_replace_without_user_retry(self) -> None:
+        store = self.store()
+        original_replace = os.replace
+        rejected_once = False
+
+        def reject_first_journal_replace(source, destination):
+            nonlocal rejected_once
+            destination_path = Path(destination)
+            if (
+                not rejected_once
+                and destination_path.suffix == ".json"
+                and ".bento-transactions" in destination_path.parts
+                and "active" in destination_path.parts
+            ):
+                rejected_once = True
+                raise self.access_denied()
+            return original_replace(source, destination)
+
+        with patch(
+            "bento_converter.artifact_transaction.os.replace",
+            side_effect=reject_first_journal_replace,
+        ), patch("bento_converter.artifact_transaction.time.sleep") as sleep:
+            result = store.commit(
+                {self.first: b"new-html", self.second: b"new-json", self.third: b"new-registry"},
+                operation="authoring-save",
+            )
+
+        self.assertTrue(rejected_once)
+        self.assertEqual(sleep.call_args_list[0].args, (0.05,))
+        self.assertEqual(self.first.read_bytes(), b"new-html")
+        self.assertEqual(self.second.read_bytes(), b"new-json")
+        self.assertEqual(self.third.read_bytes(), b"new-registry")
+        archived = store.archive_dir / f"{result['transactionId']}.json"
+        self.assertEqual(json.loads(archived.read_text(encoding="utf-8"))["state"], "committed")
+
+    def test_persistent_target_access_denied_rolls_back_every_artifact(self) -> None:
+        store = self.store()
+        original_replace = os.replace
+        denied_calls = 0
+
+        def deny_first_target(source, destination):
+            nonlocal denied_calls
+            if Path(destination).resolve() == self.first:
+                denied_calls += 1
+                raise self.access_denied()
+            return original_replace(source, destination)
+
+        with patch(
+            "bento_converter.artifact_transaction.os.replace", side_effect=deny_first_target
+        ), patch("bento_converter.artifact_transaction.time.sleep") as sleep:
+            with self.assertRaises(PermissionError):
+                store.commit(
+                    {self.first: b"new-html", self.second: b"new-json", self.third: b"new-registry"},
+                    operation="authoring-save",
+                )
+
+        self.assertEqual(denied_calls, 6)
+        self.assertEqual(sleep.call_count, 5)
+        self.assertEqual(self.first.read_bytes(), b"old-html")
+        self.assertEqual(self.second.read_bytes(), b"old-json")
+        self.assertEqual(self.third.read_bytes(), b"old-registry")
+        archived = list(store.archive_dir.glob("*.json"))
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(json.loads(archived[0].read_text(encoding="utf-8"))["state"], "rolled_back")
 
     def test_writer_lease_conflicts_for_overlapping_artifact_sets(self) -> None:
         first = WriterLease(self.root, self.artifacts)
@@ -81,6 +207,22 @@ class ArtifactTransactionTests(unittest.TestCase):
         self.assertEqual(journal["state"], "committed")
         self.assertEqual(journal["transactionId"], result["transactionId"])
         self.assertTrue(all(item["replaced"] for item in journal["artifacts"]))
+
+    def test_report_cannot_overwrite_a_transaction_artifact(self) -> None:
+        store = self.store()
+        before = [path.read_bytes() for path in self.artifacts]
+
+        with self.assertRaisesRegex(BentoConverterError, "must not overwrite"):
+            store.commit(
+                {self.first: b"new-html", self.second: b"new-json"},
+                operation="authoring-save",
+                report_path=self.first,
+                report_payload={"format": "test-report/v1"},
+            )
+
+        self.assertEqual([path.read_bytes() for path in self.artifacts], before)
+        self.assertFalse(any(store.active_dir.glob("*.json")))
+        self.assertFalse(any(store.archive_dir.glob("*.json")))
 
     def test_partial_replace_is_rolled_back_on_next_start(self) -> None:
         def fault(event: str, _journal: dict) -> None:

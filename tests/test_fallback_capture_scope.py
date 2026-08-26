@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+
+from PIL import Image
 
 from bento_converter.errors import ValidationError
 from bento_converter.html_layout import extract_computed_layout
@@ -52,6 +56,40 @@ class FallbackCaptureScopeTests(unittest.TestCase):
             self.assertIn("'matchedElementCount': 2", message)
             self.assertIn("'captureReason': 'skew-transform'", message)
             self.assertIn("current slide", message)
+
+    def test_background_capture_excludes_owned_and_annotated_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            chapter = self.chapter(
+                root,
+                '<section class="slide" data-slide-id="editable">'
+                '<div class="fallback" data-bento-id="card" data-bento-type="shape" '
+                'style="background:rgb(220,20,20);color:white;font:700 28px Arial">OWNED '
+                '<span data-bento-id="label" data-bento-type="text" '
+                'style="background:blue;color:white">CHILD</span></div></section>',
+            )
+            result = extract_computed_layout([chapter], root / "screenshots")
+            slide = result.slides[0]
+            card = next(item for item in slide["elements"] if item["id"] == "card")
+            self.assertEqual(card["fallbackCapture"]["scope"], "background")
+            self.assertEqual(card["fallbackCapture"]["excludedElementIds"], ["label"])
+            self.assertTrue(card["fallbackCapture"]["ownedTextExcluded"])
+
+            encoded = result.image_fallbacks["editable/card"].split(",", 1)[1]
+            image = Image.open(BytesIO(base64.b64decode(encoded))).convert("RGBA")
+            colors = [
+                image.getpixel((x, y))
+                for y in range(20, max(20, image.height - 20))
+                for x in range(25, max(25, image.width - 25))
+            ]
+            self.assertFalse(any(
+                alpha > 200 and red > 245 and green > 245 and blue > 245
+                for red, green, blue, alpha in colors
+            ))
+            self.assertFalse(any(
+                alpha > 200 and blue > 160 and red < 80
+                for red, _green, blue, alpha in colors
+            ))
 
 
 if __name__ == "__main__":

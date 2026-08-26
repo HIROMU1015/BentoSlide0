@@ -9,6 +9,7 @@ from pathlib import Path
 
 from bento_converter.browser_check import run_browser_check
 from bento_converter.errors import BentoConverterError
+from bento_converter.incremental_cache import IncrementalSlideCache
 
 
 def parser() -> argparse.ArgumentParser:
@@ -18,12 +19,33 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--screenshots-dir", type=Path, help="Write one PNG per slide")
     result.add_argument("--screenshot-prefix", help="PNG prefix; defaults to <deck>-slide")
     result.add_argument("--browser-executable", type=Path, help="Chrome/Edge executable override")
+    result.add_argument(
+        "--slide-id", action="append", dest="slide_ids",
+        help="Check only this slide ID; repeat for multiple changed slides",
+    )
+    result.add_argument(
+        "--cache-dir", type=Path, default=Path(".bento-cache/browser-check"),
+        help="Incremental screenshot cache (default: .bento-cache/browser-check)",
+    )
+    result.add_argument(
+        "--no-cache", action="store_true",
+        help="Disable cache reuse and cache writes for a formal cache-free check",
+    )
+    result.add_argument(
+        "--refresh-cache", action="store_true",
+        help="Ignore existing cache entries but replace them with fresh results",
+    )
     result.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.no_cache and args.refresh_cache:
+        parser().error("--no-cache and --refresh-cache cannot be used together")
+    cache = None if args.no_cache else IncrementalSlideCache(
+        args.cache_dir, reuse=not args.refresh_cache,
+    )
     try:
         report = run_browser_check(
             args.file,
@@ -31,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
             screenshots_dir=args.screenshots_dir,
             screenshot_prefix=args.screenshot_prefix,
             browser_executable=args.browser_executable,
+            cache=cache,
+            slide_ids=args.slide_ids,
         )
     except (BentoConverterError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -41,9 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     print(f"Browser: {report.browser}")
     print(
-        f"Bento UI: PASS ({report.rendered_slide_count}/{report.slide_count} slides, "
-        f"{report.element_count} elements)"
+        f"Bento UI: PASS ({report.rendered_slide_count}/{report.checked_slide_count} checked slides; "
+        f"{report.slide_count} total, {report.checked_element_count} checked elements)"
     )
+    print(f"Scope: {report.scope} ({', '.join(report.checked_slide_ids)})")
     print(f"Coordinates: PASS ({len(report.checked_coordinates)} elements)")
     print(
         "Detected source types: "
@@ -59,6 +84,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"latexSource preserved: {report.latex_source_preserved}")
     print(f"latexSource auto-synced: {report.latex_source_auto_synced}")
     print(f"Metadata source of truth: {report.metadata_source_of_truth}")
+    if report.cache_stats:
+        print(
+            "Cache: "
+            + ", ".join(f"{name}={value}" for name, value in report.cache_stats.items())
+        )
     for screenshot in report.screenshots:
         print(f"Screenshot: {screenshot}")
     return 0

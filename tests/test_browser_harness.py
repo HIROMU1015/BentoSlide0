@@ -6,7 +6,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from bento_converter.browser_harness import BrowserHarness, canonical_digest
+from bento_converter.browser_harness import (
+    BrowserHarness,
+    _is_expected_blocked_request,
+    canonical_digest,
+)
 from bento_converter.incremental_cache import IncrementalSlideCache
 
 
@@ -66,6 +70,39 @@ class BrowserHarnessUnitTests(unittest.TestCase):
             self.assertTrue(BrowserHarness._request_allowed("data:image/png;base64,AA==", profile))
             self.assertFalse(BrowserHarness._request_allowed("http://127.0.0.1:8765/api/status", profile))
             self.assertFalse(BrowserHarness._request_allowed("https://example.com/font.woff2", profile))
+
+    def test_browser_edit_profile_allows_only_loopback_http(self) -> None:
+        self.assertTrue(
+            BrowserHarness._request_allowed("http://127.0.0.1:8877/api/status", "bentoBrowserEdit")
+        )
+        self.assertTrue(
+            BrowserHarness._request_allowed("http://localhost:8877/", "bentoBrowserEdit")
+        )
+        self.assertFalse(
+            BrowserHarness._request_allowed("http://example.com/editor", "bentoBrowserEdit")
+        )
+        self.assertFalse(
+            BrowserHarness._request_allowed("https://127.0.0.1:8877/", "bentoBrowserEdit")
+        )
+
+    def test_collaboration_room_probe_is_blocked_but_expected(self) -> None:
+        for profile in ("bentoCheck", "bentoBrowserEdit"):
+            self.assertFalse(
+                BrowserHarness._request_allowed("https://sync.bento.page/d/example-room", profile)
+            )
+            self.assertTrue(_is_expected_blocked_request(
+                profile, "https", "sync.bento.page", "/d/example-room", "fetch", "GET",
+            ))
+
+        unexpected = [
+            ("bentoBrowserEdit", "https", "sync.bento.page", "/", "fetch", "GET"),
+            ("bentoBrowserEdit", "https", "sync.bento.page", "/d/example-room", "fetch", "POST"),
+            ("bentoBrowserEdit", "https", "example.com", "/d/example-room", "fetch", "GET"),
+            ("sourceLayout", "https", "sync.bento.page", "/d/example-room", "fetch", "GET"),
+        ]
+        for request in unexpected:
+            with self.subTest(request=request):
+                self.assertFalse(_is_expected_blocked_request(*request))
 
     def test_incremental_cache_preserves_nested_insertion_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

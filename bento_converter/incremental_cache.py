@@ -30,14 +30,34 @@ from .section_approval import (
 CACHE_FORMAT = "bento/incremental-slide-cache/v2"
 CACHE_KEY_FORMAT = "bento/incremental-slide-key/v1"
 VISUAL_ALGORITHM_VERSION = "bento/visual-comparison/v2"
-CONVERTER_IMPLEMENTATION_FILES = (
+SOURCE_LAYOUT_IMPLEMENTATION_FILES = (
     "browser_harness.py",
     "html_layout.py",
-    "html_converter.py",
     "incremental_cache.py",
-    "resource_embedding.py",
+    "native_compatibility.py",
+)
+BENTO_RENDER_IMPLEMENTATION_FILES = (
+    "bento_validator.py",
+    "browser_check.py",
+    "browser_harness.py",
+    "html_document.py",
+    "incremental_cache.py",
+)
+VISUAL_COMPARISON_IMPLEMENTATION_FILES = (
+    "html_pipeline.py",
+    "incremental_cache.py",
     "visual_comparison.py",
 )
+CONVERTER_IMPLEMENTATION_FILES = tuple(sorted(set(
+    SOURCE_LAYOUT_IMPLEMENTATION_FILES
+    + BENTO_RENDER_IMPLEMENTATION_FILES
+    + VISUAL_COMPARISON_IMPLEMENTATION_FILES
+    + (
+        "html_converter.py",
+        "html_source.py",
+        "resource_embedding.py",
+    )
+)))
 
 
 @dataclass(frozen=True)
@@ -47,15 +67,33 @@ class SourceFingerprintInput:
     digest: str
 
 
-@lru_cache(maxsize=1)
-def converter_implementation_digest() -> str:
+@lru_cache(maxsize=None)
+def _implementation_digest(files: tuple[str, ...]) -> str:
     root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
-    for name in CONVERTER_IMPLEMENTATION_FILES:
+    for name in files:
         digest.update(name.encode("utf-8") + b"\0")
         digest.update((root / name).read_bytes())
         digest.update(b"\0")
     return "sha256:" + digest.hexdigest()
+
+
+def converter_implementation_digest() -> str:
+    """Return the complete implementation digest retained for compatibility."""
+
+    return _implementation_digest(CONVERTER_IMPLEMENTATION_FILES)
+
+
+def source_layout_implementation_digest() -> str:
+    return _implementation_digest(SOURCE_LAYOUT_IMPLEMENTATION_FILES)
+
+
+def bento_render_implementation_digest() -> str:
+    return _implementation_digest(BENTO_RENDER_IMPLEMENTATION_FILES)
+
+
+def visual_comparison_implementation_digest() -> str:
+    return _implementation_digest(VISUAL_COMPARISON_IMPLEMENTATION_FILES)
 
 
 def _repository_for(paths: list[Path]) -> Path:
@@ -152,7 +190,7 @@ def source_cache_key(
         "format": CACHE_KEY_FORMAT,
         "kind": "source-layout",
         "source": value.digest,
-        "converter": converter_implementation_digest(),
+        "implementation": source_layout_implementation_digest(),
         "environment": environment_digest,
         "runtime": runtime_fingerprint,
     })
@@ -165,7 +203,7 @@ def bento_cache_key(
         "format": CACHE_KEY_FORMAT,
         "kind": "bento-render",
         "slide": slide,
-        "converter": converter_implementation_digest(),
+        "implementation": bento_render_implementation_digest(),
         "environment": environment_digest,
         "runtime": runtime_fingerprint,
     })
@@ -176,6 +214,7 @@ def comparison_cache_key(source_key: str, bento_key: str, decisions: list[dict[s
         "format": CACHE_KEY_FORMAT,
         "kind": "visual-comparison",
         "algorithm": VISUAL_ALGORITHM_VERSION,
+        "implementation": visual_comparison_implementation_digest(),
         "source": source_key,
         "bento": bento_key,
         "decisions": decisions,

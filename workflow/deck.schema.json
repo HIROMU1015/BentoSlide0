@@ -159,6 +159,45 @@
               "candidateReviewDigest", "candidateDependencyRevisions"
             ]}
           }]
+        },
+        "htmlChangeFeedback": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["format", "proposalId", "proposalDigest", "slides", "updatedAt"],
+          "properties": {
+            "format": {"enum": ["bento/html-change-feedback/v1", "bento/html-change-feedback/v2"]},
+            "proposalId": {"type": "string", "pattern": "^[a-f0-9]{12}$"},
+            "proposalDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "feedbackDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "slides": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["state", "viewedVersion", "updatedAt"],
+                "properties": {
+                  "state": {"enum": ["pending", "reviewed", "needs_work"]},
+                  "instruction": {"type": ["string", "null"], "maxLength": 4000},
+                  "viewedVersion": {"type": ["string", "null"], "enum": ["canonical", "candidate", null]},
+                  "updatedAt": {"type": "string", "format": "date-time"}
+                }
+              }
+            },
+            "updatedAt": {"type": "string", "format": "date-time"}
+          },
+          "allOf": [{
+            "if": {"properties": {"format": {"const": "bento/html-change-feedback/v2"}}},
+            "then": {
+              "required": ["feedbackDigest"],
+              "properties": {
+                "slides": {
+                  "additionalProperties": {
+                    "required": ["state", "instruction", "viewedVersion", "updatedAt"]
+                  }
+                }
+              }
+            }
+          }]
         }
       }
     },
@@ -197,6 +236,18 @@
         "explanationPolicy": {"enum": ["pending", "approved"]},
         "storyOutline": {"enum": ["pending", "approved"]},
         "slidePlan": {"enum": ["pending", "approved"]},
+        "planReview": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["format", "status", "signature", "submittedAt", "approvedAt"],
+          "properties": {
+            "format": {"const": "bento/planning-review/v1"},
+            "status": {"enum": ["submitted", "approved"]},
+            "signature": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "submittedAt": {"type": "string", "format": "date-time"},
+            "approvedAt": {"type": ["string", "null"], "format": "date-time"}
+          }
+        },
         "bentoContent": {
           "type": "object",
           "additionalProperties": false,

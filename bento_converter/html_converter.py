@@ -38,9 +38,62 @@ class _InlineSanitizer(HTMLParser):
         super().__init__(convert_charrefs=False)
         self.parts: list[str] = []
         self.blocked = 0
+        self.inline_math_tags: list[str] = []
+
+    @staticmethod
+    def _inline_math_marker(attrs: list[tuple[str, str | None]]) -> bool:
+        values = {name.lower(): value or "" for name, value in attrs}
+        return (
+            values.get("data-bento-inline-math") == "v1"
+            or "bento-inline-math" in values.get("class", "").split()
+        )
+
+    @staticmethod
+    def _math_text(data: str, *, scripted: bool) -> str:
+        data = data.replace("β\u0304", r"\bar{\beta}")
+        greek = {
+            "α": r"\alpha", "β": r"\beta", "γ": r"\gamma", "δ": r"\delta",
+            "ε": r"\epsilon", "κ": r"\kappa", "λ": r"\lambda", "ρ": r"\rho",
+            "τ": r"\tau", "ω": r"\omega",
+        }
+        replacements = {
+            **greek, "−": "-", "×": r"\times ",
+            "≤": r"\leq ", "≥": r"\geq ", "≠": r"\neq ", "∈": r"\in ",
+        }
+        parts: list[str] = []
+        for index, character in enumerate(data):
+            replacement = replacements.get(character, character)
+            if (
+                character in greek
+                and index + 1 < len(data)
+                and data[index + 1].isascii()
+                and data[index + 1].isalpha()
+            ):
+                replacement += " "
+            parts.append(replacement)
+        normalized = "".join(parts)
+        if scripted and re.search(r"[A-Za-z]{2,}", normalized) and re.fullmatch(r"[A-Za-z0-9, +\-]+", normalized):
+            normalized = rf"\mathrm{{{normalized}}}"
+        return normalized
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
+        if self.inline_math_tags:
+            self.inline_math_tags.append(tag)
+            if tag in {"script", "style"}:
+                self.blocked += 1
+                return
+            if tag == "sub":
+                self.parts.append("_{")
+            elif tag == "sup":
+                self.parts.append("^{")
+            elif tag == "br":
+                self.parts.append(r"\, ")
+            return
+        if tag == "span" and self._inline_math_marker(attrs):
+            self.inline_math_tags.append(tag)
+            self.parts.append("$")
+            return
         if tag in {"script", "style"}:
             self.blocked += 1
             return
@@ -57,20 +110,43 @@ class _InlineSanitizer(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if self.inline_math_tags:
+            if tag in {"script", "style"}:
+                self.blocked = max(0, self.blocked - 1)
+            if tag in {"sub", "sup"}:
+                self.parts.append("}")
+            while self.inline_math_tags:
+                current = self.inline_math_tags.pop()
+                if current == tag:
+                    break
+            if not self.inline_math_tags:
+                self.parts.append("$")
+            return
         if tag in {"script", "style"}:
             self.blocked = max(0, self.blocked - 1)
         elif not self.blocked and tag in self.allowed and tag != "br":
             self.parts.append(f"</{tag}>")
 
     def handle_data(self, data: str) -> None:
+        if self.inline_math_tags:
+            if self.blocked:
+                return
+            self.parts.append(self._math_text(data, scripted=any(tag in {"sub", "sup"} for tag in self.inline_math_tags)))
+            return
         if not self.blocked:
             self.parts.append(html_lib.escape(data, quote=False))
 
     def handle_entityref(self, name: str) -> None:
+        if self.inline_math_tags:
+            self.parts.append(self._math_text(html_lib.unescape(f"&{name};"), scripted=any(tag in {"sub", "sup"} for tag in self.inline_math_tags)))
+            return
         if not self.blocked:
             self.parts.append(f"&{name};")
 
     def handle_charref(self, name: str) -> None:
+        if self.inline_math_tags:
+            self.parts.append(self._math_text(html_lib.unescape(f"&#{name};"), scripted=any(tag in {"sub", "sup"} for tag in self.inline_math_tags)))
+            return
         if not self.blocked:
             self.parts.append(f"&#{name};")
 
@@ -80,6 +156,49 @@ def sanitize_inline_html(value: str) -> str:
     parser.feed(value)
     parser.close()
     return "".join(parser.parts).strip()
+
+
+def _contains_inline_math(value: object) -> bool:
+    markup = str(value or "")
+    return "data-bento-inline-math" in markup or "bento-inline-math" in markup
+
+
+class _PlainInlineText(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.blocked = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {"script", "style"}:
+            self.blocked += 1
+        elif not self.blocked and tag.lower() == "br":
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"script", "style"}:
+            self.blocked = max(0, self.blocked - 1)
+
+    def handle_data(self, data: str) -> None:
+        if not self.blocked:
+            self.parts.append(data)
+
+
+def _plain_inline_text(value: object) -> str:
+    parser = _PlainInlineText()
+    parser.feed(str(value or ""))
+    parser.close()
+    return "".join(parser.parts)
+
+
+def _cell_padding(cell: dict[str, Any]) -> tuple[float, float]:
+    style = cell.get("style") if isinstance(cell.get("style"), dict) else {}
+    numbers = [float(value) for value in re.findall(r"-?[\d.]+", str(style.get("padding") or ""))]
+    if not numbers:
+        return 9.0, 12.0
+    if len(numbers) == 1:
+        return numbers[0], numbers[0]
+    return numbers[0], numbers[1]
 
 
 def sanitize_svg_markup(value: str) -> str:
@@ -300,6 +419,15 @@ def _shape(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id:
         source_stroke_style = element.get("strokeStyle") or style.get("borderTopStyle")
         if source_stroke_style in {"solid", "dashed", "dotted"}:
             result["strokeStyle"] = source_stroke_style
+        label = str(
+            element.get("residualText")
+            if element.get("hasExplicitDescendants")
+            else element.get("text") or ""
+        ).strip()
+        if label == "→" and not element.get("lineEnd"):
+            result["lineEnd"] = "arrow"
+        elif label == "←" and not element.get("lineStart"):
+            result["lineStart"] = "arrow"
     gradient = _gradient(element["style"].get("backgroundImage"))
     if gradient:
         result["fillGradient"] = gradient
@@ -327,6 +455,89 @@ def _shape(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id:
     return result
 
 
+def _editable_text_overlay(
+    element: dict[str, Any], registry: dict[str, Any],
+    corrections: list[dict[str, Any]], slide_id: str,
+) -> dict[str, Any] | None:
+    """Create an editable label without re-emitting annotated descendants."""
+
+    text = str(
+        element.get("residualText")
+        if element.get("hasExplicitDescendants")
+        else element.get("text") or ""
+    ).strip()
+    source_shape = element.get("shape") or "rect"
+    if not text or (source_shape in {"connector", "line"} and text in {"→", "←", "↔"}):
+        return None
+    html = element.get("residualHtml") if element.get("hasExplicitDescendants") else element.get("html")
+    residual_frame = element.get("residualFrame") if element.get("hasExplicitDescendants") else None
+    style = {
+        **element.get("style", {}),
+        **(element.get("residualStyle") or {}),
+        "backgroundColor": "transparent",
+        "backgroundImage": "none",
+        "borderWidth": 0,
+        "boxShadow": "none",
+    }
+    source = {
+        **element,
+        "id": f"{element['id']}--label",
+        "type": "text",
+        "text": text,
+        "html": html or html_lib.escape(text, quote=False),
+        "style": style,
+        "role": None,
+        "morphId": None,
+        "link": None,
+        "equationId": None,
+        "registryId": None,
+        "assetId": None,
+        "figureId": None,
+        "chartId": None,
+        "tableId": None,
+    }
+    if residual_frame:
+        source.update(residual_frame)
+        source["scrollWidth"] = residual_frame["w"]
+        source["scrollHeight"] = residual_frame["h"]
+    label = _text(source, registry, corrections, slide_id)
+    label.pop("shadow", None)
+    return label
+
+
+def _editable_text_fragments(
+    element: dict[str, Any], registry: dict[str, Any],
+    corrections: list[dict[str, Any]], slide_id: str,
+) -> list[dict[str, Any]]:
+    """Convert flex child labels into independently positioned native text."""
+
+    result: list[dict[str, Any]] = []
+    for index, fragment in enumerate(element.get("textFragments") or (), start=1):
+        source = {
+            **element,
+            **{field: fragment[field] for field in ("x", "y", "w", "h", "scrollWidth", "scrollHeight")},
+            "id": f"{element['id']}--part-{index}",
+            "type": "text",
+            "text": fragment.get("text") or "",
+            "html": fragment.get("html") or "",
+            "style": {**element.get("style", {}), **(fragment.get("style") or {})},
+            "role": None,
+            "morphId": None,
+            "link": None,
+            "equationId": None,
+            "registryId": None,
+            "assetId": None,
+            "figureId": None,
+            "chartId": None,
+            "tableId": None,
+            "rotation": 0,
+        }
+        item = _text(source, registry, corrections, slide_id)
+        item.pop("shadow", None)
+        result.append(item)
+    return result
+
+
 def _table(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str) -> dict[str, Any]:
     data = element.get("table") or {"rows": []}
     rows = data.get("rows", [])
@@ -340,10 +551,27 @@ def _table(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id:
         cells = []
         for cell in row:
             if isinstance(cell, dict):
-                converted_cell = {"html": sanitize_inline_html(str(cell.get("html", "")))}
+                cell_html = str(cell.get("html", ""))
+                # Bento's native table sanitizer deliberately treats cell HTML as
+                # ordinary rich text: it does not run the inline-LaTeX renderer and
+                # removes sub/sup/MathML markup. Math-bearing cells are therefore
+                # rendered by an independent editable text overlay below, while the
+                # native table keeps the cell background, borders, and structure.
+                contains_math = _contains_inline_math(cell_html)
+                converted_cell = {
+                    # Keep a transparent plain-text placeholder so the native
+                    # table computes the same row wrapping/height beneath the
+                    # independent editable math overlay.
+                    "html": (
+                        html_lib.escape(_plain_inline_text(cell_html), quote=False)
+                        if contains_math else sanitize_inline_html(cell_html)
+                    ),
+                }
                 if cell.get("align") in {"left", "center", "right"}:
                     converted_cell["align"] = cell["align"]
-                if cell.get("color"):
+                if contains_math:
+                    converted_cell["color"] = "rgba(0,0,0,0)"
+                elif cell.get("color"):
                     converted_cell["color"] = cell["color"]
                 if cell.get("bg") and not _transparent(cell["bg"]):
                     converted_cell["bg"] = cell["bg"]
@@ -354,6 +582,11 @@ def _table(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id:
             cells.append(converted_cell)
         native_rows.append({"cells": cells})
     style = element["style"]
+    first_cell = next(
+        (cell for row in rows for cell in row if isinstance(cell, dict)),
+        {},
+    )
+    pad_y, pad_x = _cell_padding(first_cell)
     return {
         **_common(element, corrections, slide_id), "type": "table",
         "columns": columns, "rows": native_rows,
@@ -361,11 +594,103 @@ def _table(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id:
         "style": {
             "headerBg": style.get("backgroundColor") or "#eef2f7", "headerColor": style.get("color") or "#111111",
             "zebra": "rgba(0,0,0,0.03)", "borderColor": style.get("borderColor") or "#cbd5e1",
-            "borderWidth": _compact(style.get("borderWidth") or 1), "cellPadX": 12, "cellPadY": 9,
+            "borderWidth": _compact(style.get("borderWidth") or 1),
+            "cellPadX": _compact(pad_x), "cellPadY": _compact(pad_y),
             "fontSize": _compact(style.get("fontSize") or 16), "color": style.get("color") or "#111111",
             "radius": _compact(style.get("borderRadius") or 0),
         },
     }
+
+
+def _table_inline_math_decomposition(
+    element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str,
+) -> list[dict[str, Any]]:
+    """Render a math-bearing HTML table as editable native shapes and text."""
+
+    data = element.get("table") or {"rows": []}
+    rows = data.get("rows", [])
+    table_style = element.get("style", {})
+    base = _common(element, corrections, slide_id)
+    outer = {
+        **base,
+        "type": "shape",
+        "shape": "rect",
+        "fill": "transparent",
+        "stroke": "transparent",
+        "strokeWidth": 0,
+        "radius": _compact(table_style.get("borderRadius") or 0),
+    }
+    emitted: list[dict[str, Any]] = [outer]
+    source_w = max(1.0, float(element.get("w") or 1))
+    source_h = max(1.0, float(element.get("h") or 1))
+    column_count = max((len(row) for row in rows), default=1)
+    header_rows = int(data.get("headerRows") or 0)
+    border_color = table_style.get("borderColor") or "#cbd5e1"
+    border_width = _compact(table_style.get("borderWidth") or 1)
+
+    for row_index, row in enumerate(rows):
+        for column_index, cell_value in enumerate(row):
+            cell = cell_value if isinstance(cell_value, dict) else {"html": html_lib.escape(str(cell_value), quote=False)}
+            rect = cell.get("rect") if isinstance(cell.get("rect"), dict) else {}
+            cell_x = float(rect.get("x", source_w * column_index / max(column_count, 1)))
+            cell_y = float(rect.get("y", source_h * row_index / max(len(rows), 1)))
+            cell_w = float(rect.get("w", source_w / max(column_count, 1)))
+            cell_h = float(rect.get("h", source_h / max(len(rows), 1)))
+            x = float(base["x"]) + cell_x
+            y = float(base["y"]) + cell_y
+            bg = cell.get("bg")
+            if _transparent(bg):
+                bg = "rgba(0,0,0,0.03)" if row_index >= header_rows and row_index % 2 == 0 else "transparent"
+            cell_id = f"{element['id']}--cell-r{row_index}-c{column_index}"
+            emitted.append({
+                "id": f"{cell_id}-bg",
+                "x": _compact(x), "y": _compact(y),
+                "w": _compact(cell_w), "h": _compact(cell_h),
+                "rotation": _compact(element.get("rotation", 0)),
+                "opacity": _compact(element.get("opacity", 1)),
+                "type": "shape", "shape": "rect",
+                "fill": bg, "stroke": border_color, "strokeWidth": border_width, "radius": 0,
+                **({"tableId": element["tableId"]} if element.get("tableId") else {}),
+                **({"figureId": element["figureId"]} if element.get("figureId") else {}),
+            })
+            cell_html = sanitize_inline_html(str(cell.get("html", "")))
+            if not cell_html:
+                continue
+            cell_style = cell.get("style") if isinstance(cell.get("style"), dict) else {}
+            pad_y, pad_x = _cell_padding(cell)
+            vertical_align = cell_style.get("verticalAlign") or "middle"
+            text_y = y if vertical_align == "middle" else y + pad_y
+            text_h = cell_h if vertical_align == "middle" else max(1.0, cell_h - 2 * pad_y)
+            align = cell.get("align")
+            if align not in {"left", "center", "right"}:
+                align = "left"
+            emitted.append({
+                "id": f"{cell_id}-text",
+                "x": _compact(x + pad_x), "y": _compact(text_y),
+                "w": _compact(max(1.0, cell_w - 2 * pad_x)), "h": _compact(text_h),
+                "rotation": _compact(element.get("rotation", 0)),
+                "opacity": _compact(element.get("opacity", 1)),
+                "type": "text", "html": cell_html,
+                "fontSize": _compact(float(cell_style.get("fontSize") or table_style.get("fontSize") or 16)),
+                "fontFamily": cell_style.get("fontFamily") or table_style.get("fontFamily") or "sans-serif",
+                "fontWeight": cell_style.get("fontWeight") or (700 if cell.get("bold") else 400),
+                "color": cell.get("color") or cell_style.get("color") or table_style.get("color") or "#111111",
+                "align": align,
+                "valign": "middle" if vertical_align == "middle" else "top",
+                "lineHeight": _compact(float(table_style.get("lineHeight") or 1.3)),
+                "letterSpacing": _compact(float(table_style.get("letterSpacing") or 0)),
+                **({"tableId": element["tableId"]} if element.get("tableId") else {}),
+                **({"figureId": element["figureId"]} if element.get("figureId") else {}),
+            })
+    corrections.append({
+        "slideId": slide_id,
+        "elementId": element["id"],
+        "kind": "table-inline-math-decomposition",
+        "before": {"type": "table", "rows": len(rows)},
+        "after": {"type": "shape+text", "elements": len(emitted)},
+        "contentChanged": False,
+    })
+    return emitted
 
 
 def _chart(
@@ -555,7 +880,9 @@ def _identity_layout(slides: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]
         "id", "type", "exportMode", "critical", "compareCrop", "role", "registryId", "equationId", "assetId", "figureId",
         "chartId", "tableId", "morphId", "link", "shape", "lineStart", "lineEnd", "from", "to",
         "layout", "layoutGroup", "x", "y", "w", "h", "rotation", "opacity", "z", "text", "html",
-        "svg", "mediaKind", "chartOption", "table", "style", "boundingFrame", "transform", "compatibility",
+        "residualText", "residualHtml", "residualFrame", "residualStyle", "textFragments", "explicitDescendantIds",
+        "fallbackScope", "fallbackCapture", "svg", "mediaKind", "chartOption", "table", "style",
+        "boundingFrame", "transform", "compatibility",
     )
     return [
         {
@@ -588,8 +915,17 @@ def _rotated_bounding_frame(element: dict[str, Any]) -> dict[str, float | int]:
 
 def _rgb(value: object) -> tuple[float, float, float] | None:
     text = str(value or "")
-    match = re.match(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)", text)
+    match = re.fullmatch(
+        r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)"
+        r"(?:\s*,\s*([\d.]+%?))?\s*\)",
+        text,
+    )
     if match:
+        alpha_text = match.group(4)
+        if alpha_text is not None:
+            alpha = float(alpha_text[:-1]) / 100 if alpha_text.endswith("%") else float(alpha_text)
+            if alpha < 1:
+                return None
         return tuple(float(match.group(index)) / 255 for index in range(1, 4))  # type: ignore[return-value]
     match = re.fullmatch(r"#([0-9a-fA-F]{6})", text)
     if match:
@@ -837,6 +1173,22 @@ def convert_html_layout(
             decisions.append(background_decision)
         local_ids: set[str] = set()
         ordered = sorted(source_slide["elements"], key=lambda item: (item.get("z", 0), item["domIndex"]))
+        compatibilities = {
+            element["id"]: classify_native_compatibility(element)
+            for element in ordered
+        }
+        image_fallback_ids = {
+            element["id"]
+            for element in ordered
+            if element.get("exportMode") == "image"
+            or compatibilities[element["id"]].classification in {"image-required", "background-image-required"}
+        }
+        whole_image_fallback_ids = {
+            element["id"] for element in ordered
+            if element["id"] in image_fallback_ids
+            and (element.get("fallbackCapture") or {}).get("scope", element.get("fallbackScope", "whole")) != "background"
+        }
+        protected_element_ids = set(registry["protected"]["elementIds"])
         for element in ordered:
             element_id = element["id"]
             key = f"{slide_id}/{element_id}"
@@ -846,6 +1198,53 @@ def convert_html_layout(
                 continue
             local_ids.add(element_id)
             seen_elements.add(element_id)
+            covering_fallback = next(
+                (ancestor_id for ancestor_id in element.get("ancestorIds", ()) if ancestor_id in whole_image_fallback_ids),
+                None,
+            )
+            if covering_fallback:
+                if element["type"] in {"text", "equation", "table"}:
+                    errors.append(issue(
+                        slide_id=slide_id,
+                        element_id=element_id,
+                        field="editable fallback coverage",
+                        actual={"coveredBy": covering_fallback, "type": element["type"]},
+                        fix="Use a background-scoped fallback so text, equations, and tables remain native Bento elements.",
+                    ))
+                elif element_id in protected_element_ids:
+                    errors.append(issue(
+                        slide_id=slide_id,
+                        element_id=element_id,
+                        field="protected.elementIds",
+                        actual={"coveredBy": covering_fallback},
+                        fix="Keep the protected element independently convertible instead of placing it inside an image fallback.",
+                    ))
+                decisions.append({
+                    "slideId": slide_id,
+                    "elementId": element_id,
+                    "sourceType": element["type"],
+                    "resultType": None,
+                    "bentoType": None,
+                    "emittedIds": [],
+                    "strategy": "covered-by-image-fallback",
+                    "conversionMode": "covered-by-image-fallback",
+                    "reason": f"Rendered once inside ancestor image fallback {covering_fallback!r}.",
+                    "layout": element.get("layout"),
+                    "layoutGroup": element.get("layoutGroup"),
+                    "role": element.get("role"),
+                    "sourceTag": element.get("tag"),
+                    "critical": bool(element.get("critical")),
+                    "compareCrop": bool(element.get("compareCrop")),
+                    "paperSource": element.get("paperSource"),
+                    "sourceFrame": {field: _compact(element[field]) for field in ("x", "y", "w", "h")},
+                    "sourceBoundingFrame": {field: _compact((element.get("boundingFrame") or element)[field]) for field in ("x", "y", "w", "h")},
+                    "nativeCompatibility": compatibilities[element_id].classification,
+                    "compatibilityReasons": list(compatibilities[element_id].reasons),
+                    "contentPreserved": True,
+                    "adjustments": [],
+                    "warnings": [],
+                })
+                continue
             references = {
                 "equationId": "equations",
                 "assetId": "assets",
@@ -858,36 +1257,94 @@ def convert_html_layout(
                 if reference and reference not in registry[collection]:
                     errors.append(issue(slide_id=slide_id, element_id=element_id, field=field, actual=reference, fix=f"Define this id in registry.{collection}."))
             mode = element.get("exportMode") or "auto"
-            compatibility = classify_native_compatibility(element)
+            compatibility = compatibilities[element_id]
             if mode not in {"native", "svg", "image", "auto", "ignore"}:
                 errors.append(issue(slide_id=slide_id, element_id=element_id, field="data-bento-export", actual=mode, fix="Use native, svg, image, auto, or ignore."))
                 continue
             if mode == "ignore":
                 decisions.append({"slideId": slide_id, "elementId": element_id, "sourceType": element["type"], "resultType": None, "bentoType": None, "strategy": "ignore", "conversionMode": "ignore", "reason": "Explicit data-bento-export=ignore", "adjustments": [], "warnings": []})
                 continue
+            fallback_scope = (element.get("fallbackCapture") or {}).get("scope", element.get("fallbackScope", "whole"))
+            owned_text = str(
+                element.get("residualText")
+                if element.get("hasExplicitDescendants")
+                else element.get("text") or ""
+            ).strip()
+            if (
+                (mode == "image" or compatibility.classification == "image-required")
+                and fallback_scope == "whole"
+                and owned_text
+            ):
+                errors.append(issue(
+                    slide_id=slide_id,
+                    element_id=element_id,
+                    field="fallback scope",
+                    actual={"scope": "whole", "text": owned_text},
+                    fix="Use background fallback scope so rendered text remains an editable native overlay.",
+                ))
+                continue
             strategy = "native"
             reason = "Supported semantic element converted to an editable Bento native type."
+            table_decomposition: list[dict[str, Any]] | None = None
+            conversion_element = element
+            if element["type"] == "text" and element.get("textFragments"):
+                conversion_element = {**element, "text": "", "html": ""}
+            elif element["type"] in {"text", "equation"} and element.get("hasExplicitDescendants"):
+                conversion_element = {
+                    **element,
+                    "text": element.get("residualText") or "",
+                    "html": element.get("residualHtml") or "",
+                    "style": {**element.get("style", {}), **(element.get("residualStyle") or {})},
+                }
+                if element.get("residualFrame"):
+                    conversion_element.update(element["residualFrame"])
+                    conversion_element["scrollWidth"] = element["residualFrame"]["w"]
+                    conversion_element["scrollHeight"] = element["residualFrame"]["h"]
             try:
-                if mode == "image" or compatibility.classification == "image-required":
+                if mode == "image" or compatibility.classification in {"image-required", "background-image-required"}:
                     source = layout.image_fallbacks.get(key)
                     if not source:
                         raise ConversionError("Image fallback capture is unavailable.")
                     asset_id = f"fallback-{slide_id}-{element_id}"
                     assets[asset_id] = source
                     converted = {**_common(element, corrections, slide_id), "type": "image", "src": source, "fit": "contain", "radius": 0}
-                    strategy = "image"
-                    reason = "Explicit data-bento-export=image raster fallback." if mode == "image" else "; ".join(compatibility.reasons)
+                    capture_scope = (element.get("fallbackCapture") or {}).get("scope", element.get("fallbackScope", "whole"))
+                    source_text = str(element.get("text") or "").strip()
+                    if source_text and capture_scope != "background":
+                        converted["sourceText"] = source_text
+                    strategy = "background-image" if capture_scope == "background" else "image"
+                    reason = (
+                        "Visual background was rasterized while semantic text and descendants remain editable."
+                        if capture_scope == "background"
+                        else "Explicit data-bento-export=image raster fallback."
+                        if mode == "image"
+                        else "; ".join(compatibility.reasons)
+                    )
                 elif mode == "svg" or compatibility.classification == "localized-svg-recommended" or element["type"] not in NATIVE_TYPES:
                     capture = layout.image_fallbacks.get(key)
                     converted = _complex_table_svg(element, corrections, slide_id, element_resource_context) if element["type"] == "table" and element.get("table") and not element["table"].get("simpleTable", True) else _svg_fallback(element, corrections, slide_id, element_resource_context, capture)
                     strategy = "svg"
                     reason = "Explicit data-bento-export=svg localized fallback." if mode == "svg" else "; ".join(compatibility.reasons) or "Unsupported complex block preserved as partial SVG."
                 elif element["type"] in {"text", "equation"}:
-                    converted = _text(element, registry, corrections, slide_id)
+                    converted = (
+                        _text(conversion_element, registry, corrections, slide_id)
+                        if element["type"] == "equation" or str(conversion_element.get("text") or "").strip()
+                        else None
+                    )
                 elif element["type"] == "shape":
                     converted = _shape(element, corrections, slide_id)
                 elif element["type"] == "table":
-                    converted = _table(element, corrections, slide_id)
+                    if any(
+                        isinstance(cell, dict) and _contains_inline_math(cell.get("html"))
+                        for row in (element.get("table") or {}).get("rows", [])
+                        for cell in row
+                    ):
+                        table_decomposition = _table_inline_math_decomposition(
+                            element, corrections, slide_id,
+                        )
+                        converted = table_decomposition[0]
+                    else:
+                        converted = _table(element, corrections, slide_id)
                 elif element["type"] == "chart":
                     converted = _chart(element, registry, corrections, slide_id, element_resource_context)
                 elif element["type"] == "image":
@@ -935,20 +1392,58 @@ def convert_html_layout(
                 else:
                     converted = _svg_fallback(element, corrections, slide_id, element_resource_context, layout.image_fallbacks.get(key))
                     strategy, reason = "svg", f"Automatic native conversion failed; partial SVG fallback: {exc}"
-            emitted = [converted]
+            emitted = table_decomposition or ([converted] if converted is not None else [])
+            if table_decomposition:
+                strategy = "native-decomposition"
+                reason = (
+                    "Math-bearing table cells became editable native shape and text elements so inline "
+                    "LaTeX renders without visible delimiters while preserving the measured HTML grid."
+                )
             if strategy == "native" and element["type"] in {"text", "equation"}:
                 decoration = _text_decoration(element, corrections, slide_id)
                 if decoration:
                     emitted.insert(0, decoration)
                     strategy = "native-decomposition"
                     reason = "Semantic text stayed editable; computed background/border became a native shape."
-            if strategy in {"native", "native-decomposition"} and compatibility.classification == "native-with-adjustment":
+                fragments = _editable_text_fragments(element, registry, corrections, slide_id)
+                if fragments:
+                    emitted.extend(fragments)
+                    strategy = "native-decomposition"
+                    reason = "Flex child labels became independently positioned editable Bento text elements."
+                if element.get("hasExplicitDescendants"):
+                    strategy = "native-decomposition"
+                    reason = (
+                        "Annotated descendants remain independent; the structural container emits only its "
+                        "own residual text and decoration."
+                    )
+            if strategy == "native" and element["type"] == "shape":
+                label = _editable_text_overlay(element, registry, corrections, slide_id)
+                if label:
+                    emitted.append(label)
+                    strategy = "native-decomposition"
+                    reason = "Text-bearing HTML shape became an editable Bento shape plus text label."
+            if strategy == "background-image":
+                label = _editable_text_overlay(element, registry, corrections, slide_id)
+                if label:
+                    emitted.append(label)
+                reason = (
+                    "Unsupported visual styling became a background-only image; owned text and annotated "
+                    "descendants remain independent editable Bento elements."
+                )
+            if strategy == "native" and compatibility.classification == "native-with-adjustment":
                 reason = " ".join(compatibility.adjustments)
             output_elements.extend(emitted)
-            conversion_mode = {"svg": "partial-svg-fallback", "image": "image-fallback", "native-decomposition": "native-decomposition"}.get(strategy, "native")
+            conversion_mode = {
+                "svg": "partial-svg-fallback",
+                "image": "image-fallback",
+                "background-image": "background-image-with-native-overlay",
+                "native-decomposition": "native-decomposition",
+            }.get(strategy, "native")
+            capture = element.get("fallbackCapture") or {}
             decisions.append({
                 "slideId": slide_id, "elementId": element_id, "sourceType": element["type"],
-                "resultType": converted["type"], "bentoType": [item["type"] for item in emitted] if len(emitted) > 1 else converted["type"],
+                "resultType": converted["type"] if converted is not None else None,
+                "bentoType": [item["type"] for item in emitted] if len(emitted) > 1 else (emitted[0]["type"] if emitted else None),
                 "emittedIds": [item["id"] for item in emitted], "strategy": strategy, "conversionMode": conversion_mode,
                 "reason": reason, "layout": element.get("layout"), "layoutGroup": element.get("layoutGroup"),
                 "role": element.get("role"), "sourceTag": element.get("tag"),
@@ -959,7 +1454,15 @@ def convert_html_layout(
                 "sourceBoundingFrame": {field: _compact((element.get("boundingFrame") or element)[field]) for field in ("x", "y", "w", "h")},
                 "nativeCompatibility": compatibility.classification,
                 "compatibilityReasons": list(compatibility.reasons),
-                "contentPreserved": True, "adjustments": list(compatibility.adjustments), "warnings": [reason] if strategy in {"svg", "image"} else [],
+                "fallbackScope": capture.get("scope"),
+                "excludedSemanticElementIds": list(capture.get("excludedElementIds") or ()),
+                "ownedTextExcludedFromFallback": bool(capture.get("ownedTextExcluded")),
+                "editableOverlayIds": [item["id"] for item in emitted if item["type"] in {"text", "table"}],
+                "bakedTextCount": 0 if strategy == "background-image" else int(strategy == "image" and bool(element.get("text"))),
+                "bakedEquationCount": 0 if strategy == "background-image" else int(strategy == "image" and element.get("type") == "equation"),
+                "contentPreserved": True,
+                "adjustments": list(compatibility.adjustments),
+                "warnings": [reason] if strategy in {"svg", "image", "background-image"} else [],
             })
         slides.append({
             "id": slide_id,
@@ -1055,6 +1558,8 @@ def convert_html_layout(
     for decision in decisions:
         key = f"{decision['slideId']}/{decision['elementId']}"
         output_element = output_by_key.get(key)
+        if output_element is None and decision.get("emittedIds"):
+            output_element = output_by_key.get(f"{decision['slideId']}/{decision['emittedIds'][0]}")
         if output_element:
             decision["bentoFrame"] = {field: output_element[field] for field in ("x", "y", "w", "h")}
             decision["bentoBoundingFrame"] = _rotated_bounding_frame(output_element)
@@ -1077,8 +1582,8 @@ def convert_html_layout(
         compatibility_counts[classification] = compatibility_counts.get(classification, 0) + 1
     fallback_ids = {
         f"{decision['slideId']}/{emitted_id}"
-        for decision in decisions if decision["strategy"] in {"svg", "image"}
-        for emitted_id in decision.get("emittedIds", [])
+        for decision in decisions if decision["strategy"] in {"svg", "image", "background-image"}
+        for emitted_id in decision.get("emittedIds", [])[:1]
     }
     native_counts = {kind: 0 for kind in ("text", "shape", "table", "chart", "image", "svg", "media")}
     for slide in slides:
@@ -1092,7 +1597,15 @@ def convert_html_layout(
         "nativeTable": native_counts["table"], "nativeChart": native_counts["chart"], "nativeImage": native_counts["image"],
         "nativeSvg": native_counts["svg"], "media": native_counts["media"],
         "partialSvgFallback": sum(decision["strategy"] == "svg" for decision in decisions),
-        "imageFallback": sum(decision["strategy"] == "image" for decision in decisions), "fullSlideSvg": 0,
+        "imageFallback": sum(decision["strategy"] in {"image", "background-image"} for decision in decisions),
+        "backgroundImageWithNativeOverlay": sum(decision["strategy"] == "background-image" for decision in decisions),
+        "bakedTextCount": sum(int(decision.get("bakedTextCount") or 0) for decision in decisions),
+        "bakedEquationCount": sum(int(decision.get("bakedEquationCount") or 0) for decision in decisions),
+        "coveredEditableElementCount": sum(
+            decision["strategy"] == "covered-by-image-fallback" and decision.get("sourceType") in {"text", "equation", "table"}
+            for decision in decisions
+        ),
+        "fullSlideSvg": 0,
         "overflowCorrections": sum(correction["kind"] in {"overflow-frame-growth", "text-overflow"} for correction in corrections),
         "outOfBoundsCorrections": sum(correction["kind"] == "bounds" for correction in corrections),
         "overlapCorrections": sum(correction["kind"] == "overlap" for correction in corrections),

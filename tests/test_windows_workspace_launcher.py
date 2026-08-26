@@ -227,10 +227,12 @@ class WindowsWorkspaceLauncherTests(unittest.TestCase):
         self.set_stage(repository, "ready_for_conversion", html_port=port)
         source = repository / "output/presentation.generated.bento.html"
         source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-        no_server = self.run_cmd(repository / "start_deck_workspace.cmd", "-NoClipboard")
-        self.assertEqual(no_server.returncode, 0, no_server.stdout)
-        self.assertFalse((repository / "output/html-preview-session.json").exists())
+        conversion_wait = self.run_cmd(repository / "start_deck_workspace.cmd", "-NoClipboard")
+        self.assertEqual(conversion_wait.returncode, 0, conversion_wait.stdout)
+        self.assertTrue((repository / "output/html-preview-session.json").exists())
+        self.assertEqual(self.wait_status(port)["stage"], "ready_for_conversion")
         self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), source_hash)
+        self.assertEqual(self.run_cmd(repository / "stop_deck_workspace.cmd").returncode, 0)
 
     def test_bento_finalization_dispatch_preserves_generated_and_existing_final(self) -> None:
         repository = self.copy_repository("Bento Finalization")

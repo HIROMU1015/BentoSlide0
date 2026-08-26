@@ -5,6 +5,8 @@
 ```text
 single deck HTML + registry JSON (or migrated sorted modular pairs)
 → contract, section-digest, and cross-unit validation
+→ readiness static annotation/editability preflight (before workflow transition)
+→ formal-build static preflight recheck (before Chromium)
 → Chromium load/font completion
 → geometry/DOMMatrix/table-structure + getComputedStyle extraction
 → normalize frames to 1280×720
@@ -16,6 +18,10 @@ single deck HTML + registry JSON (or migrated sorted modular pairs)
 → Bento UI startup + API edit + serialize round-trip
 → paired source/Bento screenshots and report
 ```
+
+Semantic editability takes precedence over fallback ownership. Text-bearing shapes become a visual background plus native text; annotated grouping containers emit their residual owned text/background and keep annotated descendants independent. If CSS effects cannot be expressed natively, only the background is rasterized. `text`, `equation`, and `table` descendants may never be classified as `covered-by-image-fallback`. The conversion report records fallback scope, excluded descendant IDs, editable overlay IDs, and baked/covered semantic counts; a conforming editable build has zero baked text, baked equations, and covered editable elements.
+
+Marked prose fragments using `data-bento-inline-math="v1"` are normalized to editable inline `$...$` LaTeX before insertion into Bento text HTML. `sub` and `sup` become LaTeX scripts, Greek Unicode symbols become control sequences, and multi-letter script labels remain upright. This uses the existing Bento math renderer and does not patch or replace the immutable runtime. Because Bento's native table cells do not invoke that renderer, a table containing marked inline math is deterministically decomposed from measured cell rectangles into editable native cell-background shapes and cell-text elements; the original table ID remains as the transparent grid container. Browser tests require each expected inline expression to produce a MathML node, remain inside its cell shape, display no delimiter text, and preserve the `$...$` source through synchronous serialize round-trip.
 
 HTML layout is measured by Chromium, not inferred from CSS source text. DOM order plus computed `z-index` determines stable element order. Coordinates are rounded to three decimal places. One BrowserHarness owns a single headless Chromium process and creates isolated `sourceLayout` and `bentoCheck` contexts. Reduced motion and animation/transition/caret guards are installed before page scripts. Readiness is event-based: fonts, image decode, then two animation frames; fixed sleeps are prohibited. The document id is UUIDv5 over canonical merged registry and computed layout JSON. `document.modified` comes from the registry; absent values use the deterministic epoch value rather than current time.
 
@@ -43,7 +49,7 @@ Extraction records `offsetWidth/Height`, `clientWidth/Height`, the complete DOM 
 
 ## Table structure
 
-Each HTML cell records `rowSpan`, `colSpan`, row/column index, relative rectangle, content, and computed cell style. A native table is allowed only for a rectangular grid with one header row at most, no spans, no nested table, and no image/chart/complex content. Colspan, rowspan, multilevel headers, and image-bearing cells therefore become localized SVG blocks; the ordinary table fixture stays native.
+Each HTML cell records `rowSpan`, `colSpan`, row/column index, relative rectangle, content, and computed cell style. A native table is allowed only for a rectangular grid with one header row at most, no spans, no nested table, no image/chart/complex content, and no marked inline math. Marked-math tables use native shape/text cell decomposition so text and formulas stay editable. Other colspan, rowspan, multilevel-header, and image-bearing tables become localized SVG blocks; an ordinary rectangular table without math stays native.
 
 ## References and source-unit merge
 
@@ -61,7 +67,7 @@ Whole-slide warning thresholds are pHash ≥ 10, pixel difference ≥ 0.075, col
 
 Critical crop failures escalate the owning slide to `fail`, even when the whole-slide image passes. Non-critical crop failures contribute a slide warning. Crop classification uses relaxed localized fail thresholds (pixel 0.45, color 0.75, edge 0.35, or combined pixel 0.30 with edge 0.16/pHash 32) to avoid treating renderer detail as missing content.
 
-`conversion-report.json` records every element's source/result type, compatibility class/reasons, strategy/reason, role, critical flag/reason, status contribution, logical layout group, source/Bento frames and bounding frames, corrections, diagnostics, registry coverage, embedded asset resolutions, resource scan, runtime integrity, browser check, whole-slide metrics, prioritized crop metrics, incremental-cache hit/miss counts, and aggregate visual/critical pass-warning-fail values. `diagnostics/resource-scan.json` is a standalone CI artifact.
+`diagnostics/html-preflight.json` uses `bento/html-preflight/v1`. It records every static safety error and editability warning with unit, slide, element, nearest annotated ancestor, reason, and prescribed fix. Safety errors stop before Chromium launches. Warnings remain visible evidence but do not block ordinary conversion. `conversion-report.json` embeds the same preflight report and records every element's source/result type, compatibility class/reasons, strategy/reason, role, critical flag/reason, status contribution, logical layout group, source/Bento frames and bounding frames, corrections, diagnostics, registry coverage, embedded asset resolutions, resource scan, runtime integrity, browser check, whole-slide metrics, prioritized crop metrics, incremental-cache hit/miss counts, and aggregate visual/critical pass-warning-fail values. `diagnostics/resource-scan.json` is a standalone CI artifact.
 
 `diagnostics/browser-environment.json` uses `bento/browser-environment/v1` and records Playwright/Chromium versions, privacy-safe OS identity, the separate source/Bento viewport profiles, DPR, locale/timezone, render/network policy, declared/computed fonts, Chromium-observed platform font families, embedded font asset hashes, and canonical environment/font digests. It never records hostname, username, browser executable paths, or font file paths. It is observational evidence: it is uploaded by CI and may be used in incremental cache keys, but is never embedded in `#bento-doc`, the Bento JSON sidecar, registry, runtime fingerprint, document revision, content approval, or final approval.
 

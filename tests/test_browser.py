@@ -11,6 +11,7 @@ from bento_converter.browser_check import run_browser_check
 from bento_converter.converter import convert_design
 from bento_converter.errors import BrowserCheckError
 from bento_converter.html_document import write_embedded_document
+from bento_converter.incremental_cache import IncrementalSlideCache
 
 ROOT = Path(__file__).parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -83,6 +84,59 @@ class BrowserIntegrationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(BrowserCheckError, "blocked remote"):
                 run_browser_check(output_path)
+
+    def test_targeted_check_renders_only_requested_slide_and_reuses_cache(self):
+        design = json.loads(
+            (FIXTURES / "gpt_bento_design.demo.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            output_path = temp / "targeted.bento.html"
+            screenshots = temp / "screenshots"
+            cache_root = temp / "cache"
+            write_embedded_document(
+                ROOT / "Bento_Slides.base.bento.html",
+                output_path,
+                convert_design(design).document,
+            )
+            first = run_browser_check(
+                output_path,
+                screenshots_dir=screenshots,
+                cache=IncrementalSlideCache(cache_root, reuse=True),
+                slide_ids=["demo-slide-2"],
+            )
+            second_cache = IncrementalSlideCache(cache_root, reuse=True)
+            second = run_browser_check(
+                output_path,
+                screenshots_dir=screenshots,
+                cache=second_cache,
+                slide_ids=["demo-slide-2"],
+            )
+
+        self.assertEqual(first.scope, "targeted")
+        self.assertEqual(first.slide_count, 2)
+        self.assertEqual(first.checked_slide_ids, ("demo-slide-2",))
+        self.assertEqual(first.checked_slide_count, 1)
+        self.assertEqual(first.rendered_slide_count, 1)
+        self.assertEqual(first.fresh_rendered_slide_count, 1)
+        self.assertEqual(len(first.screenshots), 1)
+        self.assertEqual(second.fresh_rendered_slide_count, 0)
+        self.assertEqual(second.cached_rendered_slide_count, 1)
+        self.assertEqual(second_cache.stats["bentoHits"], 1)
+
+    def test_targeted_check_rejects_unknown_slide_id(self):
+        design = json.loads(
+            (FIXTURES / "gpt_bento_design.demo.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "targeted.bento.html"
+            write_embedded_document(
+                ROOT / "Bento_Slides.base.bento.html",
+                output_path,
+                convert_design(design).document,
+            )
+            with self.assertRaisesRegex(BrowserCheckError, "do not exist"):
+                run_browser_check(output_path, slide_ids=["missing-slide"])
 
 
 if __name__ == "__main__":

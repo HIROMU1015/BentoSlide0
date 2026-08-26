@@ -54,6 +54,12 @@ def run(args: argparse.Namespace) -> int:
     print(f"Slides: {len(result.document['slides'])}")
     print(f"Source screenshots: {len(result.source_screenshots)}")
     print(f"Bento screenshots: {len(result.bento_screenshots)}")
+    preflight = result.report.get("htmlPreflight", {}).get("summary", {})
+    print(
+        "HTML preflight: PASS "
+        f"(errors={preflight.get('errors', 0)}, warnings={preflight.get('warnings', 0)}; "
+        "details=diagnostics/html-preflight.json)"
+    )
     print("Runtime integrity: PASS")
     return 0
 

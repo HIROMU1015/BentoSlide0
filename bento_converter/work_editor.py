@@ -41,6 +41,9 @@ TOOLBAR = r"""
 
     let revision = null;
     let registryRevision = null;
+    let baselineDocumentSnapshot = null;
+    let reloadInProgress = false;
+    let refreshInProgress = false;
     let editingMode = 'finalization';
     const status = document.getElementById('bento-work-editor-status');
     const controls = Array.from(host.querySelectorAll('button'));
@@ -59,14 +62,72 @@ TOOLBAR = r"""
     guardedSerialize.workEditorGuard = true;
     window.bento.serialize = guardedSerialize;
 
-    async function refreshStatus() {
-      const response = await fetch('/api/status', {cache:'no-store'});
+    const markLoadedRevision = value => {
+      const url = new URL(location.href);
+      url.searchParams.set('revision', value || Date.now().toString());
+      history.replaceState(null, '', url.toString());
+    };
+    const documentSnapshot = () => {
+      const document = JSON.parse(JSON.stringify(window.bento.doc));
+      delete document.collab;
+      delete document.modified;
+      return JSON.stringify(document);
+    };
+    const afterDocumentRender = () => new Promise(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 100)));
+    });
+    async function loadLatestDocument({mode = editingMode, announce = true} = {}) {
+      const response = await fetch('/api/document', {cache:'no-store'});
       const payload = await response.json();
-      editingMode = payload.editingMode || 'finalization';
+      if (!response.ok) throw new Error(errorText(payload));
+      if (!payload.document || typeof payload.document !== 'object') {
+        throw new Error('\u6700\u65b0\u306eBento\u6587\u66f8\u3092\u53d6\u5f97\u3067\u304d\u307e\u305b\u3093\u3067\u3057\u305f\u3002');
+      }
+      if (typeof window.bento.loadDoc !== 'function' || !window.bento.loadDoc(JSON.stringify(payload.document))) {
+        throw new Error('Bento UI\u304c\u6700\u65b0\u306e\u6587\u66f8\u3092\u8aad\u307f\u8fbc\u3081\u307e\u305b\u3093\u3067\u3057\u305f\u3002');
+      }
       revision = payload.documentRevision || payload.revision;
       registryRevision = payload.registryRevision || null;
+      editingMode = mode || editingMode;
+      baselineDocumentSnapshot = documentSnapshot();
+      markLoadedRevision(revision);
+      await afterDocumentRender();
       document.getElementById('bento-work-editor-mode').textContent = editingMode;
-      message(`revision ${revision.slice(0, 19)}... / validation ${payload.validation}`);
+      controls.forEach(button => { button.disabled = false; });
+      if (announce) message(`\u6700\u65b0\u72b6\u614b\u3092\u753b\u9762\u306b\u53cd\u6620\u3057\u307e\u3057\u305f\uff1arevision ${revision}`);
+      return payload;
+    }
+    async function refreshStatus({announce = true} = {}) {
+      const response = await fetch('/api/revision', {cache:'no-store'});
+      const payload = await response.json();
+      const nextRevision = payload.documentRevision || payload.revision;
+      const nextRegistryRevision = payload.registryRevision || null;
+      const changedElsewhere = revision !== null && (
+        nextRevision !== revision || nextRegistryRevision !== registryRevision
+      );
+      if (changedElsewhere) {
+        if (reloadInProgress) return;
+        const currentDocumentSnapshot = documentSnapshot();
+        if (baselineDocumentSnapshot !== null && currentDocumentSnapshot === baselineDocumentSnapshot) {
+          reloadInProgress = true;
+          controls.forEach(button => { button.disabled = true; });
+          message('\u5225\u306e\u5909\u66f4\u3092\u753b\u9762\u306b\u53cd\u6620\u4e2d\u3067\u3059\u2026');
+          try { await loadLatestDocument({mode: payload.editingMode || editingMode}); }
+          finally {
+            reloadInProgress = false;
+            controls.forEach(button => { button.disabled = false; });
+          }
+          return;
+        }
+        message('\u5225\u306e\u5909\u66f4\u304c\u4fdd\u5b58\u3055\u308c\u307e\u3057\u305f\u3002\n\u672a\u4fdd\u5b58\u306e\u5909\u66f4\u304c\u3042\u308b\u305f\u3081\u3001\u81ea\u52d5\u518d\u8aad\u307f\u8fbc\u307f\u3092\u505c\u6b62\u3057\u3066\u3044\u307e\u3059\u3002\n\u5185\u5bb9\u3092\u78ba\u8a8d\u3057\u3066\u300c\u72b6\u614b\u3092\u518d\u8aad\u307f\u8fbc\u307f\u300d\u3092\u9078\u3093\u3067\u304f\u3060\u3055\u3044\u3002');
+        return;
+      }
+      editingMode = payload.editingMode || 'finalization';
+      revision = nextRevision;
+      registryRevision = nextRegistryRevision;
+      if (baselineDocumentSnapshot === null) baselineDocumentSnapshot = documentSnapshot();
+      document.getElementById('bento-work-editor-mode').textContent = editingMode;
+      if (announce) message(`revision ${revision.slice(0, 19)}...`);
       controls.forEach(button => { button.disabled = false; });
     }
     async function post(path, payload) {
@@ -92,22 +153,50 @@ TOOLBAR = r"""
       ? {baseDocumentRevision:revision,baseRegistryRevision:registryRevision}
       : {baseRevision:revision};
     document.getElementById('work-save').addEventListener('click', async () => {
-      try { const result = await post('/api/save', savePayload(await serialized())); if (result) message(result.noOp ? `\u5909\u66f4\u306f\u3042\u308a\u307e\u305b\u3093\uff1arevision ${result.documentRevision || result.revision}` : `\u4fdd\u5b58\u3057\u307e\u3057\u305f\uff1arevision ${result.documentRevision || result.revision}`); }
+      try { const html = await serialized(); const result = await post('/api/save', savePayload(html)); if (result) { baselineDocumentSnapshot = documentSnapshot(); message(result.noOp ? `\u5909\u66f4\u306f\u3042\u308a\u307e\u305b\u3093\uff1arevision ${result.documentRevision || result.revision}` : `\u4fdd\u5b58\u3057\u307e\u3057\u305f\uff1arevision ${result.documentRevision || result.revision}`); } }
       catch (error) { message(error.message); }
     });
     document.getElementById('work-save-validate').addEventListener('click', async () => {
       try {
         const html = await serialized();
         const result = await post('/api/save', savePayload(html));
-        if (result) message(result.noOp ? `\u691c\u8a3c\u6e08\u307f\u30fb\u5909\u66f4\u306a\u3057\u3002revision ${result.documentRevision || result.revision}` : `\u4fdd\u5b58\u30fb\u691c\u8a3c\u3057\u307e\u3057\u305f\u3002revision ${result.documentRevision || result.revision}`);
+        if (result) { baselineDocumentSnapshot = documentSnapshot(); message(result.noOp ? `\u691c\u8a3c\u6e08\u307f\u30fb\u5909\u66f4\u306a\u3057\u3002revision ${result.documentRevision || result.revision}` : `\u4fdd\u5b58\u30fb\u691c\u8a3c\u3057\u307e\u3057\u305f\u3002revision ${result.documentRevision || result.revision}`); }
       } catch (error) { message(error.message); }
     });
     document.getElementById('work-revert').addEventListener('click', async () => {
-      const result = await post('/api/revert', revertPayload());
-      if (result) location.reload();
+      try {
+        const result = await post('/api/revert', revertPayload());
+        if (result) await loadLatestDocument();
+      } catch (error) { message(error.message); }
     });
-    document.getElementById('work-reload').addEventListener('click', () => location.reload());
-    refreshStatus().catch(error => message(error.message));
+    document.getElementById('work-reload').addEventListener('click', async () => {
+      if (reloadInProgress) return;
+      reloadInProgress = true;
+      controls.forEach(button => { button.disabled = true; });
+      message('\u6700\u65b0\u72b6\u614b\u3092\u753b\u9762\u306b\u53cd\u6620\u4e2d\u3067\u3059\u2026');
+      try { await loadLatestDocument(); }
+      catch (error) { message(error.message); }
+      finally {
+        reloadInProgress = false;
+        controls.forEach(button => { button.disabled = false; });
+      }
+    });
+    const afterInitialRender = () => new Promise(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 500)));
+    });
+    afterInitialRender().then(() => refreshStatus()).then(() => {
+      const pollStatus = async () => {
+        if (refreshInProgress || reloadInProgress) return;
+        refreshInProgress = true;
+        try { await refreshStatus({announce:false}); }
+        catch (error) { message(error.message); }
+        finally { refreshInProgress = false; }
+      };
+      const statusTimer = setInterval(
+        pollStatus, 2000,
+      );
+      window.addEventListener('pagehide', () => clearInterval(statusTimer), {once:true});
+    }).catch(error => message(error.message));
     return true;
   };
   const timer = setInterval(() => {
@@ -196,6 +285,8 @@ def create_work_editor_server(
             try:
                 if path == "/":
                     self._html(inject_work_toolbar(self.server.storage.html_response()))
+                elif path == "/api/revision":
+                    self._json(HTTPStatus.OK, self.server.storage.revision_status())
                 elif path == "/api/status":
                     self._json(HTTPStatus.OK, self.server.storage.status())
                 elif path == "/api/document":
@@ -226,8 +317,20 @@ def create_work_editor_server(
                             raise BentoConverterError("replaceSlideIds must be an array of non-empty strings")
                         arguments["replace_slide_ids"] = set(replace_slide_ids)
                         if path == "/api/save":
+                            scoped_slide_ids = payload.get("scopedSlideIds")
+                            if scoped_slide_ids is not None:
+                                if (
+                                    not isinstance(scoped_slide_ids, list)
+                                    or not scoped_slide_ids
+                                    or not all(isinstance(value, str) and value for value in scoped_slide_ids)
+                                    or len(set(scoped_slide_ids)) != len(scoped_slide_ids)
+                                ):
+                                    raise BentoConverterError(
+                                        "scopedSlideIds must be a non-empty array of unique non-empty strings"
+                                    )
+                                arguments["scoped_slide_ids"] = set(scoped_slide_ids)
                             operation = payload.get("operation", "authoring-save")
-                            if operation not in {"authoring-save", "segment-import", "segment-replace"}:
+                            if operation not in {"authoring-save", "browser-edit", "segment-import", "segment-replace"}:
                                 raise BentoConverterError("Unsupported authoring save operation")
                             report_details = payload.get("operationReport")
                             if report_details is not None and not isinstance(report_details, dict):

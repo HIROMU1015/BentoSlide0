@@ -69,6 +69,11 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
         storage = self.storage()
         before_runtime = runtime_fingerprint(load_html(self.target))
         status = storage.status()
+        self.assertEqual(set(status["artifactPaths"]), {
+            "output/presentation.authoring.bento.html",
+            "output/presentation.authoring.bento.json",
+            "output/presentation.authoring.registry.json",
+        })
         html = load_html(self.target)
         document = extract_bento_doc(html)
         self.title(document)["html"] = "Authoring text"
@@ -101,6 +106,78 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
         self.assertEqual(storage._backups(), [])
         report_after = storage.report_path.read_bytes() if storage.report_path.exists() else None
         self.assertEqual(report_after, report_before)
+
+    def test_scoped_browser_save_preserves_unrequested_slides_and_reports_discarded_drift(self) -> None:
+        storage = self.storage()
+        status = storage.status()
+        html = load_html(self.target)
+        current = extract_bento_doc(html)
+        submitted = copy.deepcopy(current)
+        self.title(submitted)["html"] = "Scoped browser edit"
+        submitted["slides"][1]["elements"][0]["x"] += 7
+
+        result = storage.save_serialized(
+            embed_bento_doc(html, submitted),
+            base_document_revision=status["documentRevision"],
+            base_registry_revision=status["registryRevision"],
+            scoped_slide_ids={"demo-slide-1"}, operation="browser-edit",
+        )
+
+        saved = extract_bento_doc(load_html(self.target))
+        self.assertEqual(self.title(saved)["html"], "Scoped browser edit")
+        self.assertEqual(saved["slides"][1], current["slides"][1])
+        self.assertEqual(result["savedChangedSlideIds"], ["demo-slide-1"])
+        self.assertEqual(result["submittedChangedSlideIds"], ["demo-slide-1", "demo-slide-2"])
+        self.assertEqual(result["discardedSlideIds"], ["demo-slide-2"])
+        report = json.loads(storage.report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["scope"]["discardedSlideIds"], ["demo-slide-2"])
+
+    def test_scoped_browser_save_is_no_op_when_only_unrequested_runtime_drift_exists(self) -> None:
+        storage = self.storage()
+        status = storage.status()
+        html = load_html(self.target)
+        current = extract_bento_doc(html)
+        submitted = copy.deepcopy(current)
+        submitted["slides"][1]["elements"][0]["x"] += 3
+
+        result = storage.save_serialized(
+            embed_bento_doc(html, submitted),
+            base_document_revision=status["documentRevision"],
+            base_registry_revision=status["registryRevision"],
+            scoped_slide_ids={"demo-slide-1"}, operation="browser-edit",
+        )
+
+        self.assertTrue(result["noOp"])
+        self.assertEqual(result["savedChangedSlideIds"], [])
+        self.assertEqual(result["discardedSlideIds"], ["demo-slide-2"])
+        self.assertEqual(extract_bento_doc(load_html(self.target)), current)
+        self.assertEqual(storage._backups(), [])
+
+    def test_scoped_browser_save_rejects_deck_structure_and_discards_document_level_changes(self) -> None:
+        storage = self.storage()
+        status = storage.status()
+        html = load_html(self.target)
+        current = extract_bento_doc(html)
+        reordered = copy.deepcopy(current)
+        reordered["slides"].reverse()
+        with self.assertRaisesRegex(ValidationError, "add, remove, or reorder"):
+            storage.save_serialized(
+                embed_bento_doc(html, reordered),
+                base_document_revision=status["documentRevision"],
+                base_registry_revision=status["registryRevision"],
+                scoped_slide_ids={"demo-slide-1"}, operation="browser-edit",
+            )
+        deck_level = copy.deepcopy(current)
+        deck_level["title"] = str(deck_level.get("title", "")) + " changed"
+        result = storage.save_serialized(
+            embed_bento_doc(html, deck_level),
+            base_document_revision=status["documentRevision"],
+            base_registry_revision=status["registryRevision"],
+            scoped_slide_ids={"demo-slide-1"}, operation="browser-edit",
+        )
+        self.assertTrue(result["noOp"])
+        self.assertEqual(result["discardedDocumentFields"], ["title"])
+        self.assertEqual(extract_bento_doc(load_html(self.target)), current)
 
     def test_document_and_registry_base_revisions_are_both_required(self) -> None:
         storage = self.storage()
@@ -458,6 +535,11 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
             self.assertEqual((code, status["editingMode"]), (200, "authoring"))
             self.assertEqual(Path(status["repository"]), self.root)
             self.assertEqual(status["sourceOfTruth"], "output/presentation.authoring.bento.html")
+            code, raw = get("/api/revision")
+            revision_status = json.loads(raw)
+            self.assertEqual((code, revision_status["editingMode"]), (200, "authoring"))
+            self.assertEqual(revision_status["documentRevision"], status["documentRevision"])
+            self.assertEqual(revision_status["registryRevision"], status["registryRevision"])
             html = load_html(self.target)
             document = extract_bento_doc(html)
             self.title(document)["html"] = "API edit"
@@ -484,6 +566,22 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
                 "baseRegistryRevision": saved["registryRevision"],
             })
             self.assertEqual((code, reverted["reverted"]), (200, True))
+            code, raw = get("/api/status")
+            scoped_status = json.loads(raw)
+            scoped_html = load_html(self.target)
+            scoped_document = extract_bento_doc(scoped_html)
+            self.title(scoped_document)["html"] = "Scoped API edit"
+            scoped_document["slides"][1]["elements"][0]["x"] += 5
+            code, scoped_saved = post("/api/save", {
+                "baseDocumentRevision": scoped_status["documentRevision"],
+                "baseRegistryRevision": scoped_status["registryRevision"],
+                "serializedHtml": embed_bento_doc(scoped_html, scoped_document),
+                "scopedSlideIds": ["demo-slide-1"],
+                "operation": "browser-edit",
+            })
+            self.assertEqual(code, 200)
+            self.assertEqual(scoped_saved["savedChangedSlideIds"], ["demo-slide-1"])
+            self.assertEqual(scoped_saved["discardedSlideIds"], ["demo-slide-2"])
             self.assertIn("bento-work-editor-mode", get("/")[1])
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=5)

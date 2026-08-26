@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -19,6 +20,8 @@ from .errors import BentoConverterError
 
 JOURNAL_FORMAT = "bento/artifact-transaction/v1"
 JOURNAL_STATES = {"preparing", "prepared", "replacing", "committed", "report_failed", "rolled_back"}
+REPLACE_RETRY_DELAYS_SECONDS = (0.05, 0.1, 0.2, 0.4, 0.8)
+TRANSIENT_WINDOWS_REPLACE_ERRORS = {5, 32, 33}
 
 
 class ArtifactLeaseConflict(BentoConverterError):
@@ -68,6 +71,31 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+def _transient_replace_error(exc: OSError) -> bool:
+    """Return whether a replace failed because Windows temporarily holds a file."""
+
+    winerror = getattr(exc, "winerror", None)
+    return (
+        winerror in TRANSIENT_WINDOWS_REPLACE_ERRORS
+        or isinstance(exc, PermissionError)
+        and getattr(exc, "errno", None) in {errno.EACCES, errno.EPERM}
+    )
+
+
+def _replace_with_retry(source: str | Path, destination: str | Path) -> None:
+    """Atomically replace a path, retrying only transient Windows access failures."""
+
+    for delay in REPLACE_RETRY_DELAYS_SECONDS:
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            if not _transient_replace_error(exc):
+                raise
+            time.sleep(delay)
+    os.replace(source, destination)
+
+
 def _write_bytes_fsync(destination: Path, payload: bytes) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     handle = tempfile.NamedTemporaryFile(
@@ -79,7 +107,7 @@ def _write_bytes_fsync(destination: Path, payload: bytes) -> None:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, destination)
+        _replace_with_retry(temporary, destination)
         _fsync_directory(destination.parent)
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -89,6 +117,12 @@ def _write_bytes_fsync(destination: Path, payload: bytes) -> None:
 def _write_json_fsync(destination: Path, value: dict[str, Any]) -> None:
     payload = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
     _write_bytes_fsync(destination, payload)
+
+
+def write_json_atomic(destination: str | Path, value: dict[str, Any]) -> None:
+    """Atomically persist a JSON report using the transaction layer's durable writer."""
+
+    _write_json_fsync(Path(destination).resolve(), value)
 
 
 class OsFileLock:
@@ -345,7 +379,7 @@ class ArtifactTransactionStore:
         source = self._journal_path(journal["transactionId"])
         self.archive_dir.mkdir(parents=True, exist_ok=True)
         destination = self.archive_dir / source.name
-        os.replace(source, destination)
+        _replace_with_retry(source, destination)
         _fsync_directory(self.archive_dir)
         for artifact in journal["artifacts"]:
             Path(artifact["temporary"]).unlink(missing_ok=True)
@@ -373,12 +407,19 @@ class ArtifactTransactionStore:
         for artifact in journal["artifacts"]:
             target = Path(artifact["target"])
             old_revision = artifact["oldRevision"]
+            state = self._artifact_state(artifact)
+            if state == "old":
+                continue
+            if state != "new":
+                raise ArtifactRecoveryError(
+                    f"Cannot safely roll back {target}: target matches neither the old nor new revision"
+                )
             if old_revision is None:
                 target.unlink(missing_ok=True)
             else:
                 backup = Path(artifact["backup"])
                 rollback_temp = _write_staged_file(target, backup.read_bytes(), journal["transactionId"], "rollback")
-                os.replace(rollback_temp, target)
+                _replace_with_retry(rollback_temp, target)
                 _fsync_directory(target.parent)
             if file_revision(target) != old_revision:
                 raise ArtifactRecoveryError(f"Rollback revision mismatch for {target}")
@@ -495,6 +536,10 @@ class ArtifactTransactionStore:
                 resolved_report.relative_to(self.repository)
             except ValueError as exc:
                 raise BentoConverterError(f"Transaction report escapes the repository: {resolved_report}") from exc
+            if resolved_report in self.artifacts:
+                raise BentoConverterError(
+                    f"Transaction report must not overwrite a transaction artifact: {resolved_report}"
+                )
         transaction_id = uuid.uuid4().hex
         journal: dict[str, Any] = {
             "format": JOURNAL_FORMAT, "transactionId": transaction_id, "operation": operation,
@@ -534,7 +579,7 @@ class ArtifactTransactionStore:
                 self._fault("prepared", journal)
                 self._set_state(journal, "replacing")
                 for index, artifact in enumerate(journal["artifacts"]):
-                    os.replace(artifact["temporary"], artifact["target"])
+                    _replace_with_retry(artifact["temporary"], artifact["target"])
                     _fsync_directory(Path(artifact["target"]).parent)
                     artifact["replaced"] = True
                     self._persist(journal)

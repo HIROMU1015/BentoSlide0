@@ -16,13 +16,17 @@ output/html-preview-session.json
 output/html-preview-launcher.lock
 output/html-preview*.log
 output/.bento-cache/
+/.bento-cache/
 output/.bento-transactions/
 output/html-change-proposals/
 output/html-change-reviews/
+output/conversion-repair/
 **/.bento-html-change-*.candidate.html
 **/.bento-html-change-*.candidate.registry.json
 sources/private/*
 !sources/private/.gitkeep
+sources/repositories/*
+!sources/repositories/.gitkeep
 images/user/*
 !images/user/.gitkeep
 images/extracted/*

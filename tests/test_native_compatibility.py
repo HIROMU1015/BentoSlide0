@@ -53,6 +53,19 @@ class NativeCompatibilityTests(unittest.TestCase):
         unsafe_svg = item(type="svg", tag="svg", outerHTML="<svg><foreignObject><canvas></canvas></foreignObject></svg>")
         self.assertEqual(classify_native_compatibility(unsafe_svg).classification, "image-required")
 
+    def test_text_bearing_shape_and_annotated_group_remain_native_decompositions(self) -> None:
+        shape = item(type="shape", text="Label")
+        group = item(type="text", text="Card contents", hasExplicitDescendants=True)
+        self.assertEqual(classify_native_compatibility(shape).classification, "native-with-adjustment")
+        self.assertEqual(classify_native_compatibility(group).classification, "native-with-adjustment")
+
+    def test_unsupported_text_container_requires_background_only_capture(self) -> None:
+        candidate = item(
+            type="shape", text="Editable", hasExplicitDescendants=True,
+            style={**item()["style"], "filter": "blur(2px)"},
+        )
+        self.assertEqual(classify_native_compatibility(candidate).classification, "background-image-required")
+
     def test_slide_gradient_is_background_adjustment(self) -> None:
         result = classify_slide_background({"backgroundStyle": {"backgroundImage": "linear-gradient(90deg, red, blue)"}})
         self.assertEqual(result.classification, "native-with-adjustment")

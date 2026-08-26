@@ -270,11 +270,20 @@ class WorkEditorTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertIn("bento-work-editor", page)
             self.assertNotIn("bento-work-editor", load_html(storage.target))
+            _, revision_payload = self.get(base + "/api/revision")
             _, status_payload = self.get(base + "/api/status")
             _, document_payload = self.get(base + "/api/document")
+            revision_json = json.loads(revision_payload)
             status_json = json.loads(status_payload)
             document_json = json.loads(document_payload)
+            self.assertEqual(revision_json["revision"], status_json["revision"])
+            self.assertEqual(revision_json["editingMode"], "finalization")
             self.assertEqual(status_json["revision"], document_json["revision"])
+            self.assertEqual(set(status_json["artifactPaths"]), {
+                "presentation.final.bento.html",
+                "presentation.final.bento.json",
+                "merged-registry.json",
+            })
             html, revision, _ = self.edited_html(storage)
             code, saved = self.post(base + "/api/save", {"baseRevision": revision, "serializedHtml": html})
             self.assertEqual(code, 200)
@@ -551,12 +560,16 @@ class WorkEditorBrowserTests(unittest.TestCase):
                 page.locator("#work-save-validate").click()
                 page.wait_for_function("document.querySelector('#bento-work-editor-status').textContent.includes('検証済み')")
                 request_counts = page.evaluate("window.__workEditorRequestCounts")
-                with page.expect_navigation(wait_until="load"):
-                    page.locator("#work-reload").click()
-                page.wait_for_function("document.querySelector('#work-save') && !document.querySelector('#work-save').disabled")
-                with page.expect_navigation(wait_until="load"):
-                    page.locator("#work-revert").click()
-                page.wait_for_function("document.querySelector('#work-save') && !document.querySelector('#work-save').disabled")
+                page.locator("#work-reload").click()
+                page.wait_for_function(
+                    "document.querySelector('#bento-work-editor-status').textContent.includes('画面に反映しました')"
+                )
+                page.locator("#work-revert").click()
+                page.wait_for_function(
+                    "expected => window.bento.doc.slides.flatMap(s=>s.elements)"
+                    ".find(e=>e.type==='shape').x === expected",
+                    arg=before,
+                )
 
                 after = page.evaluate("window.bento.doc.slides.flatMap(s=>s.elements).find(e=>e.type==='shape').x")
                 serialized = page.evaluate("""() => {
@@ -606,6 +619,111 @@ class WorkEditorBrowserTests(unittest.TestCase):
             self.assertEqual(storage.status()["revision"], revision_before)
             self.assertEqual(runtime_fingerprint(load_html(storage.target)), runtime_before)
             self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), generated_hash)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_external_save_loads_in_place_repeatedly_and_preserves_dirty_page(self) -> None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(str(exc))
+
+        storage = self.storage()
+        server, thread, base = self.running_server(storage)
+
+        def external_move(delta: int) -> tuple[dict, int | float]:
+            html = load_html(storage.target)
+            document = extract_bento_doc(html)
+            shape = next(
+                element for slide in document["slides"] for element in slide["elements"]
+                if element["type"] == "shape"
+            )
+            shape["x"] += delta
+            result = storage.save_serialized(
+                embed_bento_doc(html, document), base_revision=storage.status()["revision"],
+            )
+            return result, shape["x"]
+
+        try:
+            with sync_playwright() as playwright:
+                executable = find_browser_executable()
+                browser = playwright.chromium.launch(
+                    headless=True, **({"executable_path": str(executable)} if executable else {}),
+                )
+                page = browser.new_page(viewport={"width": 1400, "height": 900})
+                page.goto(base + "/", wait_until="load")
+                page.wait_for_function(
+                    "window.bento && document.querySelector('#work-save') && "
+                    "!document.querySelector('#work-save').disabled"
+                )
+                page.evaluate("window.__workEditorPageMarker = 'same-page'")
+                page.evaluate("""() => {
+                  const doc = JSON.parse(JSON.stringify(window.bento.doc));
+                  doc.modified = '2099-01-01T00:00:00.000Z';
+                  if (!window.bento.loadDoc(JSON.stringify(doc))) throw new Error('loadDoc failed');
+                }""")
+
+                saved_result, saved_x = external_move(7)
+                page.wait_for_function(
+                    "expected => window.bento.doc.slides.flatMap(s=>s.elements)"
+                    ".find(e=>e.type==='shape').x === expected",
+                    arg=saved_x,
+                )
+                page.wait_for_function(
+                    "expected => document.querySelector('#bento-work-editor-status').textContent.includes(expected)",
+                    arg=saved_result["revision"],
+                )
+                current_x = page.evaluate(
+                    "window.bento.doc.slides.flatMap(s=>s.elements).find(e=>e.type==='shape').x"
+                )
+                self.assertEqual(
+                    current_x, saved_x,
+                    msg=page.locator("#bento-work-editor-status").inner_text(),
+                )
+                self.assertEqual(page.evaluate("window.__workEditorPageMarker"), "same-page")
+
+                repeated_result, repeated_saved_x = external_move(3)
+                page.wait_for_function(
+                    "expected => window.bento.doc.slides.flatMap(s=>s.elements)"
+                    ".find(e=>e.type==='shape').x === expected",
+                    arg=repeated_saved_x,
+                )
+                page.wait_for_function(
+                    "expected => document.querySelector('#bento-work-editor-status').textContent.includes(expected)",
+                    arg=repeated_result["revision"],
+                )
+                self.assertEqual(page.evaluate("window.__workEditorPageMarker"), "same-page")
+
+                local_x = page.evaluate("""() => {
+                  const doc = JSON.parse(JSON.stringify(window.bento.doc));
+                  const shape = doc.slides.flatMap(s=>s.elements).find(e=>e.type==='shape');
+                  shape.x += 1;
+                  if (!window.bento.loadDoc(JSON.stringify(doc))) throw new Error('loadDoc failed');
+                  return shape.x;
+                }""")
+                _, newer_saved_x = external_move(5)
+                page.wait_for_function(
+                    "document.querySelector('#bento-work-editor-status').textContent.includes('未保存')"
+                )
+                status_text = page.locator("#bento-work-editor-status").inner_text()
+                self.assertIn(
+                    "未保存", status_text,
+                    msg=(
+                        f"url={page.url!r}, "
+                        f"x={page.evaluate('window.bento.doc.slides.flatMap(s=>s.elements).find(e=>e.type===\"shape\").x')!r}, "
+                        f"local={local_x!r}, saved={newer_saved_x!r}"
+                    ),
+                )
+                self.assertEqual(
+                    page.evaluate(
+                        "window.bento.doc.slides.flatMap(s=>s.elements).find(e=>e.type==='shape').x"
+                    ),
+                    local_x,
+                )
+                self.assertNotEqual(local_x, newer_saved_x)
+                browser.close()
         finally:
             server.shutdown()
             server.server_close()

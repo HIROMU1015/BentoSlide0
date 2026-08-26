@@ -523,6 +523,23 @@ class WorkEditorStorage:
         return html
 
     @_locked
+    def revision_status(self) -> dict[str, Any]:
+        """Return the current saved revision without running full editor validation."""
+
+        if not self.writer_lease_acquired:
+            self.transactions.recover()
+        if not self.sidecar.is_file():
+            raise BentoConverterError("Final revision snapshot is incomplete")
+        document = json.loads(self.sidecar.read_text(encoding="utf-8-sig"))
+        revision = document_revision(document)
+        return {
+            "revision": revision,
+            "documentRevision": revision,
+            "registryRevision": None,
+            "editingMode": self.editing_mode,
+        }
+
+    @_locked
     def status(self) -> dict[str, Any]:
         # A running server owns the writer lease for its lifetime, so no other
         # conforming writer can create a journal between requests. Offline
@@ -544,6 +561,10 @@ class WorkEditorStorage:
         except ValueError:
             display_target = self.target.name
         revision = document_revision(document)
+        artifact_paths = [
+            path.relative_to(self.repository).as_posix()
+            for path in self.transactions.artifacts
+        ]
         return {
             "target": display_target, "revision": revision,
             "documentRevision": revision,
@@ -551,6 +572,7 @@ class WorkEditorStorage:
             "backupCount": len(self._backups()), "validation": validation,
             "editingMode": self.editing_mode, "sourceOfTruth": display_target,
             "repository": str(self.repository),
+            "artifactPaths": artifact_paths,
         }
 
     @_locked

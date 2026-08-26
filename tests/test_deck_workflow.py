@@ -18,7 +18,9 @@ from bento_converter.errors import ValidationError
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, serialize_bento_doc
 from bento_converter.work_editor_storage import WorkEditorStorage
 from scripts.deck_workflow import (
+    PlanningRevisionConflict,
     WorkflowError,
+    _effective_state,
     _normalize_handoff,
     atomic_write_state,
     command_approve_chapter,
@@ -32,7 +34,9 @@ from scripts.deck_workflow import (
     command_block,
     command_complete,
     command_complete_chapter,
+    command_capture_request,
     command_configure_chapters,
+    command_configure_sections,
     command_initialize,
     command_mark_converted,
     command_migrate,
@@ -43,15 +47,19 @@ from scripts.deck_workflow import (
     command_resume,
     command_set_project,
     command_submit_plan,
+    command_write_planning_artifacts,
     authoring_storage,
     discover_source_candidates,
     load_state,
     load_final_baseline,
     parser,
+    planning_review_signature,
     run,
     validate_chapters,
+    validate_current_stage,
     validate_output_bundle,
     validate_state,
+    valid_actions,
 )
 from scripts.bento_segment import run as run_segment
 
@@ -100,6 +108,19 @@ class ProjectMetadataCommandTests(unittest.TestCase):
         _normalize_handoff(state)
         atomic_write_state(self.root, state)
 
+    def prepare_revision_bound_plan(self) -> None:
+        (self.root / "REQUEST.md").write_text(
+            "# Request\n\nBuild a workflow explanation.\n", encoding="utf-8",
+        )
+        for filename, content in (
+            ("explanation-policy.md", "# Policy\n\nExplain only verified behavior.\n"),
+            ("story-outline.md", "# Story\n\nRequest, review, and final output.\n"),
+            ("slide-plan.md", "# Plan\n\nOne complete workflow section.\n"),
+        ):
+            (self.root / "planning" / filename).write_text(content, encoding="utf-8")
+        self.set_stage("planning", "in_progress", "planning")
+        command_configure_sections(self.root, self.state(), ("workflow",))
+
     def test_set_project_updates_only_metadata_in_initialized(self) -> None:
         before = self.state()
         expected = copy.deepcopy(before)
@@ -110,7 +131,11 @@ class ProjectMetadataCommandTests(unittest.TestCase):
                 self.root, before,
                 kind="workflow_explainer", title="BentoSlideができるまで",
             )
-        replace.assert_called_once()
+        deck_replaces = [
+            call for call in replace.call_args_list
+            if Path(call.args[1]).resolve() == (self.root / "deck.yaml").resolve()
+        ]
+        self.assertEqual(len(deck_replaces), 1)
         self.assertEqual(self.state(), expected)
         self.assertFalse(list(self.root.glob(".deck.*.yaml.tmp")))
         self.assertIn("workflow_explainer", (self.root / "planning/work-log.md").read_text(encoding="utf-8"))
@@ -167,6 +192,232 @@ class ProjectMetadataCommandTests(unittest.TestCase):
         project = self.state()["project"]
         self.assertEqual(project["kind"], "workflow_explainer")
         self.assertEqual(project["title"], "BentoSlideができるまで")
+
+
+    def test_plan_approval_is_bound_to_exact_reviewed_material(self) -> None:
+        self.prepare_revision_bound_plan()
+        command_submit_plan(self.root, self.state())
+        submitted = self.state()
+        review = submitted["approvals"]["planReview"]
+        self.assertEqual(review["format"], "bento/planning-review/v1")
+        self.assertEqual(review["status"], "submitted")
+        self.assertEqual(review["signature"], planning_review_signature(self.root, submitted))
+        self.assertIsNone(review["approvedAt"])
+
+        command_approve_plan(self.root, submitted)
+        approved = self.state()
+        self.assertEqual(approved["workflow"]["stage"], "html_authoring")
+        self.assertEqual(approved["approvals"]["planReview"]["status"], "approved")
+        self.assertIsNotNone(approved["approvals"]["planReview"]["approvedAt"])
+
+    def test_plan_approval_rejects_changed_plan_until_resubmitted(self) -> None:
+        self.prepare_revision_bound_plan()
+        command_submit_plan(self.root, self.state())
+        first_signature = self.state()["approvals"]["planReview"]["signature"]
+        (self.root / "planning/slide-plan.md").write_text(
+            "# Plan\n\nA materially revised two-part workflow.\n", encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(PlanningRevisionConflict, "changed after review opened"):
+            command_approve_plan(self.root, self.state())
+        with self.assertRaisesRegex(PlanningRevisionConflict, "changed after review opened"):
+            validate_current_stage(self.root, self.state())
+        stale = self.state()
+        self.assertEqual(stale["workflow"]["stage"], "awaiting_plan_approval")
+        self.assertEqual(stale["approvals"]["planReview"]["signature"], first_signature)
+
+        command_submit_plan(self.root, stale)
+        refreshed = self.state()
+        self.assertNotEqual(refreshed["approvals"]["planReview"]["signature"], first_signature)
+        command_approve_plan(self.root, refreshed)
+        self.assertEqual(self.state()["workflow"]["stage"], "html_authoring")
+
+    def test_status_derives_stale_plan_review_without_mutating_saved_evidence(self) -> None:
+        self.prepare_revision_bound_plan()
+        command_submit_plan(self.root, self.state())
+        stored = self.state()
+        submitted_review = copy.deepcopy(stored["approvals"]["planReview"])
+        (self.root / "planning/story-outline.md").write_text(
+            "# Story\n\nA changed narrative after review opened.\n", encoding="utf-8",
+        )
+
+        effective = _effective_state(self.root, stored)
+
+        self.assertIsNone(effective["approvals"]["planReview"])
+        self.assertEqual(valid_actions(effective), ["edit-current", "advance"])
+        self.assertEqual(self.state()["approvals"]["planReview"], submitted_review)
+
+    def test_missing_schema_v2_review_requires_resubmission_but_remains_recoverable(self) -> None:
+        self.prepare_revision_bound_plan()
+        command_submit_plan(self.root, self.state())
+        state = self.state()
+        state["approvals"]["planReview"] = None
+        atomic_write_state(self.root, state)
+
+        with self.assertRaisesRegex(PlanningRevisionConflict, "submit the current plan again"):
+            validate_current_stage(self.root, self.state())
+        command_submit_plan(self.root, self.state())
+        command_approve_plan(self.root, self.state())
+        self.assertEqual(self.state()["workflow"]["stage"], "html_authoring")
+
+    def test_plan_approval_also_binds_request_source_and_section_order(self) -> None:
+        self.prepare_revision_bound_plan()
+        command_configure_sections(self.root, self.state(), ("workflow", "summary"))
+        command_submit_plan(self.root, self.state())
+        submitted_signature = self.state()["approvals"]["planReview"]["signature"]
+
+        (self.root / "sources/private/spec.md").write_text(
+            "# Fixture source\n\nChanged after review.\n", encoding="utf-8",
+        )
+        with self.assertRaises(PlanningRevisionConflict):
+            command_approve_plan(self.root, self.state())
+        self.assertNotEqual(
+            planning_review_signature(self.root, self.state()), submitted_signature,
+        )
+
+        command_configure_sections(self.root, self.state(), ("summary", "workflow"))
+        reordered = self.state()
+        self.assertEqual(reordered["workflow"]["stage"], "planning")
+        self.assertIsNone(reordered["approvals"]["planReview"])
+
+    def test_safe_planning_writer_invalidates_pending_review_transactionally(self) -> None:
+        self.prepare_revision_bound_plan()
+        command_submit_plan(self.root, self.state())
+        command_write_planning_artifacts(
+            self.root,
+            self.state(),
+            {
+                "story-outline": b"# Story\n\nA revised, complete narrative.\n",
+                "slide-plan": b"# Plan\n\nA revised, complete slide sequence.\n",
+            },
+        )
+        updated = self.state()
+        self.assertEqual(updated["workflow"]["stage"], "planning")
+        self.assertIsNone(updated["approvals"]["planReview"])
+        self.assertIn(
+            "revised, complete narrative",
+            (self.root / "planning/story-outline.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "revised, complete slide sequence",
+            (self.root / "planning/slide-plan.md").read_text(encoding="utf-8"),
+        )
+
+    def test_request_capture_invalidates_a_pending_plan_review(self) -> None:
+        self.prepare_revision_bound_plan()
+        command_submit_plan(self.root, self.state())
+        command_capture_request(
+            self.root, self.state(), text="Build the revised workflow explanation.",
+        )
+        updated = self.state()
+        self.assertEqual(updated["workflow"]["stage"], "planning")
+        self.assertIsNone(updated["approvals"]["planReview"])
+        self.assertIn(
+            "Build the revised workflow explanation.",
+            (self.root / "REQUEST.md").read_text(encoding="utf-8"),
+        )
+
+    def test_stale_request_capture_preserves_an_already_approved_plan_review(self) -> None:
+        self.prepare_revision_bound_plan()
+        command_submit_plan(self.root, self.state())
+        stale_submitted = self.state()
+        command_approve_plan(self.root, self.state())
+        approved_review = copy.deepcopy(self.state()["approvals"]["planReview"])
+
+        command_capture_request(
+            self.root, stale_submitted, text="Record a late clarification without reopening planning.",
+        )
+
+        updated = self.state()
+        self.assertEqual(updated["workflow"]["stage"], "html_authoring")
+        self.assertEqual(updated["approvals"]["planReview"], approved_review)
+        self.assertIn(
+            "Record a late clarification without reopening planning.",
+            (self.root / "REQUEST.md").read_text(encoding="utf-8"),
+        )
+
+    def test_request_capture_refuses_an_overlapping_state_writer(self) -> None:
+        self.prepare_revision_bound_plan()
+        before_request = (self.root / "REQUEST.md").read_bytes()
+        with WriterLease(self.root, (self.root / "deck.yaml",)):
+            with self.assertRaisesRegex(PlanningRevisionConflict, "Another process"):
+                command_capture_request(
+                    self.root, self.state(), text="A competing request update.",
+                )
+        self.assertEqual((self.root / "REQUEST.md").read_bytes(), before_request)
+
+    def test_request_capture_transaction_failure_preserves_request_and_review(self) -> None:
+        self.prepare_revision_bound_plan()
+        command_submit_plan(self.root, self.state())
+        before_request = (self.root / "REQUEST.md").read_bytes()
+        before_state = (self.root / "deck.yaml").read_bytes()
+
+        with mock.patch(
+            "scripts.deck_workflow.ArtifactTransactionStore.commit",
+            side_effect=RuntimeError("simulated request transaction failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated request transaction failure"):
+                command_capture_request(
+                    self.root, self.state(), text="This request must not become visible.",
+                )
+
+        self.assertEqual((self.root / "REQUEST.md").read_bytes(), before_request)
+        self.assertEqual((self.root / "deck.yaml").read_bytes(), before_state)
+
+    def test_legacy_plan_validation_does_not_require_schema_v2_review_metadata(self) -> None:
+        self.prepare_revision_bound_plan()
+        shutil.copy2(ROOT / "tests/fixtures/deck_v1.yaml", self.root / "deck.yaml")
+        self.set_stage("awaiting_plan_approval", "awaiting_approval", "planning")
+
+        validate_current_stage(self.root, self.state())
+
+    def test_planning_writer_refuses_an_overlapping_writer_lease(self) -> None:
+        self.prepare_revision_bound_plan()
+        plan_path = self.root / "planning/slide-plan.md"
+        with WriterLease(self.root, (plan_path,)):
+            with self.assertRaisesRegex(PlanningRevisionConflict, "Another process"):
+                command_write_planning_artifacts(
+                    self.root,
+                    self.state(),
+                    {"slide-plan": b"# Plan\n\nA competing update.\n"},
+                )
+        self.assertNotIn("competing", plan_path.read_text(encoding="utf-8"))
+
+    def test_safe_planning_writer_leaves_files_unchanged_when_commit_fails(self) -> None:
+        self.prepare_revision_bound_plan()
+        before_state = (self.root / "deck.yaml").read_bytes()
+        before_plan = (self.root / "planning/slide-plan.md").read_bytes()
+        with mock.patch(
+            "scripts.deck_workflow.ArtifactTransactionStore.commit",
+            side_effect=RuntimeError("simulated transaction failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated transaction failure"):
+                command_write_planning_artifacts(
+                    self.root,
+                    self.state(),
+                    {"slide-plan": b"# Plan\n\nThis write must not become visible.\n"},
+                )
+        self.assertEqual((self.root / "deck.yaml").read_bytes(), before_state)
+        self.assertEqual((self.root / "planning/slide-plan.md").read_bytes(), before_plan)
+
+    def test_planning_bundle_cli_writes_known_files_together(self) -> None:
+        self.prepare_revision_bound_plan()
+        bundle = self.root / "scratch/planning-bundle"
+        bundle.mkdir(parents=True)
+        for filename in ("explanation-policy.md", "story-outline.md", "slide-plan.md"):
+            (bundle / filename).write_text(
+                f"# Updated\n\nTransactional content for {filename}.\n", encoding="utf-8",
+            )
+        args = parser().parse_args([
+            "--root", str(self.root), "write-planning-artifacts",
+            "--from-directory", "scratch/planning-bundle",
+        ])
+        self.assertEqual(run(args), 0)
+        for filename in ("explanation-policy.md", "story-outline.md", "slide-plan.md"):
+            self.assertIn(
+                f"Transactional content for {filename}",
+                (self.root / "planning" / filename).read_text(encoding="utf-8"),
+            )
 
 
 class DeckWorkflowTests(unittest.TestCase):
@@ -455,6 +706,57 @@ class DeckWorkflowTests(unittest.TestCase):
         self.write_state(state)
         with self.assertRaisesRegex(WorkflowError, "not complete"):
             command_prepare_conversion(self.root, self.state())
+
+    def test_prepare_conversion_preflights_before_advancing_or_building(self) -> None:
+        state = self.plan_to_authoring()
+        command_begin_chapter(self.root, state, "chapter-01")
+        self.add_chapter("chapter-01")
+        html = self.root / "chapters/chapter-01.preview.html"
+        html.write_text(
+            """<!doctype html><html><body><section class="slide" data-slide-id="chapter-01-slide">
+<div data-bento-id="card" data-bento-type="shape" data-bento-export="image" data-bento-fallback-scope="whole">Card
+  <span data-bento-id="card-label">Protected label</span>
+</div>
+</section></body></html>""",
+            encoding="utf-8",
+        )
+        registry_path = self.root / "chapters/chapter-01.registry.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry["equations"] = {}
+        registry["protected"] = {
+            "slideIds": ["chapter-01-slide"],
+            "elementIds": ["card-label"],
+            "requiredText": ["Protected label"],
+        }
+        registry_path.write_text(json.dumps(registry), encoding="utf-8")
+        command_complete_chapter(self.root, self.state(), "chapter-01")
+        command_approve_chapter(self.root, self.state(), "chapter-01")
+
+        with self.assertRaisesRegex(ValidationError, "whole-fallback-covers-editable-content"):
+            command_prepare_conversion(self.root, self.state())
+
+        unchanged = self.state()
+        self.assertEqual(unchanged["workflow"]["stage"], "ready_for_conversion")
+        self.assertFalse((self.root / "output/presentation.generated.bento.html").exists())
+        report = json.loads(
+            (self.root / "output/diagnostics/html-preflight.json").read_text(encoding="utf-8")
+        )
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["summary"]["errors"], 2)
+
+    def test_prepare_conversion_records_successful_preflight_before_transition(self) -> None:
+        state = self.plan_to_authoring()
+        state = self.author_and_approve(state, "chapter-01")
+
+        command_prepare_conversion(self.root, state)
+
+        self.assertEqual(self.state()["workflow"]["stage"], "converting")
+        report = json.loads(
+            (self.root / "output/diagnostics/html-preflight.json").read_text(encoding="utf-8")
+        )
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["summary"]["errors"], 0)
+        self.assertFalse((self.root / "output/presentation.generated.bento.html").exists())
 
     def test_mark_converted_initializes_missing_final_without_reset(self) -> None:
         state = self.ready_for_conversion()

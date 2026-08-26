@@ -135,6 +135,59 @@ slideIds => {
       const before = getComputedStyle(el, '::before');
       const after = getComputedStyle(el, '::after');
       const pseudoElementDependent = [before, after].some(pseudo => pseudo.content && !['none','normal','""'].includes(pseudo.content) && (pseudo.display !== 'none') && (Number.parseFloat(pseudo.opacity) || 1) > 0);
+      const explicitDescendants = [...el.querySelectorAll('[data-bento-id],[data-bento-type],[data-bento-export]')];
+      const residual = el.cloneNode(true);
+      residual.querySelectorAll('[data-bento-id],[data-bento-type],[data-bento-export]').forEach(child => child.remove());
+      const residualTextNodes = [];
+      const residualWalker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      while (residualWalker.nextNode()) {
+        const node = residualWalker.currentNode;
+        const owner = node.parentElement?.closest('[data-bento-id],[data-bento-type],[data-bento-export]');
+        if (node.textContent.trim() && owner === el) residualTextNodes.push(node);
+      }
+      let residualOwner = residualTextNodes[0]?.parentElement || null;
+      while (residualOwner && residualOwner !== el && residualTextNodes.some(node => !residualOwner.contains(node))) {
+        residualOwner = residualOwner.parentElement;
+      }
+      const residualRect = residualOwner && residualOwner !== el ? residualOwner.getBoundingClientRect() : null;
+      const residualComputed = residualOwner && residualOwner !== el ? getComputedStyle(residualOwner) : null;
+      const textFragments = inferred === 'text' && ['flex', 'inline-flex'].includes(cs.display)
+        ? [...el.children].filter(child => !child.matches('[data-bento-id],[data-bento-type],[data-bento-export]'))
+          .map((child, fragmentIndex) => {
+            const childRect = child.getBoundingClientRect();
+            const childStyle = getComputedStyle(child);
+            return {
+              index: fragmentIndex,
+              text: child.textContent.trim(),
+              html: child.innerHTML,
+              x:(childRect.left-sr.left)*sx, y:(childRect.top-sr.top)*sy,
+              w:childRect.width*sx, h:childRect.height*sy,
+              scrollWidth: child.scrollWidth*sx, scrollHeight: child.scrollHeight*sy,
+              style: {
+                color: childStyle.color,
+                fontSize: px(childStyle.fontSize),
+                fontFamily: childStyle.fontFamily,
+                fontWeight: Number.parseInt(childStyle.fontWeight, 10) || childStyle.fontWeight,
+                lineHeight: childStyle.lineHeight === 'normal' ? 1.2 : px(childStyle.lineHeight) / Math.max(px(childStyle.fontSize), 1),
+                letterSpacing: childStyle.letterSpacing === 'normal' ? 0 : px(childStyle.letterSpacing),
+                textAlign: childStyle.textAlign,
+                verticalAlign: childStyle.verticalAlign,
+                display: childStyle.display,
+                paddingLeft: px(childStyle.paddingLeft), paddingRight: px(childStyle.paddingRight),
+                paddingTop: px(childStyle.paddingTop), paddingBottom: px(childStyle.paddingBottom),
+                backgroundColor: childStyle.backgroundColor, backgroundImage: childStyle.backgroundImage,
+                borderColor: childStyle.borderColor, borderWidth: px(childStyle.borderWidth),
+                borderRadius: px(childStyle.borderRadius), boxShadow: childStyle.boxShadow,
+              },
+            };
+          }).filter(fragment => fragment.text)
+        : [];
+      const ancestorIds = [];
+      for (let parent = el.parentElement; parent && parent !== slide; parent = parent.parentElement) {
+        if (parent.matches('[data-bento-id],[data-bento-type],[data-bento-export]') && parent.dataset.bentoId) {
+          ancestorIds.push(parent.dataset.bentoId);
+        }
+      }
       return {
         id: el.dataset.bentoId || `auto-${slideIndex + 1}-${index + 1}`,
         domIndex: index,
@@ -179,6 +232,29 @@ slideIds => {
         z: Number.isFinite(Number.parseInt(el.dataset.bentoZ, 10)) ? Number.parseInt(el.dataset.bentoZ, 10) : (Number.parseInt(cs.zIndex, 10) || index),
         text: el.textContent.trim(),
         html: el.innerHTML,
+        residualText: residual.textContent.trim(),
+        residualHtml: residual.innerHTML,
+        residualFrame: residualRect ? {
+          x:(residualRect.left-sr.left)*sx, y:(residualRect.top-sr.top)*sy,
+          w:residualRect.width*sx, h:residualRect.height*sy,
+        } : null,
+        residualStyle: residualComputed ? {
+          color: residualComputed.color,
+          fontSize: px(residualComputed.fontSize),
+          fontFamily: residualComputed.fontFamily,
+          fontWeight: Number.parseInt(residualComputed.fontWeight, 10) || residualComputed.fontWeight,
+          lineHeight: residualComputed.lineHeight === 'normal' ? 1.2 : px(residualComputed.lineHeight) / Math.max(px(residualComputed.fontSize), 1),
+          letterSpacing: residualComputed.letterSpacing === 'normal' ? 0 : px(residualComputed.letterSpacing),
+          textAlign: residualComputed.textAlign,
+          verticalAlign: residualComputed.verticalAlign,
+          display: residualComputed.display,
+          flexDirection: residualComputed.flexDirection,
+          justifyContent: residualComputed.justifyContent,
+          alignItems: residualComputed.alignItems,
+          paddingLeft: 0, paddingRight: 0, paddingTop: 0, paddingBottom: 0,
+          backgroundColor: 'transparent', backgroundImage: 'none', borderWidth: 0, boxShadow: 'none',
+        } : null,
+        textFragments,
         outerHTML: el.outerHTML,
         svg: tag === 'svg' ? el.outerHTML : el.querySelector?.(':scope > svg')?.outerHTML || null,
         src: el.currentSrc || el.src || null,
@@ -191,6 +267,12 @@ slideIds => {
         chartOption,
         table,
         pseudoElementDependent,
+        ancestorIds,
+        hasExplicitDescendants: explicitDescendants.length > 0,
+        explicitDescendantIds: explicitDescendants.map(child => child.dataset.bentoId).filter(Boolean),
+        fallbackScope: el.dataset.bentoFallbackScope || (
+          explicitDescendants.length > 0 || residual.textContent.trim() ? 'background' : 'whole'
+        ),
         style: {
           color: cs.color,
           backgroundColor: cs.backgroundColor,
@@ -370,6 +452,7 @@ def extract_computed_layout(
                             reason for reason, active in (
                                 ("explicit-image-fallback", element["exportMode"] == "image"),
                                 ("image-required", compatibility.classification == "image-required"),
+                                ("background-image-required", compatibility.classification == "background-image-required"),
                                 ("skew-transform", element.get("transform", {}).get("hasSkew")),
                                 ("3d-transform", element.get("transform", {}).get("is3D")),
                             ) if active
@@ -394,11 +477,75 @@ def extract_computed_layout(
                                 fix="Use this data-bento-id exactly once inside the current slide; duplicate ids are allowed only on different slides for morph.",
                             ))
                             continue
-                        payload = explicit.screenshot(type="png")
+                        capture_scope = (
+                            "background"
+                            if compatibility.classification == "background-image-required"
+                            else element.get("fallbackScope") or "whole"
+                        )
+                        capture_token = f"{slide['id']}/{element['id']}"
+                        if capture_scope == "background":
+                            page.evaluate(
+                                """
+                                ({slideId, elementId, token}) => {
+                                  const slide = document.querySelector(`section.slide[data-slide-id="${CSS.escape(slideId)}"]`);
+                                  const roots = slide ? [...slide.querySelectorAll('[data-bento-id]')]
+                                    .filter(node => node.dataset.bentoId === elementId) : [];
+                                  if (roots.length !== 1) throw new Error(`Background capture root count is ${roots.length}`);
+                                  const root = roots[0];
+                                  const selector = '[data-bento-id],[data-bento-type],[data-bento-export]';
+                                  const records = [];
+                                  const change = (node, properties) => {
+                                    records.push({node, style: node.getAttribute('style')});
+                                    for (const [name, value] of Object.entries(properties)) {
+                                      node.style.setProperty(name, value, 'important');
+                                    }
+                                  };
+                                  for (const descendant of root.querySelectorAll(selector)) {
+                                    change(descendant, {visibility: 'hidden'});
+                                  }
+                                  for (const node of [root, ...root.querySelectorAll('*')]) {
+                                    if (node !== root && node.closest(selector) !== root) continue;
+                                    change(node, {
+                                      color: 'transparent',
+                                      '-webkit-text-fill-color': 'transparent',
+                                      'text-shadow': 'none',
+                                      'text-decoration-color': 'transparent',
+                                      'caret-color': 'transparent',
+                                    });
+                                  }
+                                  window.__bentoBackgroundCaptureRestores ||= new Map();
+                                  window.__bentoBackgroundCaptureRestores.set(token, records);
+                                }
+                                """,
+                                {"slideId": slide["id"], "elementId": element["id"], "token": capture_token},
+                            )
+                        try:
+                            payload = explicit.screenshot(type="png")
+                        finally:
+                            if capture_scope == "background":
+                                page.evaluate(
+                                    """
+                                    token => {
+                                      const records = window.__bentoBackgroundCaptureRestores?.get(token) || [];
+                                      for (const {node, style} of records.reverse()) {
+                                        if (style === null) node.removeAttribute('style');
+                                        else node.setAttribute('style', style);
+                                      }
+                                      window.__bentoBackgroundCaptureRestores?.delete(token);
+                                    }
+                                    """,
+                                    capture_token,
+                                )
                         fallback_key = f"{slide['id']}/{element['id']}"
                         fallback_value = "data:image/png;base64," + base64.b64encode(payload).decode("ascii")
                         image_fallbacks[fallback_key] = fallback_value
                         slide_fallbacks[fallback_key] = fallback_value
+                        element["fallbackCapture"] = {
+                            "scope": capture_scope,
+                            "reasons": capture_reasons,
+                            "excludedElementIds": list(element.get("explicitDescendantIds") or ()),
+                            "ownedTextExcluded": capture_scope == "background" and bool(element.get("residualText")),
+                        }
                     chapter_slides[slide_id] = slide
                     if cache:
                         cache.save_source(

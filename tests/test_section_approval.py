@@ -37,12 +37,15 @@ from scripts.deck_workflow import (
     command_cancel_html_change,
     command_check_html_change,
     command_propose_html_change,
+    command_propose_localized_html_change,
+    command_set_html_change_feedback,
     command_prepare_conversion,
     command_submit_plan,
     command_unlock_section,
     load_state,
     migrate_v1_state,
     parser as workflow_parser,
+    validate_state,
     validate_sections,
 )
 
@@ -292,6 +295,16 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
         self.assertTrue(all(entry["status"] == "approved" for entry in approved["sections"].values()))
         self.assertTrue(all(entry["approvalDigest"] for entry in approved["sections"].values()))
 
+        command_prepare_conversion(self.root, approved)
+
+        self.assertEqual(load_state(self.root)["workflow"]["stage"], "converting")
+        preflight = json.loads(
+            (self.root / "output/diagnostics/html-preflight.json").read_text(encoding="utf-8")
+        )
+        self.assertTrue(preflight["passed"])
+        self.assertEqual(preflight["summary"]["errors"], 0)
+        self.assertFalse((self.root / "output/presentation.generated.bento.html").exists())
+
     def test_adopt_existing_full_html_opens_one_review_without_changing_html(self) -> None:
         state = load_state(self.root)
         command_configure_sections(self.root, state, ["introduction", "method"])
@@ -407,6 +420,262 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
         screenshot_path.write_bytes(screenshot_payload)
         command_approve_html_deck(self.root, checked)
         self.assertEqual(load_state(self.root)["workflow"]["stage"], "ready_for_conversion")
+
+    def test_multiple_revision_bound_review_marks_persist_and_block_needs_work(self) -> None:
+        state = self.whole_deck_review()
+        canonical = (self.root / "deck/deck.preview.html").read_text(encoding="utf-8")
+        candidate = self.candidate(canonical.replace("Method", "Updated method"))
+        proposal = command_propose_html_change(
+            self.root, state, candidate_html=candidate, candidate_registry=None,
+            request="Update two review notes", summary="Update the method explanation",
+            impact_summary="Only the method slide changes",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        intro_id = load_state(self.root)["sections"]["introduction"]["slideIds"][0]
+        created = load_state(self.root)
+        self.assertEqual(
+            created["authoring"]["htmlChangeFeedback"]["slides"]["method-1"]["state"],
+            "pending",
+        )
+
+        command_set_html_change_feedback(
+            self.root, created,
+            proposal_id=proposal["proposalId"], proposal_digest=proposal["proposalDigest"],
+            slide_id="method-1", review_state="needs_work", viewed_version="candidate",
+            instruction="Make the method explanation shorter",
+        )
+        command_set_html_change_feedback(
+            self.root, load_state(self.root),
+            proposal_id=proposal["proposalId"], proposal_digest=proposal["proposalDigest"],
+            slide_id=intro_id, review_state="needs_work", viewed_version="canonical",
+            instruction="Make the introduction image larger",
+        )
+        persisted = load_state(self.root)["authoring"]["htmlChangeFeedback"]["slides"]
+        self.assertEqual(
+            {slide_id for slide_id, value in persisted.items() if value["state"] == "needs_work"},
+            {"method-1", intro_id},
+        )
+        self.assertEqual(persisted["method-1"]["instruction"], "Make the method explanation shorter")
+        with self.assertRaisesRegex(WorkflowError, "marked as needing work"):
+            command_approve_html_change(self.root, load_state(self.root))
+        with self.assertRaisesRegex(WorkflowError, "stale"):
+            command_set_html_change_feedback(
+                self.root, load_state(self.root),
+                proposal_id=proposal["proposalId"], proposal_digest="sha256:" + "0" * 64,
+                slide_id="method-1", review_state="reviewed", viewed_version="candidate",
+            )
+
+        for slide_id, review_state in (("method-1", "reviewed"), (intro_id, "pending")):
+            command_set_html_change_feedback(
+                self.root, load_state(self.root),
+                proposal_id=proposal["proposalId"], proposal_digest=proposal["proposalDigest"],
+                slide_id=slide_id, review_state=review_state, viewed_version="candidate",
+            )
+        command_approve_html_change(self.root, load_state(self.root))
+        command_cancel_html_change(self.root, load_state(self.root))
+        self.assertIsNone(load_state(self.root)["authoring"].get("htmlChangeFeedback"))
+
+    def test_saved_instruction_revises_active_candidate_without_losing_it_first(self) -> None:
+        state = self.whole_deck_review()
+        canonical_path = self.root / "deck/deck.preview.html"
+        canonical = canonical_path.read_text(encoding="utf-8")
+        first_candidate = self.candidate(canonical.replace("Method", "First candidate method"))
+        first = command_propose_html_change(
+            self.root, state, candidate_html=first_candidate, candidate_registry=None,
+            request="Update method", summary="First method candidate",
+            impact_summary="Only the method slide changes",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        command_set_html_change_feedback(
+            self.root, load_state(self.root),
+            proposal_id=first["proposalId"], proposal_digest=first["proposalDigest"],
+            slide_id="method-1", review_state="needs_work", viewed_version="candidate",
+            instruction="Shorten the method explanation and lead with the conclusion",
+        )
+        feedback = load_state(self.root)["authoring"]["htmlChangeFeedback"]
+        first_snapshot = (self.root / first["candidateHtml"]).read_text(encoding="utf-8")
+        fragment = self.root / "deck/method.revision.fragment.html"
+        fragment.write_text(
+            re.search(
+                r'<section class="slide" data-slide-id="method-1".*?</section>',
+                first_snapshot, re.DOTALL,
+            ).group(0).replace("First candidate method", "Revised candidate method"),
+            encoding="utf-8",
+        )
+
+        second = command_propose_localized_html_change(
+            self.root, load_state(self.root),
+            replacements={"method-1": fragment.relative_to(self.root)},
+            candidate_registry=None,
+            request="Revise from the saved preview feedback",
+            summary="Shorten the method explanation",
+            impact_summary="No wider change is recommended",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+            replace_feedback_digest=feedback["feedbackDigest"],
+        )
+
+        current = load_state(self.root)
+        self.assertEqual(current["authoring"]["htmlChange"]["proposalId"], second["proposalId"])
+        self.assertEqual(current["authoring"]["htmlChangeFeedback"]["format"], "bento/html-change-feedback/v2")
+        self.assertEqual(
+            current["authoring"]["htmlChangeFeedback"]["slides"]["method-1"]["state"],
+            "pending",
+        )
+        self.assertEqual(canonical_path.read_text(encoding="utf-8"), canonical)
+        self.assertIn(
+            "Revised candidate method",
+            (self.root / second["candidateHtml"]).read_text(encoding="utf-8"),
+        )
+        self.assertIn("Shorten the method explanation", second["request"])
+        archived = json.loads((self.root / first["proposalPath"]).read_text(encoding="utf-8"))
+        self.assertEqual(archived["supersededByProposalId"], second["proposalId"])
+        self.assertEqual(
+            archived["supersedingFeedback"]["feedbackDigest"], feedback["feedbackDigest"],
+        )
+
+    def test_feedback_instruction_is_length_limited_and_digest_protected(self) -> None:
+        state = self.whole_deck_review()
+        canonical = (self.root / "deck/deck.preview.html").read_text(encoding="utf-8")
+        candidate = self.candidate(canonical.replace("Method", "Updated method"))
+        proposal = command_propose_html_change(
+            self.root, state, candidate_html=candidate, candidate_registry=None,
+            request="Update method", summary="Update method",
+            impact_summary="Only method changes",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        with self.assertRaisesRegex(WorkflowError, "exceeds 4000"):
+            command_set_html_change_feedback(
+                self.root, load_state(self.root),
+                proposal_id=proposal["proposalId"], proposal_digest=proposal["proposalDigest"],
+                slide_id="method-1", review_state="needs_work", viewed_version="candidate",
+                instruction="x" * 4001,
+            )
+        command_set_html_change_feedback(
+            self.root, load_state(self.root),
+            proposal_id=proposal["proposalId"], proposal_digest=proposal["proposalDigest"],
+            slide_id="method-1", review_state="needs_work", viewed_version="candidate",
+            instruction="Keep this exact instruction",
+        )
+        tampered = load_state(self.root)
+        tampered["authoring"]["htmlChangeFeedback"]["slides"]["method-1"]["instruction"] = "Tampered"
+        with self.assertRaisesRegex(WorkflowError, "feedbackDigest"):
+            validate_state(self.root, tampered)
+
+    def test_stale_saved_instruction_does_not_replace_active_candidate(self) -> None:
+        state = self.whole_deck_review()
+        canonical = (self.root / "deck/deck.preview.html").read_text(encoding="utf-8")
+        first_candidate = self.candidate(canonical.replace("Method", "First candidate method"))
+        first = command_propose_html_change(
+            self.root, state, candidate_html=first_candidate, candidate_registry=None,
+            request="Update method", summary="First method candidate",
+            impact_summary="Only the method slide changes",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        command_set_html_change_feedback(
+            self.root, load_state(self.root),
+            proposal_id=first["proposalId"], proposal_digest=first["proposalDigest"],
+            slide_id="method-1", review_state="needs_work", viewed_version="candidate",
+            instruction="First saved instruction",
+        )
+        stale_digest = load_state(self.root)["authoring"]["htmlChangeFeedback"]["feedbackDigest"]
+        command_set_html_change_feedback(
+            self.root, load_state(self.root),
+            proposal_id=first["proposalId"], proposal_digest=first["proposalDigest"],
+            slide_id="method-1", review_state="needs_work", viewed_version="candidate",
+            instruction="Updated saved instruction",
+        )
+        fragment = self.root / "deck/method.stale.fragment.html"
+        fragment.write_text(
+            re.search(
+                r'<section class="slide" data-slide-id="method-1".*?</section>',
+                (self.root / first["candidateHtml"]).read_text(encoding="utf-8"), re.DOTALL,
+            ).group(0).replace("First candidate method", "Stale revision"),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(WorkflowError, "feedback is stale"):
+            command_propose_localized_html_change(
+                self.root, load_state(self.root),
+                replacements={"method-1": fragment.relative_to(self.root)},
+                candidate_registry=None,
+                request="Use stale feedback", summary="Stale revision",
+                impact_summary="Local", requested_slide_ids=["method-1"],
+                related_slide_ids=[], replace_feedback_digest=stale_digest,
+            )
+        self.assertEqual(
+            load_state(self.root)["authoring"]["htmlChange"]["proposalId"], first["proposalId"],
+        )
+
+    def test_localized_slide_fragments_create_a_full_scoped_candidate(self) -> None:
+        state = self.whole_deck_review()
+        canonical_path = self.root / "deck/deck.preview.html"
+        canonical = canonical_path.read_text(encoding="utf-8")
+        intro_id = state["sections"]["introduction"]["slideIds"][0]
+        intro_fragment = self.root / "deck/intro.fragment.html"
+        method_fragment = self.root / "deck/method.fragment.html"
+        intro_fragment.write_text(
+            re.search(r'<section class="slide"[^>]*data-section-id="introduction".*?</section>', canonical, re.DOTALL)
+            .group(0).replace("<img ", '<p data-bento-id="intro-note">Updated</p><img '),
+            encoding="utf-8",
+        )
+        method_fragment.write_text(
+            re.search(r'<section class="slide" data-slide-id="method-1".*?</section>', canonical, re.DOTALL)
+            .group(0).replace("Method", "Updated method"),
+            encoding="utf-8",
+        )
+        proposal = command_propose_localized_html_change(
+            self.root,
+            state,
+            replacements={intro_id: intro_fragment.relative_to(self.root), "method-1": method_fragment.relative_to(self.root)},
+            candidate_registry=None,
+            request="Update the introduction and method",
+            summary="Patch two named slides",
+            impact_summary="The two named slides must be reviewed together",
+            requested_slide_ids=[intro_id],
+            related_slide_ids=["method-1"],
+        )
+        self.assertEqual(set(proposal["changedSlideIds"]), {intro_id, "method-1"})
+        self.assertEqual(set(proposal["affectedSlideIds"]), {intro_id, "method-1"})
+        self.assertFalse(proposal["structuralImpact"])
+        self.assertEqual(canonical_path.read_text(encoding="utf-8"), canonical)
+        candidate_text = (self.root / proposal["candidateHtml"]).read_text(encoding="utf-8")
+        self.assertIn("Updated method", candidate_text)
+        self.assertIn("intro-note", candidate_text)
+        expected = canonical
+        for slide_id, fragment in ((intro_id, intro_fragment), ("method-1", method_fragment)):
+            original_slide = re.search(
+                rf'<section class="slide" data-slide-id="{re.escape(slide_id)}".*?</section>',
+                expected,
+                re.DOTALL,
+            ).group(0)
+            expected = expected.replace(original_slide, fragment.read_text(encoding="utf-8"), 1)
+        self.assertEqual(candidate_text, expected)
+
+    def test_localized_slide_patch_rejects_section_moves_and_shared_style_changes(self) -> None:
+        state = self.whole_deck_review()
+        wrong_section = self.root / "deck/wrong-section.fragment.html"
+        wrong_section.write_text(
+            '<section class="slide" data-slide-id="method-1" data-section-id="introduction">Changed</section>',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(WorkflowError, "cannot move slides"):
+            command_propose_localized_html_change(
+                self.root, state, replacements={"method-1": wrong_section.relative_to(self.root)},
+                candidate_registry=None, request="Move", summary="Move",
+                impact_summary="Local", requested_slide_ids=["method-1"], related_slide_ids=[],
+            )
+
+        style_fragment = self.root / "deck/style.fragment.html"
+        style_fragment.write_text(
+            '<section class="slide" data-slide-id="method-1" data-section-id="method">'
+            '<style>body{color:red}</style><div data-bento-id="method-text">Method</div></section>',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(WorkflowError, "shared CSS changed"):
+            command_propose_localized_html_change(
+                self.root, state, replacements={"method-1": style_fragment.relative_to(self.root)},
+                candidate_registry=None, request="Style", summary="Style",
+                impact_summary="Local", requested_slide_ids=["method-1"], related_slide_ids=[],
+            )
 
     def test_change_impact_expands_for_related_slides_and_global_css(self) -> None:
         state = self.whole_deck_review()

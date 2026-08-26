@@ -97,6 +97,7 @@ CHART_FIELDS = {"preset", "option"}
 TABLE_FIELDS = {"columns", "rows", "header", "style"}
 CONVERTER_EXTENSION_FIELDS = {
     "equationId", "latexSource", "assetId", "figureId", "chartId", "tableId",
+    "sourceText",
 }
 SUPPORTED_TYPES = {"text", "shape", "image", "svg", "media", "chart", "table"}
 SHAPE_NAMES = {"rect", "ellipse", "triangle", "arrow", "line", "path"}

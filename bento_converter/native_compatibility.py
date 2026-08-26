@@ -48,9 +48,9 @@ def classify_native_compatibility(element: dict[str, Any]) -> Compatibility:
     if element_type == "table" and isinstance(table, dict) and not table.get("simpleTable", True):
         reasons = table.get("complexityReasons") or ["HTML table structure is not rectangular."]
         return Compatibility("localized-svg-recommended", tuple(str(reason) for reason in reasons))
-    if transform.get("is3D") or transform.get("hasSkew"):
-        return Compatibility("localized-svg-recommended", ("Skew or 3D transform cannot be represented by Bento rotation/scale.",))
     unsupported: list[str] = []
+    if transform.get("is3D") or transform.get("hasSkew"):
+        unsupported.append("skew or 3D transform")
     if _active(style.get("clipPath")):
         unsupported.append("complex clip-path")
     if _active(style.get("maskImage")):
@@ -71,6 +71,23 @@ def classify_native_compatibility(element: dict[str, Any]) -> Compatibility:
         unsupported.append("multiple background layers")
     elif layers == 1 and "linear-gradient(" not in str(background) and element_type not in {"image", "svg"}:
         unsupported.append("CSS background image")
+    has_owned_text = bool(str(
+        element.get("residualText")
+        if element.get("hasExplicitDescendants")
+        else element.get("text") or ""
+    ).strip())
+    needs_editable_decomposition = bool(
+        element.get("hasExplicitDescendants")
+        or (element_type == "shape" and has_owned_text)
+    )
+    if unsupported and needs_editable_decomposition:
+        return Compatibility(
+            "background-image-required",
+            tuple(
+                f"Capture only the visual background because Bento native fields do not preserve {item}."
+                for item in unsupported
+            ),
+        )
     if unsupported:
         return Compatibility("localized-svg-recommended", tuple(f"Bento native fields do not preserve {item}." for item in unsupported))
 
@@ -87,6 +104,8 @@ def classify_native_compatibility(element: dict[str, Any]) -> Compatibility:
         adjustments.append("Map object-fit to Bento image fit.")
     if transform.get("hasTransform"):
         adjustments.append("Absorb translate/scale into the frame and preserve rotation around the visual center.")
+    if needs_editable_decomposition:
+        adjustments.append("Keep semantic text and annotated descendants as independent editable Bento elements.")
     if adjustments:
         return Compatibility("native-with-adjustment", (), tuple(adjustments))
     return Compatibility("native-safe")

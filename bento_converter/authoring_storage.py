@@ -86,6 +86,7 @@ def _visible_document_text(document: dict[str, Any]) -> str:
         for element in slide.get("elements", []):
             if isinstance(element, dict):
                 values.append(str(element.get("html", "")))
+                values.append(str(element.get("sourceText", "")))
                 values.append(json.dumps(element.get("rows", []), ensure_ascii=False, sort_keys=True))
     return "\n".join(values)
 
@@ -363,6 +364,49 @@ def _changed_ids(before: dict[str, Any], after: dict[str, Any]) -> dict[str, lis
     }
 
 
+def _merge_scoped_slides(
+    current: dict[str, Any], submitted: dict[str, Any], scoped_slide_ids: set[str],
+) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    """Merge only explicitly scoped slides while preserving the canonical deck shell."""
+
+    if not scoped_slide_ids:
+        raise ValidationError(["scopedSlideIds must contain at least one slide ID"])
+    current_slides = current.get("slides", [])
+    submitted_slides = submitted.get("slides", [])
+    current_ids = [slide.get("id") for slide in current_slides]
+    submitted_ids = [slide.get("id") for slide in submitted_slides]
+    if current_ids != submitted_ids:
+        raise ValidationError([
+            "Scoped authoring save cannot add, remove, or reorder slides; use the full authoring route"
+        ])
+    missing = sorted(scoped_slide_ids - set(current_ids))
+    if missing:
+        raise ValidationError([f"Scoped authoring save references missing slides: {missing!r}"])
+    current_shell = {key: value for key, value in current.items() if key != "slides"}
+    submitted_shell = {key: value for key, value in submitted.items() if key != "slides"}
+    discarded_document_fields = sorted(
+        key for key in current_shell.keys() | submitted_shell.keys()
+        if current_shell.get(key) != submitted_shell.get(key)
+    )
+
+    submitted_by_id = {slide["id"]: slide for slide in submitted_slides}
+    submitted_changes = _changed_ids(current, submitted)
+    merged = copy.deepcopy(current)
+    merged["slides"] = [
+        copy.deepcopy(submitted_by_id[slide["id"]])
+        if slide["id"] in scoped_slide_ids else copy.deepcopy(slide)
+        for slide in current_slides
+    ]
+    saved_changes = _changed_ids(current, merged)
+    return merged, {
+        "scopedSlideIds": sorted(scoped_slide_ids),
+        "submittedChangedSlideIds": submitted_changes["changed"],
+        "savedChangedSlideIds": saved_changes["changed"],
+        "discardedSlideIds": sorted(set(submitted_changes["changed"]) - scoped_slide_ids),
+        "discardedDocumentFields": discarded_document_fields,
+    }
+
+
 def _registry_changes(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     result = {}
     for collection in ("sources", *REGISTRY_COLLECTIONS):
@@ -562,6 +606,24 @@ class AuthoringArtifactStorage:
         return html, document, registry
 
     @_locked
+    def revision_status(self) -> dict[str, Any]:
+        """Return saved document/registry revisions without full-deck validation."""
+
+        if not self.transactions.writer_lease.acquired:
+            self.transactions.recover()
+        if not self.sidecar.is_file() or not self.registry_path.is_file():
+            raise BentoConverterError("Authoring revision snapshot is incomplete")
+        document = json.loads(self.sidecar.read_text(encoding="utf-8-sig"))
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8-sig"))
+        document_revision_value = document_revision(document)
+        return {
+            "documentRevision": document_revision_value,
+            "registryRevision": registry_revision(registry),
+            "revision": document_revision_value,
+            "editingMode": "authoring",
+        }
+
+    @_locked
     def status(self) -> dict[str, Any]:
         if not self.transactions.writer_lease.acquired:
             self.transactions.recover()
@@ -575,6 +637,10 @@ class AuthoringArtifactStorage:
             target = self.target.relative_to(self.repository).as_posix()
         except ValueError:
             target = self.target.name
+        artifact_paths = [
+            path.relative_to(self.repository).as_posix()
+            for path in self.transactions.artifacts
+        ]
         return {
             "documentRevision": document_revision_value,
             "registryRevision": registry_revision_value,
@@ -583,6 +649,7 @@ class AuthoringArtifactStorage:
             "backupCount": len(self._backups()), "validation": "pass",
             "editingMode": "authoring", "sourceOfTruth": target,
             "repository": str(self.repository),
+            "artifactPaths": artifact_paths,
             "contentApprovalStatus": approval_status,
         }
 
@@ -807,6 +874,7 @@ class AuthoringArtifactStorage:
         self, serialized_html: str, *, base_document_revision: str,
         base_registry_revision: str, registry: dict[str, Any] | None = None,
         replace_slide_ids: set[str] | None = None,
+        scoped_slide_ids: set[str] | None = None,
         operation: str = "authoring-save", report_details: dict[str, Any] | None = None,
         report_path: str | Path | None = None,
         workflow_state: dict[str, Any] | None = None,
@@ -816,7 +884,14 @@ class AuthoringArtifactStorage:
         current_registry_revision = registry_revision(current_registry)
         if base_document_revision != current_document_revision or base_registry_revision != current_registry_revision:
             raise AuthoringConflict("Another authoring document or registry revision has already been saved")
-        proposed_document = extract_bento_doc(serialized_html)
+        submitted_document = extract_bento_doc(serialized_html)
+        scope_result: dict[str, list[str]] | None = None
+        if scoped_slide_ids is None:
+            proposed_document = submitted_document
+        else:
+            proposed_document, scope_result = _merge_scoped_slides(
+                current_document, submitted_document, scoped_slide_ids,
+            )
         registry_update_required = _requires_registry_update(current_document, proposed_document)
         if registry is None:
             if registry_update_required:
@@ -826,7 +901,7 @@ class AuthoringArtifactStorage:
             proposed_registry = normalize_registry(registry, unit_id=str(registry.get("unitId") or "deck"))
             if registry_update_required and registry_revision(proposed_registry) == current_registry_revision:
                 raise ValidationError(["Registry-sensitive authoring changes require a changed registry revision"])
-        if operation == "authoring-save":
+        if operation in {"authoring-save", "browser-edit"}:
             validate_source_original_transition(current_registry, proposed_registry)
         validation = validate_authoring_document(
             proposed_document, current=current_document, registry=proposed_registry,
@@ -837,12 +912,12 @@ class AuthoringArtifactStorage:
         proposed_document_revision = document_revision(proposed_document)
         proposed_registry_revision = registry_revision(proposed_registry)
         if (
-            operation == "authoring-save"
+            operation in {"authoring-save", "browser-edit"}
             and report_path is None
             and document_persistence_equal(proposed_document, current_document)
             and proposed_registry == current_registry
         ):
-            return {
+            result = {
                 "documentRevision": current_document_revision,
                 "registryRevision": current_registry_revision,
                 "contentApprovalInvalidated": False,
@@ -850,6 +925,9 @@ class AuthoringArtifactStorage:
                 "validation": "pass",
                 "noOp": True,
             }
+            if scope_result is not None:
+                result.update(scope_result)
+            return result
         if workflow_state is not None:
             if self.state_path is None:
                 raise BentoConverterError("Workflow state update requires state_path")
@@ -871,6 +949,8 @@ class AuthoringArtifactStorage:
         }
         if report_details:
             report["details"] = report_details
+        if scope_result is not None:
+            report["scope"] = scope_result
         self._create_backup()
 
         def validate_base() -> None:
@@ -921,7 +1001,7 @@ class AuthoringArtifactStorage:
             report_path=Path(report_path).resolve() if report_path is not None else self.report_path,
             report_payload=report,
         )
-        return {
+        result = {
             "documentRevision": proposed_document_revision,
             "registryRevision": proposed_registry_revision,
             "contentApprovalInvalidated": (
@@ -932,6 +1012,9 @@ class AuthoringArtifactStorage:
             "validation": "pass",
             "noOp": False,
         }
+        if scope_result is not None:
+            result.update(scope_result)
+        return result
 
     @_write_locked
     def revert(self, *, base_document_revision: str, base_registry_revision: str) -> dict[str, Any]:

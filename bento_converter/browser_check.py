@@ -42,6 +42,11 @@ class BrowserCheckReport:
     fresh_rendered_slide_count: int = 0
     cached_rendered_slide_count: int = 0
     slide_fingerprints: dict[str, str] = field(default_factory=dict)
+    scope: str = "full"
+    checked_slide_ids: tuple[str, ...] = ()
+    checked_slide_count: int = 0
+    checked_element_count: int = 0
+    cache_stats: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -66,18 +71,25 @@ def _iter_elements(document: dict[str, Any]) -> Iterator[tuple[int, str, dict[st
             yield slide_index, slide["id"], element
 
 
-def _coordinates(document: dict[str, Any]) -> dict[str, Frame]:
+def _coordinates(
+    document: dict[str, Any], slide_ids: set[str] | None = None,
+) -> dict[str, Frame]:
     return {
         _key(slide_id, element["id"]): {
             field: element[field] for field in ("x", "y", "w", "h")
         }
         for _, slide_id, element in _iter_elements(document)
+        if slide_ids is None or slide_id in slide_ids
     }
 
 
-def _source_coordinates(design: dict[str, Any]) -> dict[str, Frame]:
+def _source_coordinates(
+    design: dict[str, Any], slide_ids: set[str] | None = None,
+) -> dict[str, Frame]:
     result: dict[str, Frame] = {}
     for slide in design["slides"]:
+        if slide_ids is not None and slide["id"] not in slide_ids:
+            continue
         for element in slide["elements"]:
             result[_key(slide["id"], element["id"])] = {
                 field: element[field] for field in ("x", "y", "w", "h")
@@ -108,12 +120,15 @@ def _is_equation(element: dict[str, Any]) -> bool:
 
 
 def _targets(
-    document: dict[str, Any], design: dict[str, Any] | None
+    document: dict[str, Any], design: dict[str, Any] | None,
+    slide_ids: set[str] | None = None,
 ) -> tuple[dict[str, ElementLocation], dict[str, int]]:
     targets: dict[str, ElementLocation] = {}
     counts: Counter[str] = Counter()
     if design is not None:
         for slide_index, slide in enumerate(design["slides"]):
+            if slide_ids is not None and slide["id"] not in slide_ids:
+                continue
             for element in slide["elements"]:
                 kind = element["type"]
                 counts[kind] += 1
@@ -121,6 +136,8 @@ def _targets(
         return targets, dict(sorted(counts.items()))
 
     for slide_index, slide_id, element in _iter_elements(document):
+        if slide_ids is not None and slide_id not in slide_ids:
+            continue
         if _is_equation(element):
             kind = "latex"
         else:
@@ -178,8 +195,9 @@ def run_browser_check(
     harness: BrowserHarness | None = None,
     cache: IncrementalSlideCache | None = None,
     runtime_revision: str | None = None,
+    slide_ids: list[str] | tuple[str, ...] | None = None,
 ) -> BrowserCheckReport:
-    """Verify UI startup, all slides/elements, API edits, save round-trip, and captures."""
+    """Verify the whole deck or an explicit slide scope in the Bento browser UI."""
 
     if harness is None:
         with BrowserHarness(browser_executable) as owned_harness:
@@ -191,6 +209,7 @@ def run_browser_check(
                 harness=owned_harness,
                 cache=cache,
                 runtime_revision=runtime_revision,
+                slide_ids=slide_ids,
             )
 
     path = Path(html_path).resolve()
@@ -247,27 +266,48 @@ def run_browser_check(
             element_count = sum(
                 len(slide["elements"]) for slide in original_document["slides"]
             )
+            available_slide_ids = [slide["id"] for slide in original_document["slides"]]
+            if slide_ids is None:
+                checked_slide_ids = available_slide_ids
+            else:
+                if not slide_ids:
+                    _fail("Targeted browser check requires at least one slide ID.")
+                requested = list(dict.fromkeys(slide_ids))
+                unknown = [slide_id for slide_id in requested if slide_id not in available_slide_ids]
+                _require(not unknown, f"Browser check slide IDs do not exist: {unknown!r}")
+                requested_set = set(requested)
+                checked_slide_ids = [
+                    slide_id for slide_id in available_slide_ids if slide_id in requested_set
+                ]
+            checked_slide_id_set = set(checked_slide_ids)
+            checked_slides = [
+                (index, slide) for index, slide in enumerate(original_document["slides"])
+                if slide["id"] in checked_slide_id_set
+            ]
+            checked_element_count = sum(len(slide["elements"]) for _, slide in checked_slides)
             _require(
                 page.locator(".ed-thumb").count() == slide_count,
                 "The editor thumbnail count does not match the document.",
             )
 
-            coordinates = _coordinates(original_document)
+            coordinates = _coordinates(original_document, checked_slide_id_set)
             if design is not None:
-                expected_coordinates = _source_coordinates(design)
+                expected_coordinates = _source_coordinates(design, checked_slide_id_set)
                 _require(
                     coordinates == expected_coordinates,
                     f"Browser coordinates differ from GPT design: actual={coordinates!r}; "
                     f"expected={expected_coordinates!r}",
                 )
-            targets, detected_types = _targets(original_document, design)
+            targets, detected_types = _targets(
+                original_document, design, checked_slide_id_set,
+            )
 
             bento_fingerprints: dict[str, str] = {}
             cached_slide_ids: set[str] = set()
             output_dir = Path(screenshots_dir) if screenshots_dir is not None else None
             if output_dir is not None:
                 output_dir.mkdir(parents=True, exist_ok=True)
-                for index, slide in enumerate(original_document["slides"]):
+                for index, slide in checked_slides:
                     key = bento_cache_key(
                         slide,
                         environment_digest=environment_digest,
@@ -279,7 +319,7 @@ def run_browser_check(
                         cached_slide_ids.add(slide["id"])
 
             fresh_rendered_slide_count = 0
-            for slide_index, slide in enumerate(original_document["slides"]):
+            for slide_index, slide in checked_slides:
                 if slide["id"] in cached_slide_ids:
                     continue
                 _activate_slide(page, slide_index, slide["id"], harness)
@@ -458,13 +498,26 @@ def run_browser_check(
             _settle_render(page, harness)
 
             if output_dir is not None:
-                for index in range(slide_count):
-                    slide_document = original_document["slides"][index]
+                for index, slide_document in checked_slides:
                     output = output_dir / f"{prefix}-{index + 1}.png"
                     if slide_document["id"] in cached_slide_ids:
                         screenshots.append(str(output.resolve()))
                         continue
                     _activate_slide(page, index, slide_document["id"], harness)
+                    expected_element_ids = [element["id"] for element in slide_document["elements"]]
+                    page.wait_for_function(
+                        """
+                        expected => {
+                          const slide = document.querySelector('.ed-stage .bento-slide');
+                          if (!slide || slide.dataset.slideId !== expected.slideId) return false;
+                          const ids = [...slide.querySelectorAll('[data-el-id]')].map(element => element.dataset.elId);
+                          return expected.elementIds.length === ids.length
+                            && expected.elementIds.every(id => ids.includes(id));
+                        }
+                        """,
+                        arg={"slideId": slide_document["id"], "elementIds": expected_element_ids},
+                    )
+                    _settle_render(page, harness)
                     page.evaluate(
                         """
                         () => {
@@ -480,6 +533,7 @@ def run_browser_check(
                         }
                         """
                     )
+                    _settle_render(page, harness)
                     slide = page.locator("#bento-check-screenshot")
                     _require(slide.count() == 1, "Active slide surface is missing.")
                     box = slide.bounding_box()
@@ -535,4 +589,9 @@ def run_browser_check(
         fresh_rendered_slide_count=fresh_rendered_slide_count,
         cached_rendered_slide_count=len(cached_slide_ids),
         slide_fingerprints=bento_fingerprints,
+        scope="targeted" if slide_ids is not None else "full",
+        checked_slide_ids=tuple(checked_slide_ids),
+        checked_slide_count=len(checked_slide_ids),
+        checked_element_count=checked_element_count,
+        cache_stats=dict(cache.stats) if cache is not None else {},
     )

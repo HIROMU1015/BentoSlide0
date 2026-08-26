@@ -28,12 +28,19 @@ Every slide must be exactly 1280 × 720 computed CSS pixels and use:
 
 `data-slide-id` is globally unique. `data-bento-id` is stable and unique within its slide. Elements without `data-bento-id` are auto-discovered only for common semantic tags (`h1`–`h6`, `p`, `li`, `table`, `img`, `svg`, `video`, `audio`, and `canvas`); explicit IDs are recommended for reproducibility and references.
 
+Before Chromium starts, the converter runs a static annotation preflight. It fails early for duplicate slide/element IDs, explicit fallbacks without stable IDs, annotations outside identified slides, invalid fallback scope, and any whole-element image fallback that would bake rendered text or annotated descendants into pixels. It reports editability warnings for text-bearing shapes, annotated grouping containers, nested conversion annotations, and explicit image fallbacks. The complete deterministic report is written to `diagnostics/html-preflight.json` and is also embedded in `conversion-report.json`. Warnings do not block ordinary conversion; use `python -m scripts.check_html_preflight --html ... --registry ... --strict-editability` when an editable-native authoring target should reject them.
+
+For an editable card, a text-free background shape plus sibling text remains the preferred source structure. The converter also decomposes text-bearing shapes and annotated containers: native-compatible backgrounds remain shapes, unsupported visual effects become a background-only image, owned text becomes a `--label` text element, and annotated descendants retain their original editable IDs. Flex text containers with unannotated direct child labels become stable `--part-N` native text elements. A whole-element image fallback may be used only when it contains no rendered text, equation, table, or annotated descendant.
+
+Short mathematical notation embedded in prose uses `<span data-bento-inline-math="v1">...</span>` with `sub`/`sup` for scripts. Conversion translates that marked fragment into Bento's editable inline `$...$` LaTeX syntax, including Greek symbols and roman multi-letter scripts, instead of preserving browser-only rich-text tags that the Bento runtime would flatten. A table containing such a marker is emitted as measured native cell-background shapes plus editable cell-text elements, because native Bento table cells do not render inline LaTeX; no visible `$` delimiters remain. Complete standalone formulas still use `data-bento-type="equation"` plus registry LaTeX and become editable `$$...$$` elements. Unmarked prose is never heuristically reinterpreted as mathematics.
+
 Supported element annotations:
 
 | Attribute | Meaning |
 |---|---|
 | `data-bento-type` | `text`, `equation`, `shape`, `table`, `chart`, `image`, `svg`, `media`, or a custom complex block |
 | `data-bento-export` | `native`, `svg`, `image`, `auto`, or `ignore`; default is `auto` |
+| `data-bento-fallback-scope` | `background` or `whole`; semantic content defaults to `background`, and unsafe `whole` capture is rejected |
 | `data-bento-critical` | `true` explicitly makes a localized crop failure fail the slide/build |
 | `data-bento-compare` | `true` requests a crop metric without making the element critical |
 | `data-bento-z` | Explicit stable z-order override; otherwise computed `z-index` and DOM order are used |
@@ -53,11 +60,11 @@ Use `data-transition="morph"`, `data-state-of="slide-id"`, and `data-slide-name=
 
 Simple flex centering, padding, letter spacing, object-fit, gradients, shadows, and 2D translate/scale/rotation can remain native with reported adjustments. Skew/3D, clip-path, masks, filters, backdrop-filter, blend modes, visible pseudo-element-dependent visuals, non-horizontal writing, and complex/multiple background layers should be expected to use a localized fallback. Complex slide backgrounds are isolated behind native foreground elements.
 
-Any fallback-capable element must have an explicit `data-bento-id`. Capture lookup is scoped to its containing slide, so the same stable ID may be reused on different slides for morph/state continuity. Duplicate matches within one slide fail with the slide ID, element ID, capture reason, and matched count.
+Any fallback-capable element must have an explicit `data-bento-id`. Background capture temporarily hides annotated descendants and makes owned text transparent without changing layout, captures only the visual layer, and restores every modified inline style in `finally`. Capture lookup is scoped to its containing slide, so the same stable ID may be reused on different slides for morph/state continuity. Duplicate matches within one slide fail with the slide ID, element ID, capture reason, and matched count.
 
 Local references in image/media sources, SVG `href`/`xlink:href`, foreignObject HTML, inline styles, style blocks, and CSS `url(...)` are resolved relative to the chapter HTML and embedded as data URIs. `asset:id` resolves through the registry. `data:`, `http:`, `https:`, and `#fragment` references remain unchanged. Missing local files fail with redacted source-relative context; generated Bento JSON must contain no unresolved local resource URL in a structured resource field.
 
-A native HTML table must be a rectangular grid with no rowspan/colspan, no nested table, no image/chart/complex cell, and at most one header row. Other table structures are supported through localized SVG and retain per-cell content, indices, spans, rectangles, and computed styles.
+A native HTML table must be a rectangular grid with no rowspan/colspan, no nested table, no image/chart/complex cell, no marked inline math, and at most one header row. A marked-math table is decomposed into editable native shapes/text using the recorded per-cell rectangles. Other unsupported table structures use localized SVG and retain per-cell content, indices, spans, rectangles, and computed styles.
 
 Charts require pure JSON in a descendant script:
 

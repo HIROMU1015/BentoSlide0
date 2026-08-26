@@ -5,10 +5,10 @@
 ## 最短の使い方
 
 1. このリポジトリを資料ごとに複製します。
-2. 一次資料を`sources/private/`へ置きます。
+2. 一次資料を`sources/private/`へ置くか、ChatGPT WorkへGitHubリポジトリのURLを伝えます。
 3. 必要なら手持ち画像を`images/user/`へ置きます。抽出画像と生成画像はWorkが`images/extracted/`と`images/generated/`へ整理します。
 4. ChatGPT Workへ、作りたい資料を普段の言葉で伝えます。
-5. Workが依頼を`REQUEST.md`へ保存し、曖昧でなければsource manifestも準備します。
+5. Workが依頼を`REQUEST.md`へ保存し、local資料またはcommit固定したGitHub snapshotをsource manifestへ登録します。
 6. Workが各slideで図の有効性も判断し、必要ならnative図・出典付き原図・生成visualを提案します。
 7. 構成を確認したら、Work/GPTが資料全体のHTMLを作ります。
 8. 全体previewを見て、気になる箇所を普段の言葉で伝えます。
@@ -29,7 +29,7 @@ sources + planning
   -> output/presentation.final.bento.* + frozen final registry + baseline
 ```
 
-詳細なstageと承認は[workflow/WORKFLOW.md](workflow/WORKFLOW.md)、HTML修正の確認契約は[docs/html-change-review.md](docs/html-change-review.md)、正本ルールは[docs/source-of-truth-policy.md](docs/source-of-truth-policy.md)、保存保証は[docs/artifact-transactions.md](docs/artifact-transactions.md)を参照してください。
+詳細なstageと承認は[workflow/WORKFLOW.md](workflow/WORKFLOW.md)、GitHub一次資料は[docs/github-repository-sources.md](docs/github-repository-sources.md)、HTML修正の確認契約は[docs/html-change-review.md](docs/html-change-review.md)、正本ルールは[docs/source-of-truth-policy.md](docs/source-of-truth-policy.md)、保存保証は[docs/artifact-transactions.md](docs/artifact-transactions.md)を参照してください。
 
 図の自動提案、`source-original` / `source-derived` / `generated`、PDF figure切り出し、asset登録、捏造防止ルールは[docs/visual-workflow.md](docs/visual-workflow.md)を参照してください。
 
@@ -63,9 +63,11 @@ python -m scripts.build_bento_from_html `
   --output output/presentation.generated.bento.html
 ```
 
-移行済みのmodular資料では従来の`--html-dir chapters/ --registry-dir chapters/`を使えます。生成物にはHTML/JSON、registry、conversion report、computed layout、resource scan、browser check、`diagnostics/browser-environment.json`、source/Bento screenshotsが含まれます。ローカルresourceはdata URI化され、未解決resource、参照不整合、runtime変化、critical crop失敗、serialize失敗はbuildを失敗させます。source計測とBento確認は1つのChromium process内の分離contextで実行され、loopbackを含むHTTP(S)は遮断されます。Bento runtimeの既知release-manifest probeだけは遮断・記録したまま期待済みとして扱い、それ以外のrequestは失敗します。
+移行済みのmodular資料では従来の`--html-dir chapters/ --registry-dir chapters/`を使えます。生成物にはHTML/JSON、registry、conversion report、`diagnostics/html-preflight.json`、computed layout、resource scan、browser check、`diagnostics/browser-environment.json`、source/Bento screenshotsが含まれます。preflightはChromium起動前に親子の重複annotation、文字入りshape、画像化による編集性低下、protected要素の取り込み、重複IDを検出します。安全性errorは即時停止し、編集性warningは変換を止めずreportへ残します。ローカルresourceはdata URI化され、未解決resource、参照不整合、runtime変化、critical crop失敗、serialize失敗はbuildを失敗させます。source計測とBento確認は1つのChromium process内の分離contextで実行され、loopbackを含むHTTP(S)は遮断されます。Bento runtimeの既知release-manifest probeだけは遮断・記録したまま期待済みとして扱い、それ以外のrequestは失敗します。
 
 編集反復では同じ出力先へ`--incremental`を付けると、slide DOM、関連registry/assets、global CSS/theme、runtime、browser/font environmentが一致するslideだけ`output/.bento-cache/`から再利用します。source/Bento PNGはrecord内SHA-256と一致する場合だけ再利用され、不一致や中断recordはcache missになります。通常buildはcacheを再利用せずfull evidenceを再生成し、workflowの変換・承認gateでも必ずfull build/full validationを使います。cacheは正本でも承認証跡でもありません。
+
+変換器の不具合修正では`python -m scripts.run_conversion_repair`を使います。canonical/generated/authoring/final/stateから隔離したworkspaceへ、複数診断、工程時間、失敗slideの再現snapshot、重点テスト候補、再利用可能な修正用evidenceを保存します。修正中は対象fixtureと重点テストを先に回し、正式なcacheなし変換と全テストは修正がまとまった最後に実行します。詳細は[docs/conversion-repair-loop.md](docs/conversion-repair-loop.md)です。
 
 whole-deck HTML承認は、各section DOM、参照registry projection、参照asset content、global CSS/themeから決定論的digestを一括記録します。承認後の変更は該当section（global CSS/themeは全section）を未承認へ戻し、変換を拒否します。修正候補は承認前に正本へ入らず、人向け説明と機械判定を同じdigestへ固定して影響範囲を提示します。適用時は正本と候補を同一lease内で再検証し、適用後の影響slideについてbrowser report・環境fingerprint・screenshotが揃うまで全体承認へ進みません。
 

@@ -7,7 +7,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .bento_validator import validate_bento_doc
 from .browser_harness import BrowserHarness
@@ -16,6 +16,7 @@ from .errors import BentoConverterError
 from .html_converter import HtmlConversionResult, convert_html_layout
 from .html_document import assert_runtime_integrity, extract_bento_doc, load_html, runtime_fingerprint, write_embedded_document
 from .html_layout import LayoutResult, extract_computed_layout
+from .html_preflight import analyze_html_sources, write_preflight_report
 from .html_source import discover_chapters, discover_source_unit, merge_registries
 from .incremental_cache import (
     IncrementalSlideCache,
@@ -104,12 +105,17 @@ def _semantic_comparison(
         expected_ids = [emitted_id for decision in slide_decisions if decision["strategy"] != "ignore" for emitted_id in decision.get("emittedIds", [])]
         actual_ids = [element["id"] for element in output_slide["elements"]]
         bento_path = screenshots[index] if index < len(screenshots) else None
+        independently_emitted = [
+            decision for decision in slide_decisions
+            if decision["strategy"] not in {"ignore", "covered-by-image-fallback"}
+            and decision.get("emittedIds")
+        ]
         checks = {
             "allEmittedElementsPresent": expected_ids == actual_ids,
             "contentPreserved": all(decision.get("contentPreserved", True) for decision in slide_decisions),
-            "majorPlacementTracked": all("bentoFrame" in decision for decision in slide_decisions if decision["strategy"] != "ignore"),
+            "majorPlacementTracked": all("bentoFrame" in decision for decision in independently_emitted),
             "hierarchyAndZOrderPreserved": expected_ids == actual_ids,
-            "stylesTracked": all("styleChecks" in decision for decision in slide_decisions if decision["strategy"] != "ignore"),
+            "stylesTracked": all("styleChecks" in decision for decision in independently_emitted),
             "insideCanvas": all(element["x"] >= 0 and element["y"] >= 0 and element["x"] + element["w"] <= 1280 and element["y"] + element["h"] <= 720 for element in output_slide["elements"]),
         }
         fingerprint = None
@@ -200,9 +206,15 @@ def build_from_html(
     browser_executable: str | Path | None = None,
     browser_check: bool = True,
     incremental: bool = False,
+    progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> HtmlBuildResult:
     """Build, validate, render, round-trip, and report an HTML-first deck."""
 
+    def emit(phase: str, **details: Any) -> None:
+        if progress is not None:
+            progress(phase, details)
+
+    emit("discovering")
     output = Path(output_path).resolve()
     base = Path(base_path).resolve()
     if output == base:
@@ -227,14 +239,20 @@ def build_from_html(
     _clear_generated_files(source_dir, bento_dir, diagnostics_dir)
 
     registry = merge_registries(chapters)
+    emit("preflighting", sourceUnitCount=len(chapters))
+    preflight = analyze_html_sources(chapters, registry)
+    write_preflight_report(diagnostics_dir / "html-preflight.json", preflight)
+    preflight.raise_for_errors()
     base_html = load_html(base)
     runtime_revision = "sha256:" + runtime_fingerprint(base_html)
+    emit("fingerprinting", slideSourceCount=len(chapters))
     fingerprint_inputs = compute_source_fingerprint_inputs(chapters)
     cache = IncrementalSlideCache(root / ".bento-cache", reuse=incremental)
     browser_report: BrowserCheckReport | None = None
     bento_screenshots: tuple[str, ...] = ()
     with BrowserHarness(browser_executable) as harness:
         try:
+            emit("extracting-layout", slideCount=len(fingerprint_inputs))
             layout = extract_computed_layout(
                 chapters,
                 source_dir,
@@ -243,10 +261,13 @@ def build_from_html(
                 fingerprint_inputs=fingerprint_inputs,
                 runtime_fingerprint=runtime_revision,
             )
+            emit("converting", slideCount=len(layout.slides))
             conversion = convert_html_layout(layout, registry, chapters)
+            emit("validating-document", slideCount=len(conversion.document["slides"]))
             validate_bento_doc(conversion.document)
             harness.record_embedded_fonts(conversion.document)
 
+            emit("writing-output")
             write_embedded_document(base, output, conversion.document)
             output_html = load_html(output)
             assert_runtime_integrity(base_html, output_html)
@@ -259,6 +280,7 @@ def build_from_html(
             _write_json(diagnostics_dir / "merged-registry.json", registry)
 
             if browser_check:
+                emit("checking-browser", slideCount=len(conversion.document["slides"]))
                 browser_report = run_browser_check(
                     output,
                     screenshots_dir=bento_dir,
@@ -277,7 +299,13 @@ def build_from_html(
         finally:
             _write_json(diagnostics_dir / "browser-environment.json", harness.report())
 
+    emit("comparing-visuals", slideCount=len(layout.slides))
     report = dict(conversion.report)
+    report["htmlPreflight"] = preflight.as_dict()
+    report["summary"].update({
+        "preflightErrors": len(preflight.errors),
+        "preflightWarnings": len(preflight.warnings),
+    })
     report["runtimeIntegrity"] = True
     report["browserCheck"] = browser_report.as_dict() if browser_report else {"skipped": True}
     report["visualComparison"] = _semantic_comparison(
@@ -308,6 +336,7 @@ def build_from_html(
             "criticalElementWarning": sum(item["imageComparison"]["status"] == "warning" for pair in visual_pairs for item in pair["elementComparisons"] if item["critical"]),
             "criticalElementFail": sum(item["imageComparison"]["status"] == "fail" for pair in visual_pairs for item in pair["elementComparisons"] if item["critical"]),
         })
+    emit("reporting")
     report_path = root / "conversion-report.json"
     _write_json(report_path, report)
     resource_scan = report.get("resourceScan", {"passed": True, "unresolved": []})
@@ -317,4 +346,5 @@ def build_from_html(
         raise BentoConverterError(f"Source/Bento visual comparison failed for slides: {failed}")
     if not resource_scan["passed"]:
         raise BentoConverterError(f"Unresolved local resource references: {resource_scan['unresolved']}")
+    emit("complete", reportPath=str(report_path))
     return HtmlBuildResult(output, json_path, report_path, layout.source_screenshots, bento_screenshots, conversion.document, report)

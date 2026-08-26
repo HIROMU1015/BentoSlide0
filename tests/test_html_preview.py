@@ -293,7 +293,16 @@ class SingleHtmlPreviewTests(unittest.TestCase):
             checked_body = _index_html(self.root, action_token="test-token").decode("utf-8")
         self.assertIn("自動検証に成功しました", checked_body)
         self.assertIn('id="approve-html-deck"', checked_body)
-        self.assertIn("このHTML全体でBentoSlideへ進む", checked_body)
+        self.assertIn("このHTML全体を承認する", checked_body)
+        self.assertIn("承認後は変換開始待ちになります", checked_body)
+
+        state["workflow"]["stage"] = "ready_for_conversion"
+        with patch("scripts.run_html_preview.load_state", return_value=state):
+            ready_body = _index_html(self.root, action_token="test-token").decode("utf-8")
+        self.assertIn('id="conversion-handoff"', ready_body)
+        self.assertIn("変換開始待ち", ready_body)
+        self.assertIn("GPT Workのチャットへ戻り", ready_body)
+        self.assertIn("BentoSlideへ変換して", ready_body)
 
     def test_structural_candidate_uses_version_specific_order_titles_and_numbers(self) -> None:
         canonical = self.root / "deck/deck.preview.html"
@@ -503,6 +512,45 @@ class HtmlPreviewActionTests(unittest.TestCase):
             with self.assertRaisesRegex(WorkflowError, "Every affected slide"):
                 _run_html_preview_action(Path("C:/repository"), payload)
 
+    def test_persisted_needs_work_blocks_combined_action_even_with_forged_review_list(self) -> None:
+        proposal = self.proposal("proposed")
+        state = self.state(proposal)
+        state["authoring"]["htmlChangeFeedback"] = {
+            "slides": {
+                "slide-a": {"state": "reviewed"},
+                "slide-b": {"state": "needs_work"},
+            }
+        }
+        with patch("scripts.run_html_preview.load_state", return_value=state):
+            with self.assertRaisesRegex(WorkflowError, "no slide may need work"):
+                _run_html_preview_action(Path("C:/repository"), self.payload())
+
+    def test_slide_review_action_is_saved_through_revision_bound_workflow_command(self) -> None:
+        state = self.state(self.proposal("proposed"))
+        payload = self.payload("set-slide-review")
+        payload.update({
+            "slideId": "slide-b",
+            "reviewState": "needs_work",
+            "viewedVersion": "candidate",
+            "instruction": "図を大きくする",
+        })
+        feedback = {"slides": {"slide-b": {"state": "needs_work"}}}
+        with (
+            patch("scripts.run_html_preview.load_state", return_value=state),
+            patch(
+                "scripts.run_html_preview.command_set_html_change_feedback",
+                return_value=feedback,
+            ) as save,
+        ):
+            result = _run_html_preview_action(Path("C:/repository"), payload)
+        self.assertEqual(result, {"status": "saved", "feedback": feedback})
+        save.assert_called_once_with(
+            Path("C:/repository"), state,
+            proposal_id="proposal-1", proposal_digest="sha256:" + "1" * 64,
+            slide_id="slide-b", review_state="needs_work", viewed_version="candidate",
+            instruction="図を大きくする",
+        )
+
     def test_combined_action_approves_applies_and_checks_exact_proposal(self) -> None:
         proposed = self.state(self.proposal("proposed"))
         approved = self.state(self.proposal("approved"))
@@ -642,6 +690,19 @@ class HtmlPreviewBrowserTests(unittest.TestCase):
             })
             proposal = state["authoring"]["htmlChange"]
             proposal["proposalDigest"] = html_change_proposal_digest(proposal)
+            state["authoring"]["htmlChangeFeedback"] = {
+                "format": "bento/html-change-feedback/v1",
+                "proposalId": proposal["proposalId"],
+                "proposalDigest": proposal["proposalDigest"],
+                "slides": {
+                    slide_id: {
+                        "state": "pending", "viewedVersion": None,
+                        "updatedAt": "2026-08-12T00:00:00Z",
+                    }
+                    for slide_id in proposal["affectedSlideIds"]
+                },
+                "updatedAt": "2026-08-12T00:00:00Z",
+            }
             state["chapters"] = {}
             state["sections"] = {
                 "intro": {
@@ -662,6 +723,24 @@ class HtmlPreviewBrowserTests(unittest.TestCase):
                 currentChapter=None, currentSection=None, blockingReason=None, blockedFrom=None,
             )
             atomic_write_state(root, state)
+            def persist_feedback(_repository, _state, **values):
+                current = load_state(root)
+                feedback = current["authoring"]["htmlChangeFeedback"]
+                feedback["slides"][values["slide_id"]] = {
+                    "state": values["review_state"],
+                    "instruction": values.get("instruction"),
+                    "viewedVersion": values["viewed_version"],
+                    "updatedAt": "2026-08-12T00:01:00Z",
+                }
+                feedback["updatedAt"] = "2026-08-12T00:01:00Z"
+                atomic_write_state(root, current)
+                return feedback
+
+            feedback_patcher = patch(
+                "scripts.run_html_preview.command_set_html_change_feedback",
+                side_effect=persist_feedback,
+            )
+            feedback_patcher.start()
             server = create_preview_server(root, port=HtmlPreviewTests.free_port())
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -787,8 +866,43 @@ class HtmlPreviewBrowserTests(unittest.TestCase):
                     expect(page).to_have_url(re.compile(r"#slide=removed$"))
                     expect(page.locator("#view-slide-label")).to_contain_text("01 / 03 現在案だけ")
 
+                    # A tall in-app Browser can display the entire deck at once. In that
+                    # layout the explicitly clicked final slide must remain selected even
+                    # though another visible slide is closer to the frame's top edge.
+                    page.set_viewport_size({"width": 1100, "height": 2200})
+                    page.locator(
+                        '[data-review-view="canonical"] [data-review-slide="shared-b"]'
+                    ).click()
+                    expect(page).to_have_url(re.compile(r"#slide=shared-b$"))
+                    expect(page.locator("#selected-review-title")).to_contain_text("共有B・現在")
+                    page.locator("#mark-reviewed").click()
+                    expect(
+                        page.locator(
+                            '[data-review-view="canonical"] [data-review-slide="shared-b"] '
+                            '[data-review-state-badge]'
+                        )
+                    ).to_have_text("確認済み")
+                    page.set_viewport_size({"width": 1100, "height": 800})
+                    page.locator(
+                        '[data-review-view="canonical"] [data-review-slide="removed"]'
+                    ).click()
+                    expect(page.locator("#selected-review-title")).to_contain_text("現在案だけ")
+
                     apply_button = page.locator("#apply-proposal")
                     expect(apply_button).to_be_disabled()
+                    page.locator("#slide-instruction").fill("現在案だけの説明を短くする")
+                    page.locator("#mark-needs-work").click()
+                    page.locator('[data-review-view="canonical"] [data-review-slide="shared-a"]').click()
+                    expect(page).to_have_url(re.compile(r"#slide=shared-a$"))
+                    expect(page.locator("#selected-review-title")).to_contain_text("共有A・現在")
+                    page.locator("#slide-instruction").fill("共有Aの見出しを具体的にする")
+                    page.locator("#mark-needs-work").click()
+                    expect(page.locator("#needs-work-list li")).to_have_count(2)
+                    expect(page.locator("#needs-work-list")).to_contain_text("現在案だけの説明を短くする")
+                    page.reload()
+                    expect(page.locator("#needs-work-list li")).to_have_count(2)
+                    expect(page.locator("#apply-proposal")).to_be_disabled()
+                    page.on("dialog", lambda dialog: dialog.accept())
                     affected = ["removed", "shared-a", "shared-b", "added"]
                     for slide_id in affected:
                         preferred = (
@@ -815,6 +929,7 @@ class HtmlPreviewBrowserTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+                feedback_patcher.stop()
 
 
 if __name__ == "__main__":

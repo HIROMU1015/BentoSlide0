@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | `initialized` | Work | sources | primary source resolved |
 | `planning` | Work | sources + planning | policy, story, slide plan, section list exist |
-| `awaiting_plan_approval` | Work | planning | user approves material plan |
+| `awaiting_plan_approval` | Work | revision-bound planning bundle | user approves the exact submitted request, sources, plans, visual plan, and unit order |
 | `html_authoring` | Work | single HTML/registry or migrated chapters | complete deck or current compatibility unit is ready |
 | `html_review` | Work | same HTML/registry | exact whole-deck candidate or compatibility unit is approved |
 | `ready_for_conversion` | Codex | all approved HTML units | every approval digest remains current |
@@ -33,9 +33,11 @@ planning -> complete HTML/registry -> whole-deck preview
 
 The first HTML review registers every slide under its planned section and stores a baseline for the exact HTML, registry, complete deck evidence, and all local dependencies, but the user reviews the deck as one story. Later natural-language edits never overwrite reviewed canonical HTML immediately. The agent creates a temporary candidate and a machine-readable `bento/html-change-proposal/v3` report containing the requested, changed, related, added, removed, reordered, and affected slides; section, registry, structural, and global-style impact; dependency manifests; and human-facing summaries. Global CSS/theme or structural changes conservatively require whole-deck review. Registry changes expand review to every affected section.
 
-Before candidate authoring, every targeted correction receives a whole-deck narrative assessment. The agent checks prerequisites, adjacent transitions, duplication, terminology, numbering and cross-references, conclusions, ordering, slide count, and section boundaries, then classifies the recommendation as local, related, or structural/global. A sequence of slide-specific requests is not a command to freeze the rest of the deck; each new request is evaluated together with the accumulated pending intent. Local proposals explicitly state that no wider change is recommended. Related proposals identify and justify the additional slides. A materially broader reorder, slide addition/removal, section split/merge, or story rewrite is proposed to the user before candidate authoring rather than being silently omitted or silently introduced. If a proposal is already active, a new correction amends it and requires cancellation/recreation when its bound candidate or impact is no longer exact.
+Before candidate authoring, every targeted correction receives a whole-deck narrative assessment. The agent checks prerequisites, adjacent transitions, duplication, terminology, numbering and cross-references, conclusions, ordering, slide count, and section boundaries, then classifies the recommendation as local, related, or structural/global. A sequence of slide-specific requests is not a command to freeze the rest of the deck; each new request is evaluated together with the accumulated pending intent. Local proposals explicitly state that no wider change is recommended. Related proposals identify and justify the additional slides. A materially broader reorder, slide addition/removal, section split/merge, or story rewrite is proposed to the user before candidate authoring rather than being silently omitted or silently introduced. If a proposal is already active, saved slide instructions amend it through a feedback-digest-bound atomic revision; the old candidate remains reviewable until its replacement commits.
 
-The user is told what the candidate changes and whether it can affect other slides before confirmation. The preview sidebar switches between current and candidate versions, lists every affected slide, and stores browser-local `未確認` / `確認済み` / `要修正` checklist state. These marks are not partial approvals. Once all affected slides are confirmed, its revision-bound action may perform `approve-html-change`, `apply-html-change`, and `check-html-change` in sequence; explicit chat confirmation remains equivalent. `approve-html-change` binds confirmation to the current canonical HTML/registry revisions, exact candidate revisions, both dependency manifests, human explanation, and recomputed impact. `apply-html-change` is the only route that replaces canonical HTML/registry; it revalidates every bound input and dependency under one union writer lease and commits transactionally. The preview then closes comparison and shows the updated canonical deck. `check-html-change` stores revision-bound browser/environment/screenshot evidence for every affected slide still present, using transformed visible bounds and text-bearing element overflow checks. A separate whole-deck HTML approval is refused until that evidence is current. A stale or tampered proposal is rejected; cancellation remains safe because it never installs candidate bytes. See `docs/html-change-review.md`.
+The user is told what the candidate changes and whether it can affect other slides before confirmation. The preview sidebar switches between current and candidate versions, lists every affected slide, and persists revision-bound `未確認` / `確認済み` / `要修正` state plus optional per-slide correction text through the loopback workflow API. Multiple requests therefore remain visible in `deck.yaml`/status after preview or app restart. A bare `修正して` instructs Work/GPT to consume every complete saved request, reassess their combined whole-deck impact, and prepare a replacement candidate; a legacy marker without correction text is incomplete. The semantic feedback digest excludes timestamps, detects concurrent edits, and is bound into the replacement transaction. The superseded proposal report archives the consumed feedback, while the new checklist resets to `未確認`. These marks are not partial approvals. Once all affected slides are confirmed and no known slide remains `要修正`, its revision-bound action may perform `approve-html-change`, `apply-html-change`, and `check-html-change` in sequence; explicit chat confirmation remains equivalent. `approve-html-change` binds confirmation to the current canonical HTML/registry revisions, exact candidate revisions, both dependency manifests, human explanation, and recomputed impact. `apply-html-change` is the only route that replaces canonical HTML/registry; it revalidates every bound input and dependency under one union writer lease and commits transactionally. The preview then closes comparison and shows the updated canonical deck. `check-html-change` stores revision-bound browser/environment/screenshot evidence for every affected slide still present, using transformed visible bounds and text-bearing element overflow checks. A separate whole-deck HTML approval is refused until that evidence is current. A stale or tampered proposal is rejected; cancellation remains safe because it never installs candidate bytes. See `docs/html-change-review.md`.
+
+For local or related corrections, `propose-html-slide-change` may assemble named slide fragments into a complete temporary candidate. It preserves the canonical slide order, count, IDs, and section membership, and rejects shared-style, structural, or otherwise unexplained affected-slide changes. This reduces HTML generation to the target/related slides without weakening the complete-candidate comparison, atomic apply, affected-slide browser checks, or final whole-deck approval. Structural/global work continues through `propose-html-change` after the wider scope is explained.
 
 Sections are still required for planning order, provenance closure, approval digests, impact reporting, and optional targeted work, but they are not separate user approval gates in whole-deck mode. One final HTML approval stores every current section digest and opens conversion.
 
@@ -53,11 +55,14 @@ A content/structure request made in finalization or after completion reopens the
 
 Natural conversation is routed internally to the high-level operations below. `advance` performs safe mechanical work only and stops at human approval checkpoints. Whole-deck proposal commands are agent-facing mechanics; users see the proposed change and impact in ordinary language.
 
+When the user supplies a GitHub repository as source, the connected GitHub App/Plugin may be used to search and select relevant material. Before planning authority is established, resolve the requested ref to an exact commit and transactionally capture selected tracked files with `capture-github-source`. Never treat connector snippets, a moving branch, a secret-bearing URL, or an unverified local reconstruction as the source of truth. See `docs/github-repository-sources.md`.
+
 ```text
 advance / approve-current / promote-current-section / edit-current
 finish-current-section / reopen-current-section / review-whole-deck
 capture-request / route / status [--json]
-propose-html-change / approve-html-change / apply-html-change / check-html-change / cancel-html-change
+propose-html-change / revise-html-change / revise-html-slide-change
+approve-html-change / apply-html-change / check-html-change / cancel-html-change
 ```
 
 ## State commands
@@ -66,12 +71,17 @@ propose-html-change / approve-html-change / apply-html-change / check-html-chang
 status [--json]                 consistent status; refresh stale content approval
 route [--json]                  deterministic primary-workspace route
 capture-request --text ...      persist the conversational brief in REQUEST.md
+capture-github-source           freeze selected tracked files at one GitHub commit
 advance                         move to the next human checkpoint, never approve
 approve-current                 approve only the displayed plan/HTML/content checkpoint
 adopt-whole-deck                adopt an existing complete HTML deck without rewriting it
 complete-html-deck              validate the complete deck and open one HTML review
 approve-html-deck               bind one approval to all current section digests
 propose-html-change             snapshot and analyze a candidate; canonical stays unchanged
+propose-html-slide-change       compose named slide fragments into one strictly scoped full candidate
+revise-html-change              atomically replace an active proposal from exact saved feedback
+revise-html-slide-change        patch named slides on the active candidate, then replace the proposal
+set-html-change-feedback        persist one revision-bound checklist mark and optional correction
 approve-html-change             confirm the exact current proposal and impact
 apply-html-change               transactionally install only the approved candidate
 check-html-change               browser-check installed affected slides and bind the evidence
@@ -89,13 +99,15 @@ discover-sources [--json]       resolve manifest/PDF candidates
 initialize                      initialized -> planning
 configure-sections ...          register single-file planned sections
 configure-chapters ...          legacy migrated modular equivalent
-submit-plan                     planning -> awaiting_plan_approval
-approve-plan                    -> html_authoring
+write-planning-artifact         transactionally replace one known planning file
+write-planning-artifacts        transactionally replace one complete planning bundle
+submit-plan                     store planning signature -> awaiting_plan_approval
+approve-plan                    verify unchanged signature -> html_authoring
 begin-section                   choose the first incomplete section
 complete-section                validate source -> html_review
 approve-section                 store digest; choose next or become ready
 unlock-section                  invalidate one approved section deliberately
-prepare-conversion              ready_for_conversion -> converting
+prepare-conversion              static preflight; ready_for_conversion -> converting only on pass
 mark-converted                  validate generated; initialize/retain authoring
 begin-authoring                 bento_validation -> bento_authoring
 begin-content-review            validate authoring -> content_review
@@ -112,6 +124,8 @@ block / resume                  preserve and revalidate the complete prior tuple
 
 State writes are atomic. Artifact-changing state transitions use the durable multi-artifact transaction layer where required. All repository-relative paths are traversal checked, generated/authoring/final paths are distinct, and sidecar paths must match their HTML names.
 
+For schema v2, plan submission is revision-bound. `approvals.planReview` records a SHA-256 signature over the persisted request, source manifest and manifest-listed source bytes, primary/supplementary sources, explanation policy, story outline, slide plan, optional visual plan, authoring mode/strategy, and ordered sections/chapters. Approval recomputes the signature under the shared writer lease, and stage validation uses the same current-signature contract. Status derives a non-persistent stale result when those inputs drift, so approval is no longer offered and the current bundle must be submitted again without destroying the saved review evidence. Agent-authored planning updates use `write-planning-artifact --artifact ... --from-file ...` or the all-core-files `write-planning-artifacts --from-directory ...` route. Those writes share the durable transaction layer with `deck.yaml`, invalidate a pending review, and return `awaiting_plan_approval` to `planning`. Request capture first refreshes `deck.yaml` under a request/state lease and invalidates plan review only when the actual current stage is still an early planning stage; a stale caller cannot erase an approval recorded by a concurrent transition.
+
 `set-project` is an agent-facing setup command, not an additional user short phrase. It is limited to schema v2 `initialized`/`planning`, changes only `project.kind` and `project.title`, and leaves stage and approvals unchanged. Blocked workflows must use `resume` first. The kind must match `^[a-z][a-z0-9_-]*$`; the title must be a non-empty single line.
 
 ## Standard single-HTML route
@@ -125,6 +139,8 @@ Planning may include the internal `planning/visual-plan.yaml` contract. For ever
 ## Bento authoring and content approval
 
 `mark-converted` validates generated output and initializes or retains the three authoring artifacts. `begin-authoring` hands them to Work. Authoring mode may change content and structure, with registry changes in the same save. It treats existing ID/type changes as explicit replace operations.
+
+`prepare-conversion` runs deterministic static annotation preflight before changing `ready_for_conversion` to `converting`. It writes `diagnostics/html-preflight.json`; blocking identity/protection errors leave the workflow ready and do not create or replace generated Bento artifacts. The formal HTML-first build repeats the same preflight before Chromium so drift after readiness cannot be missed. Editability risks remain explicit warnings rather than ordinary conversion blockers. Converter implementation failures are investigated outside the state machine with `scripts.run_conversion_repair`. Its writer-leased `output/conversion-repair/` workspace may reuse phase-specific slide evidence and retain failed input/reproducer bundles, but it never changes canonical HTML/registry, generated, authoring, final, approvals, or `deck.yaml`. A repair is accepted only after one normal cache-disabled conversion and the required full validation. See `docs/conversion-repair-loop.md`.
 
 Every save checks both base revisions and validates HTML/JSON/registry, cross references, protected metadata, resources, and runtime before a three-artifact commit. A registry body can be omitted only when the supplied current registry revision is still current and the proposed document validates against that registry. Registry-requiring document changes without the corresponding definitions are rejected.
 

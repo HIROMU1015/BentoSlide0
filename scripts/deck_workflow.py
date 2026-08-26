@@ -5,21 +5,24 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import hmac
 import json
 import os
 import re
 import sys
 import tempfile
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from pathlib import Path
-from typing import Any, Iterable
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable, Iterator, Mapping
 
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
 from bento_converter.artifact_transaction import (
+    ArtifactLeaseConflict,
     ArtifactTransactionStore,
     WriterLease,
     bytes_revision,
@@ -33,6 +36,12 @@ from bento_converter.authoring_storage import (
 )
 from bento_converter.bento_validator import validate_bento_doc
 from bento_converter.errors import BentoConverterError
+from bento_converter.github_source import (
+    GitHubRepositorySnapshot,
+    capture_github_repository,
+    descriptor_payload as github_descriptor_payload,
+    load_and_validate_descriptor as load_and_validate_github_descriptor,
+)
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html, runtime_fingerprint, serialize_bento_doc
 from bento_converter.html_change import (
     HTML_CHANGE_FORMAT,
@@ -44,8 +53,13 @@ from bento_converter.html_change_review import (
     POST_APPLY_REVIEW_FORMAT,
     collect_html_change_browser_evidence,
 )
+from bento_converter.html_slide_patch import (
+    build_localized_html_candidate,
+    parse_replacement_arguments,
+)
 from bento_converter.html_pipeline import build_from_html
-from bento_converter.html_source import REGISTRY_FORMAT
+from bento_converter.html_preflight import analyze_html_sources, write_preflight_report
+from bento_converter.html_source import REGISTRY_FORMAT, discover_source_unit, merge_registries
 from bento_converter.registry_document import (
     canonical_registry_json,
     load_registry,
@@ -58,6 +72,7 @@ from bento_converter.section_approval import (
     SectionApprovalEvidence,
     compute_html_deck_structure_evidence,
     compute_section_approval_evidence,
+    read_html_deck_outline,
 )
 from bento_converter.section_candidate import write_section_candidate
 from bento_converter.segment import (
@@ -72,7 +87,7 @@ from bento_converter.work_editor_storage import (
     protected_content_fingerprint,
     validate_editor_document,
 )
-from bento_converter.visual_planning import load_visual_plan
+from bento_converter.visual_planning import load_visual_plan, validate_visual_plan
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +103,17 @@ PLAN_FILES = {
     "slidePlan": Path("planning/slide-plan.md"),
 }
 VISUAL_PLAN_RELATIVE = Path("planning/visual-plan.yaml")
+PLANNING_ARTIFACT_FILES = {
+    "explanation-policy": PLAN_FILES["explanationPolicy"],
+    "story-outline": PLAN_FILES["storyOutline"],
+    "slide-plan": PLAN_FILES["slidePlan"],
+    "visual-plan": VISUAL_PLAN_RELATIVE,
+}
+PLANNING_ARTIFACT_FILENAMES = {
+    name: path.name for name, path in PLANNING_ARTIFACT_FILES.items()
+}
+WORK_LOG_RELATIVE = Path("planning/work-log.md")
+PLANNING_REVIEW_FORMAT = "bento/planning-review/v1"
 STAGE_OWNER = {
     "initialized": "work",
     "planning": "work",
@@ -121,6 +147,10 @@ WHOLE_DECK_STRATEGY = "whole_deck"
 ROLLING_SECTIONS_STRATEGY = "rolling_sections"
 ACTIVE_HTML_CHANGE_STATUSES = {"proposed", "approved"}
 HTML_DECK_REVIEW_FORMAT = "bento/html-deck-review-baseline/v1"
+LEGACY_HTML_CHANGE_FEEDBACK_FORMAT = "bento/html-change-feedback/v1"
+HTML_CHANGE_FEEDBACK_FORMAT = "bento/html-change-feedback/v2"
+HTML_CHANGE_FEEDBACK_DIGEST_FORMAT = "bento/html-change-feedback-digest/v1"
+MAX_HTML_CHANGE_INSTRUCTION_CHARS = 4000
 
 LEGACY_STAGE_SOURCE = {
     **STAGE_SOURCE,
@@ -133,6 +163,10 @@ LEGACY_STAGE_SOURCE = {
 
 class WorkflowError(RuntimeError):
     """A requested workflow operation is unsafe or invalid."""
+
+
+class PlanningRevisionConflict(WorkflowError):
+    """The exact planning material shown for review is no longer current."""
 
 
 def _authoring_strategy(state: dict[str, Any]) -> str:
@@ -149,6 +183,177 @@ def _html_change(state: dict[str, Any]) -> dict[str, Any] | None:
 def _html_review_baseline(state: dict[str, Any]) -> dict[str, Any] | None:
     value = state.get("authoring", {}).get("htmlReview")
     return value if isinstance(value, dict) else None
+
+
+def _html_change_feedback(state: dict[str, Any]) -> dict[str, Any] | None:
+    value = state.get("authoring", {}).get("htmlChangeFeedback")
+    return value if isinstance(value, dict) else None
+
+
+def _clean_feedback_instruction(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise WorkflowError("HTML change instruction must be text")
+    if "\x00" in value:
+        raise WorkflowError("HTML change instruction contains an invalid null character")
+    cleaned = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_HTML_CHANGE_INSTRUCTION_CHARS:
+        raise WorkflowError(
+            f"HTML change instruction exceeds {MAX_HTML_CHANGE_INSTRUCTION_CHARS} characters"
+        )
+    return cleaned
+
+
+def html_change_feedback_digest(feedback: Mapping[str, Any]) -> str:
+    """Bind semantic slide feedback while excluding timestamps."""
+
+    slides = {
+        str(slide_id): {
+            "state": value.get("state"),
+            "instruction": _clean_feedback_instruction(value.get("instruction")),
+            "viewedVersion": value.get("viewedVersion"),
+        }
+        for slide_id, value in sorted(dict(feedback.get("slides") or {}).items())
+    }
+    payload = {
+        "format": HTML_CHANGE_FEEDBACK_DIGEST_FORMAT,
+        "proposalId": feedback.get("proposalId"),
+        "proposalDigest": feedback.get("proposalDigest"),
+        "slides": slides,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _upgrade_html_change_feedback(
+    feedback: Mapping[str, Any], proposal: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return current feedback format without mutating a stored v1 record."""
+
+    if (
+        feedback.get("proposalId") != proposal.get("proposalId")
+        or feedback.get("proposalDigest") != proposal.get("proposalDigest")
+    ):
+        raise WorkflowError("HTML change feedback is stale for the active proposal")
+    now = utc_now()
+    result = {
+        "format": HTML_CHANGE_FEEDBACK_FORMAT,
+        "proposalId": proposal["proposalId"],
+        "proposalDigest": proposal["proposalDigest"],
+        "slides": {
+            str(slide_id): {
+                "state": value.get("state", "pending"),
+                "instruction": _clean_feedback_instruction(value.get("instruction")),
+                "viewedVersion": value.get("viewedVersion"),
+                "updatedAt": value.get("updatedAt") or now,
+            }
+            for slide_id, value in dict(feedback.get("slides") or {}).items()
+        },
+        "updatedAt": feedback.get("updatedAt") or now,
+    }
+    result["feedbackDigest"] = html_change_feedback_digest(result)
+    return result
+
+
+def _initial_html_change_feedback(proposal: Mapping[str, Any]) -> dict[str, Any]:
+    now = utc_now()
+    feedback = {
+        "format": HTML_CHANGE_FEEDBACK_FORMAT,
+        "proposalId": proposal["proposalId"],
+        "proposalDigest": proposal["proposalDigest"],
+        "slides": {
+            slide_id: {
+                "state": "pending", "instruction": None,
+                "viewedVersion": None, "updatedAt": now,
+            }
+            for slide_id in proposal["affectedSlideIds"]
+        },
+        "updatedAt": now,
+    }
+    feedback["feedbackDigest"] = html_change_feedback_digest(feedback)
+    return feedback
+
+
+def _require_feedback_ready(
+    state: dict[str, Any], proposal: Mapping[str, Any], *, require_reviewed: bool = False,
+) -> None:
+    """Require the persisted preview checklist when a current-format checklist exists."""
+
+    feedback = _html_change_feedback(state)
+    if feedback is None:
+        # Older current-format proposals remain operable. New proposals always
+        # initialize revision-bound server-side feedback.
+        return
+    slides = feedback["slides"]
+    needs_work = sorted(
+        slide_id for slide_id, value in slides.items()
+        if value["state"] == "needs_work"
+    )
+    if needs_work:
+        raise WorkflowError(
+            "HTML change proposal still has slides marked as needing work: "
+            + ", ".join(needs_work)
+        )
+    pending = [
+        slide_id for slide_id in proposal["affectedSlideIds"]
+        if slides.get(slide_id, {}).get("state") != "reviewed"
+    ]
+    if require_reviewed and pending:
+        raise WorkflowError(
+            "Every affected slide must be reviewed before approving the proposal: "
+            + ", ".join(pending)
+        )
+
+
+def _revision_feedback(
+    state: dict[str, Any], *, expected_digest: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return an exact active proposal and its complete saved revision request."""
+
+    proposal = _html_change(state)
+    if not proposal or proposal.get("status") not in ACTIVE_HTML_CHANGE_STATUSES:
+        raise WorkflowError("There is no active HTML change proposal to revise")
+    stored = _html_change_feedback(state)
+    if stored is None:
+        raise WorkflowError("The active HTML change proposal has no saved revision feedback")
+    feedback = _upgrade_html_change_feedback(stored, proposal)
+    if not hmac.compare_digest(str(expected_digest), str(feedback["feedbackDigest"])):
+        raise WorkflowError("HTML change revision feedback is stale")
+    needs_work = {
+        slide_id: value for slide_id, value in feedback["slides"].items()
+        if value["state"] == "needs_work"
+    }
+    if not needs_work:
+        raise WorkflowError("No slides are marked as needing work")
+    missing = sorted(
+        slide_id for slide_id, value in needs_work.items()
+        if _clean_feedback_instruction(value.get("instruction")) is None
+    )
+    if missing:
+        raise WorkflowError(
+            "Slides needing work have no saved instruction: " + ", ".join(missing)
+        )
+    return proposal, feedback
+
+
+def _feedback_request_text(
+    proposal: Mapping[str, Any], feedback: Mapping[str, Any], *, agent_request: str,
+) -> str:
+    titles = dict(proposal.get("slideTitles") or {})
+    instructions = [
+        f"{titles.get(slide_id, slide_id)}: {_clean_feedback_instruction(value.get('instruction'))}"
+        for slide_id, value in feedback["slides"].items()
+        if value["state"] == "needs_work"
+    ]
+    return _clean_proposal_text(
+        f"{agent_request} Saved preview feedback: " + " | ".join(instructions),
+        field="request",
+    )
 
 
 def _has_active_html_change(state: dict[str, Any]) -> bool:
@@ -329,6 +534,7 @@ def load_source_manifest(root: Path, state: dict[str, Any], *, require_exists: b
     if not isinstance(items, list):
         raise WorkflowError("Source manifest items must be an array")
     seen: set[str] = set()
+    repository_descriptors: list[tuple[str, dict[str, object]]] = []
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             raise WorkflowError(f"Source manifest item {index} must be an object")
@@ -342,12 +548,39 @@ def load_source_manifest(root: Path, state: dict[str, Any], *, require_exists: b
         if not isinstance(source_path, str) or not source_path:
             raise WorkflowError(f"Source manifest item {source_id!r} requires a path")
         resolved_source = _repo_path(root, source_path, field=f"sources.items[{index}].path")
-        if require_exists and not resolved_source.exists():
+        if require_exists and not resolved_source.is_file():
             raise WorkflowError(f"Source manifest item does not exist: {source_path}")
         if not isinstance(item.get("type"), str) or not item["type"]:
             raise WorkflowError(f"Source manifest item {source_id!r} requires a type")
         if item.get("role") not in {"primary", "evidence", "reference", "supplementary", "imported"}:
             raise WorkflowError(f"Source manifest item {source_id!r} has an invalid role")
+        content_digest = item.get("contentDigest")
+        if content_digest is not None:
+            if not isinstance(content_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", content_digest):
+                raise WorkflowError(f"Source manifest item {source_id!r} has an invalid contentDigest")
+            if require_exists and bytes_revision(resolved_source.read_bytes()) != content_digest:
+                raise WorkflowError(f"Source manifest item changed after registration: {source_path}")
+        if item.get("type") == "github-repository" and require_exists:
+            try:
+                descriptor = load_and_validate_github_descriptor(root, resolved_source)
+            except BentoConverterError as exc:
+                raise WorkflowError(str(exc)) from exc
+            repository_descriptors.append((source_id, descriptor))
+    if require_exists:
+        items_by_path = {str(item["path"]): item for item in items}
+        for source_id, descriptor in repository_descriptors:
+            for captured in descriptor["files"]:
+                local_path = str(captured["localPath"])
+                manifest_item = items_by_path.get(local_path)
+                if (
+                    manifest_item is None
+                    or manifest_item.get("repositorySource") != source_id
+                    or manifest_item.get("repositoryPath") != captured.get("repositoryPath")
+                    or manifest_item.get("contentDigest") != captured.get("contentDigest")
+                ):
+                    raise WorkflowError(
+                        f"GitHub source snapshot file is not revision-bound in the source manifest: {local_path}"
+                    )
     if manifest["authorityMode"] == "single":
         primaries = [item for item in items if item.get("role") == "primary"]
         if len(primaries) > 1:
@@ -464,6 +697,8 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                 raise WorkflowError("Modular authoring cannot declare a single-HTML authoring strategy")
             if state["authoring"].get("htmlChange") is not None:
                 raise WorkflowError("Modular authoring cannot retain an HTML change proposal")
+            if state["authoring"].get("htmlChangeFeedback") is not None:
+                raise WorkflowError("Modular authoring cannot retain HTML change feedback")
             if state["authoring"].get("htmlReview") is not None:
                 raise WorkflowError("Modular authoring cannot retain a whole-deck HTML review baseline")
         else:
@@ -624,6 +859,61 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
                         raise WorkflowError("Checked post-apply review requires complete current evidence")
                     if review["status"] == "pending" and stage != "html_review":
                         raise WorkflowError("Pending post-apply review is allowed only during HTML review")
+            feedback = _html_change_feedback(state)
+            if feedback is not None:
+                if proposal is None or proposal.get("status") not in ACTIVE_HTML_CHANGE_STATUSES:
+                    raise WorkflowError("HTML change feedback requires an active proposal")
+                if feedback["format"] not in {
+                    LEGACY_HTML_CHANGE_FEEDBACK_FORMAT, HTML_CHANGE_FEEDBACK_FORMAT,
+                }:
+                    raise WorkflowError("Unknown HTML change feedback format")
+                if (
+                    feedback["proposalId"] != proposal["proposalId"]
+                    or feedback["proposalDigest"] != proposal["proposalDigest"]
+                ):
+                    raise WorkflowError("HTML change feedback is stale for the active proposal")
+                missing_feedback = sorted(set(proposal["affectedSlideIds"]) - set(feedback["slides"]))
+                if missing_feedback:
+                    raise WorkflowError(
+                        "HTML change feedback is missing affected slides: "
+                        + ", ".join(missing_feedback)
+                    )
+                reviewed_outside_scope = sorted(
+                    slide_id for slide_id, value in feedback["slides"].items()
+                    if value["state"] == "reviewed" and slide_id not in proposal["affectedSlideIds"]
+                )
+                if reviewed_outside_scope:
+                    raise WorkflowError(
+                        "Only affected slides can be marked reviewed: "
+                        + ", ".join(reviewed_outside_scope)
+                    )
+                known_slides = {
+                    slide_id
+                    for section in state["sections"].values()
+                    for slide_id in section["slideIds"]
+                } | set(proposal["addedSlideIds"])
+                unknown_feedback = sorted(set(feedback["slides"]) - known_slides)
+                if unknown_feedback:
+                    raise WorkflowError(
+                        "HTML change feedback references unknown slides: "
+                        + ", ".join(unknown_feedback)
+                    )
+                if feedback["format"] == HTML_CHANGE_FEEDBACK_FORMAT:
+                    current_feedback_digest = html_change_feedback_digest(feedback)
+                    if feedback.get("feedbackDigest") != current_feedback_digest:
+                        raise WorkflowError("HTML change feedbackDigest does not match its saved instructions")
+                    invalid_instructions = sorted(
+                        slide_id for slide_id, value in feedback["slides"].items()
+                        if (
+                            value["state"] != "needs_work"
+                            and _clean_feedback_instruction(value.get("instruction")) is not None
+                        )
+                    )
+                    if invalid_instructions:
+                        raise WorkflowError(
+                            "Only slides needing work may retain an HTML change instruction: "
+                            + ", ".join(invalid_instructions)
+                        )
             registered_slides: set[str] = set()
             registered_bento_slides: set[str] = set()
             for section_id, section in state["sections"].items():
@@ -673,6 +963,24 @@ def validate_state(root: Path, state: dict[str, Any]) -> None:
     if resolved_outputs["finalJson"] != _sidecar_path(resolved_outputs["finalHtml"]):
         raise WorkflowError("outputs.finalJson must be the sidecar path derived from outputs.finalHtml")
     if version == 2:
+        plan_review = state["approvals"].get("planReview")
+        if isinstance(plan_review, dict):
+            if plan_review["status"] == "submitted":
+                if plan_review["approvedAt"] is not None:
+                    raise WorkflowError("Submitted plan review must not have an approval timestamp")
+                if any(
+                    state["approvals"][key] != "pending"
+                    for key in ("explanationPolicy", "storyOutline", "slidePlan")
+                ):
+                    raise WorkflowError("Submitted plan review requires pending planning approvals")
+            elif plan_review["status"] == "approved":
+                if plan_review["approvedAt"] is None:
+                    raise WorkflowError("Approved plan review requires an approval timestamp")
+                if any(
+                    state["approvals"][key] != "approved"
+                    for key in ("explanationPolicy", "storyOutline", "slidePlan")
+                ):
+                    raise WorkflowError("Approved plan review requires all planning approvals")
         authoring_values = [state["outputs"][field] for field in ("authoringHtml", "authoringJson", "authoringRegistry")]
         if any(value is None for value in authoring_values) and not all(value is None for value in authoring_values):
             raise WorkflowError("Authoring HTML, JSON, and registry paths must all be set or all be null")
@@ -837,7 +1145,12 @@ def discover_source_candidates(root: Path, state: dict[str, Any]) -> tuple[Path 
     raise WorkflowError(f"Multiple PDF sources found; set project.primarySource in deck.yaml: {display}")
 
 
-def ensure_source_manifest(root: Path, state: dict[str, Any]) -> None:
+def ensure_source_manifest(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    inherited_writer_lease: WriterLease | None = None,
+) -> None:
     """Create the unambiguous first manifest entry without asking for mechanics."""
 
     if state.get("schemaVersion") != 2:
@@ -867,7 +1180,9 @@ def ensure_source_manifest(root: Path, state: dict[str, Any]) -> None:
         }],
     }
     payload = yaml.safe_dump(candidate_manifest, allow_unicode=True, sort_keys=False).encode("utf-8")
-    ArtifactTransactionStore(root, (manifest_path,)).commit(
+    ArtifactTransactionStore(
+        root, (manifest_path,), inherited_writer_lease=inherited_writer_lease,
+    ).commit(
         {manifest_path: payload}, operation="auto-register-unambiguous-source",
     )
 
@@ -891,6 +1206,310 @@ def validate_planning(root: Path) -> None:
             load_visual_plan(visual_plan)
         except BentoConverterError as exc:
             raise WorkflowError(str(exc)) from exc
+
+
+def _planned_units(state: dict[str, Any]) -> dict[str, Any]:
+    single = state.get("schemaVersion") == 2 and state.get("authoring", {}).get("mode") != "modular"
+    units = state.get("sections") if single else state.get("chapters")
+    return units if isinstance(units, dict) else {}
+
+
+def planning_artifact_paths(root: Path, state: dict[str, Any]) -> tuple[Path, ...]:
+    """Return every source and planning file bound to one material-plan review."""
+
+    root = root.resolve()
+    paths: list[Path] = []
+
+    def add(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved not in paths:
+            paths.append(resolved)
+
+    request = state.get("project", {}).get("request")
+    if isinstance(request, str) and request:
+        add(_repo_path(root, request, field="project.request"))
+
+    if state.get("schemaVersion") == 2:
+        manifest_relative = state.get("sources", {}).get("manifest")
+        if isinstance(manifest_relative, str) and manifest_relative:
+            manifest_path = _repo_path(root, manifest_relative, field="sources.manifest")
+            add(manifest_path)
+            manifest = load_source_manifest(root, state, require_exists=False)
+            for item in manifest.get("items", []):
+                add(_repo_path(root, item["path"], field=f"sources.items.{item['id']}.path"))
+        for index, relative in enumerate(state.get("project", {}).get("supplementarySources", [])):
+            add(_repo_path(root, relative, field=f"project.supplementarySources.{index}"))
+        primary = state.get("project", {}).get("primarySource")
+        if isinstance(primary, str) and primary:
+            add(_repo_path(root, primary, field="project.primarySource"))
+
+    for relative in PLAN_FILES.values():
+        add(root / relative)
+    add(root / VISUAL_PLAN_RELATIVE)
+    return tuple(paths)
+
+
+def planning_action_artifact_paths(root: Path, state: dict[str, Any]) -> tuple[Path, ...]:
+    """Return the complete cross-process lease set for an early-stage planning action."""
+
+    return (
+        (root / STATE_RELATIVE).resolve(),
+        *planning_artifact_paths(root, state),
+        (root / WORK_LOG_RELATIVE).resolve(),
+    )
+
+
+def planning_review_signature_from_payloads(
+    root: Path,
+    state: dict[str, Any],
+    payloads: Mapping[Path, bytes | None],
+) -> str:
+    """Hash exact review inputs without including self-referential workflow metadata."""
+
+    root = root.resolve()
+    normalized = {Path(path).resolve(): payload for path, payload in payloads.items()}
+    artifacts: list[dict[str, Any]] = []
+    for path in planning_artifact_paths(root, state):
+        if path not in normalized:
+            raise WorkflowError(
+                f"Planning signature payload is missing: {path.relative_to(root).as_posix()}"
+            )
+        payload = normalized[path]
+        artifacts.append({
+            "path": path.relative_to(root).as_posix(),
+            "status": "present" if payload is not None else "missing",
+            "byteLength": len(payload) if payload is not None else 0,
+            "contentDigest": (
+                "sha256:" + hashlib.sha256(payload).hexdigest() if payload is not None else None
+            ),
+        })
+
+    project = state.get("project", {})
+    sources = state.get("sources", {})
+    authoring = state.get("authoring", {})
+    canonical = {
+        "format": PLANNING_REVIEW_FORMAT,
+        "project": {
+            key: copy.deepcopy(project.get(key))
+            for key in ("kind", "title", "request", "primarySource", "supplementarySources")
+        },
+        "sources": {
+            key: copy.deepcopy(sources.get(key)) for key in ("manifest", "authorityMode")
+        },
+        "authoring": {
+            "mode": authoring.get("mode"),
+            "strategy": authoring.get("strategy"),
+        },
+        "units": list(_planned_units(state).items()),
+        "artifacts": artifacts,
+    }
+    encoded = json.dumps(
+        canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def planning_review_signature(root: Path, state: dict[str, Any]) -> str:
+    """Return the revision of the exact plan, sources, request, and unit ordering under review."""
+
+    paths = planning_artifact_paths(root, state)
+    payloads = {path: path.read_bytes() if path.is_file() else None for path in paths}
+    return planning_review_signature_from_payloads(root, state, payloads)
+
+
+def validate_current_plan_review(root: Path, state: dict[str, Any]) -> str:
+    """Require the submitted schema-v2 plan review to match its current inputs."""
+
+    if state.get("schemaVersion") != 2:
+        return ""
+    review = state.get("approvals", {}).get("planReview")
+    if not isinstance(review, dict) or review.get("status") != "submitted":
+        raise PlanningRevisionConflict(
+            "The plan has no revision-bound review record; submit the current plan again"
+        )
+    if review.get("format") != PLANNING_REVIEW_FORMAT:
+        raise PlanningRevisionConflict(
+            "The planning review record uses an unsupported format; submit the current plan again"
+        )
+    current_signature = planning_review_signature(root, state)
+    submitted_signature = review.get("signature")
+    if not isinstance(submitted_signature, str) or not hmac.compare_digest(
+        submitted_signature, current_signature,
+    ):
+        raise PlanningRevisionConflict(
+            "The plan, source material, request, or planned order changed after review opened; "
+            "submit the current plan again"
+        )
+    return current_signature
+
+
+@contextmanager
+def planning_action_guard(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    inherited_writer_lease: WriterLease | None = None,
+) -> Iterator[WriterLease]:
+    """Serialize planning reads/writes and refresh stale caller state before acting."""
+
+    required = set(planning_action_artifact_paths(root, state))
+    lease = inherited_writer_lease or WriterLease(root, required)
+    acquired_here = inherited_writer_lease is None
+    try:
+        if acquired_here:
+            lease.acquire()
+        elif not lease.acquired or not required.issubset(set(lease.artifacts)):
+            raise PlanningRevisionConflict(
+                "The protected planning artifact set changed; reload the current project state"
+            )
+        fresh = load_state(root)
+        fresh_required = set(planning_action_artifact_paths(root, fresh))
+        if not fresh_required.issubset(set(lease.artifacts)):
+            raise PlanningRevisionConflict(
+                "The planning source set changed; reload the current project state"
+            )
+        state.clear()
+        state.update(fresh)
+        yield lease
+    except ArtifactLeaseConflict as exc:
+        raise PlanningRevisionConflict(
+            "Another process is updating the planning material; retry after it finishes"
+        ) from exc
+    finally:
+        if acquired_here:
+            lease.release()
+
+
+@contextmanager
+def request_capture_guard(root: Path, state: dict[str, Any]) -> Iterator[WriterLease]:
+    """Refresh request/state metadata under a small lease before deciding review invalidation."""
+
+    request = state.get("project", {}).get("request")
+    if not isinstance(request, str) or not request:
+        raise WorkflowError("project.request must identify the persisted request file")
+    required = {
+        (root / STATE_RELATIVE).resolve(),
+        _repo_path(root, request, field="project.request"),
+        (root / WORK_LOG_RELATIVE).resolve(),
+    }
+    lease = WriterLease(root, required)
+    try:
+        lease.acquire()
+        fresh = load_state(root)
+        fresh_request = fresh.get("project", {}).get("request")
+        if not isinstance(fresh_request, str) or not fresh_request:
+            raise WorkflowError("project.request must identify the persisted request file")
+        fresh_required = {
+            (root / STATE_RELATIVE).resolve(),
+            _repo_path(root, fresh_request, field="project.request"),
+            (root / WORK_LOG_RELATIVE).resolve(),
+        }
+        if not fresh_required.issubset(set(lease.artifacts)):
+            raise PlanningRevisionConflict(
+                "The persisted request path changed; reload the current project state"
+            )
+        state.clear()
+        state.update(fresh)
+        yield lease
+    except ArtifactLeaseConflict as exc:
+        raise PlanningRevisionConflict(
+            "Another process is updating the request or workflow state; retry after it finishes"
+        ) from exc
+    finally:
+        lease.release()
+
+
+def _invalidate_pending_plan_review(state: dict[str, Any]) -> None:
+    if state.get("schemaVersion") != 2:
+        return
+    approvals = state.setdefault("approvals", {})
+    if "planReview" in approvals or state.get("workflow", {}).get("stage") == "awaiting_plan_approval":
+        approvals["planReview"] = None
+    if state.get("workflow", {}).get("stage") == "awaiting_plan_approval":
+        _transition(state, "planning", "in_progress")
+
+
+def _validate_planning_artifact_payload(artifact: str, payload: bytes) -> None:
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise WorkflowError("Planning artifacts must be valid UTF-8") from exc
+    if "\x00" in text:
+        raise WorkflowError("Planning artifacts must not contain NUL characters")
+    if artifact in {"explanation-policy", "story-outline", "slide-plan"}:
+        without_comments = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+        without_headings = re.sub(r"^\s*#+\s+.*$", "", without_comments, flags=re.MULTILINE)
+        if not without_headings.strip():
+            raise WorkflowError(f"Planning artifact {artifact!r} must contain substantive content")
+    if artifact == "visual-plan":
+        try:
+            value = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise WorkflowError(f"Cannot parse visual plan: {exc}") from exc
+        if not isinstance(value, dict):
+            raise WorkflowError("Visual plan root must be an object")
+        try:
+            validate_visual_plan(value)
+        except BentoConverterError as exc:
+            raise WorkflowError(str(exc)) from exc
+
+
+def command_write_planning_artifacts(
+    root: Path,
+    state: dict[str, Any],
+    payloads: Mapping[str, bytes],
+    *,
+    inherited_writer_lease: WriterLease | None = None,
+) -> None:
+    """Write one or more known planning files in one crash-recoverable transaction."""
+
+    if not payloads:
+        raise WorkflowError("At least one planning artifact is required")
+    unknown = sorted(set(payloads) - set(PLANNING_ARTIFACT_FILES))
+    if unknown:
+        raise WorkflowError("Unknown planning artifact: " + ", ".join(unknown))
+    normalized = {name: bytes(payload) for name, payload in payloads.items()}
+    for name, payload in normalized.items():
+        _validate_planning_artifact_payload(name, payload)
+
+    with planning_action_guard(
+        root, state, inherited_writer_lease=inherited_writer_lease,
+    ) as lease:
+        _require_stage(state, "planning", "awaiting_plan_approval")
+        next_state = copy.deepcopy(state)
+        _invalidate_pending_plan_review(next_state)
+        destinations = {
+            name: (root / PLANNING_ARTIFACT_FILES[name]).resolve() for name in normalized
+        }
+        state_path = (root / STATE_RELATIVE).resolve()
+        transaction_payloads = {
+            destinations[name]: payload for name, payload in normalized.items()
+        }
+        transaction_payloads[state_path] = yaml.safe_dump(
+            next_state, allow_unicode=True, sort_keys=False,
+        ).encode("utf-8")
+        validate_state(root, next_state)
+        expected_revisions = {
+            path: file_revision(path) for path in (*destinations.values(), state_path)
+        }
+
+        def validate_base() -> None:
+            for path, expected in expected_revisions.items():
+                if file_revision(path) != expected:
+                    raise PlanningRevisionConflict(
+                        f"Planning input changed while preparing the update: {path.name}"
+                    )
+
+        ArtifactTransactionStore(
+            root, tuple(transaction_payloads), inherited_writer_lease=lease,
+        ).commit(
+            transaction_payloads,
+            operation="write-planning-artifacts",
+            validate_base=validate_base,
+        )
+        state.clear()
+        state.update(next_state)
+        append_work_log(root, "Updated planning artifacts: " + ", ".join(sorted(normalized)))
 
 
 def _load_chapter(root: Path, chapter_id: str, entry: dict[str, Any]) -> tuple[ChapterHtmlParser, dict[str, Any]]:
@@ -1018,6 +1637,31 @@ def validate_html_authoring(root: Path, state: dict[str, Any], *, require_approv
         validate_sections(root, state, require_approved=require_approved)
     else:
         validate_chapters(root, state, require_complete=require_approved)
+
+
+def run_conversion_readiness_preflight(root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    """Run the browser-free converter checks without advancing workflow state."""
+
+    if state.get("schemaVersion") == 2 and state["authoring"]["mode"] in {"single", "imported"}:
+        units = [discover_source_unit(
+            _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml"),
+            _repo_path(root, state["authoring"]["registry"], field="authoring.registry"),
+        )]
+    else:
+        units = [
+            discover_source_unit(
+                _repo_path(root, entry["html"], field=f"chapters.{chapter_id}.html"),
+                _repo_path(root, entry["registry"], field=f"chapters.{chapter_id}.registry"),
+            )
+            for chapter_id, entry in sorted(state["chapters"].items())
+        ]
+    report = analyze_html_sources(units, merge_registries(units))
+    generated_html = _repo_path(
+        root, state["outputs"]["generatedHtml"], field="outputs.generatedHtml",
+    )
+    write_preflight_report(generated_html.parent / "diagnostics" / "html-preflight.json", report)
+    report.raise_for_errors()
+    return report.as_dict()
 
 
 def _load_sidecar(path: Path) -> dict[str, Any]:
@@ -1239,6 +1883,194 @@ def _source_type(path: str) -> str:
         ".json": "dataset", ".csv": "dataset", ".tsv": "dataset",
         ".png": "image", ".jpg": "image", ".jpeg": "image", ".svg": "image",
     }.get(suffix, "document")
+
+
+def _github_source_identifier(snapshot: GitHubRepositorySnapshot, preferred: str | None) -> str:
+    value = preferred or f"github-{snapshot.owner}-{snapshot.name}"
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-.")
+    if not normalized or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", normalized):
+        raise WorkflowError("GitHub source id must use letters, numbers, dot, underscore, or hyphen")
+    return normalized
+
+
+def _work_log_with_entry(root: Path, message: str) -> bytes:
+    path = root / WORK_LOG_RELATIVE
+    existing = path.read_text(encoding="utf-8-sig") if path.is_file() else "# Work log\n\n"
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    return (existing + f"- {utc_now()} — {message}\n").encode("utf-8")
+
+
+def command_capture_github_source(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    repository: str,
+    requested_ref: str,
+    include_patterns: Iterable[str],
+    exclude_patterns: Iterable[str],
+    source_id: str | None,
+    role: str,
+    replace_primary: bool,
+) -> dict[str, Any]:
+    """Freeze a selected GitHub commit and register it as planning authority."""
+
+    if state.get("schemaVersion") != 2:
+        raise WorkflowError("GitHub repository sources require deck schema v2")
+    _require_stage(state, "initialized", "planning", "awaiting_plan_approval")
+    snapshot = capture_github_repository(
+        repository,
+        requested_ref=requested_ref,
+        include_patterns=tuple(include_patterns),
+        exclude_patterns=tuple(exclude_patterns),
+    )
+    identifier = _github_source_identifier(snapshot, source_id)
+    snapshot_root_relative = Path(
+        "sources/repositories",
+        f"{snapshot.owner}__{snapshot.name}",
+        snapshot.resolved_commit,
+    )
+    descriptor_relative = snapshot_root_relative / "repository-source.json"
+    local_paths = {
+        source.path: (snapshot_root_relative / "files" / PurePosixPath(source.path)).as_posix()
+        for source in snapshot.files
+    }
+    descriptor = github_descriptor_payload(snapshot, local_paths=local_paths)
+
+    with planning_action_guard(root, state) as lease:
+        _require_stage(state, "initialized", "planning", "awaiting_plan_approval")
+        manifest_path = _repo_path(root, state["sources"]["manifest"], field="sources.manifest")
+        manifest = copy.deepcopy(load_source_manifest(root, state, require_exists=False))
+        existing_items = list(manifest.get("items", []))
+        matching = [item for item in existing_items if item.get("id") == identifier]
+        if matching and any(item.get("type") != "github-repository" for item in matching):
+            raise WorkflowError(f"Source id {identifier!r} is already used by a non-GitHub source")
+        for item in matching:
+            descriptor_path = _repo_path(root, item["path"], field=f"sources.items.{identifier}.path")
+            if descriptor_path.is_file():
+                old_descriptor = load_and_validate_github_descriptor(root, descriptor_path)
+                if old_descriptor.get("repository") != snapshot.repository:
+                    raise WorkflowError(f"Source id {identifier!r} belongs to another GitHub repository")
+
+        retained = [
+            copy.deepcopy(item) for item in existing_items
+            if item.get("id") != identifier and item.get("repositorySource") != identifier
+        ]
+        other_primaries = [item for item in retained if item.get("role") == "primary"]
+        if role == "primary" and other_primaries and not replace_primary:
+            raise WorkflowError(
+                "Another primary source is already registered; confirm replacement with --replace-primary"
+            )
+        if role == "primary" and replace_primary:
+            for item in retained:
+                if item.get("role") == "primary":
+                    item["role"] = "evidence"
+
+        descriptor_item = {
+            "id": identifier,
+            "path": descriptor_relative.as_posix(),
+            "type": "github-repository",
+            "role": role,
+            "repository": snapshot.repository,
+            "resolvedCommit": snapshot.resolved_commit,
+        }
+        retained_ids = {str(item.get("id")) for item in retained}
+        captured_items = []
+        for source in snapshot.files:
+            file_identifier = (
+                f"{identifier}-file-"
+                + hashlib.sha256(source.path.encode("utf-8")).hexdigest()[:12]
+            )
+            if file_identifier in retained_ids:
+                raise WorkflowError(f"Generated GitHub source item id is already used: {file_identifier}")
+            captured_items.append({
+                "id": file_identifier,
+                "path": local_paths[source.path],
+                "type": _source_type(source.path),
+                "role": "evidence",
+                "repositorySource": identifier,
+                "repositoryPath": source.path,
+                "resolvedCommit": snapshot.resolved_commit,
+                "contentDigest": source.content_digest,
+            })
+        manifest["items"] = [descriptor_item, *captured_items, *retained]
+        if manifest.get("authorityMode") == "single":
+            primaries = [item for item in manifest["items"] if item.get("role") == "primary"]
+            if len(primaries) > 1:
+                raise WorkflowError("Single-authority source manifest cannot retain multiple primary items")
+
+        next_state = copy.deepcopy(state)
+        primary_items = [item for item in manifest["items"] if item.get("role") == "primary"]
+        next_state["project"]["primarySource"] = (
+            primary_items[0]["path"] if len(primary_items) == 1 else None
+        )
+        _invalidate_pending_plan_review(next_state)
+        validate_state(root, next_state)
+
+        state_path = (root / STATE_RELATIVE).resolve()
+        work_log_path = (root / WORK_LOG_RELATIVE).resolve()
+        payloads: dict[Path, bytes] = {
+            (root / local_paths[source.path]).resolve(): source.payload for source in snapshot.files
+        }
+        payloads[(root / descriptor_relative).resolve()] = descriptor
+        payloads[manifest_path] = yaml.safe_dump(
+            manifest, allow_unicode=True, sort_keys=False,
+        ).encode("utf-8")
+        payloads[state_path] = yaml.safe_dump(
+            next_state, allow_unicode=True, sort_keys=False,
+        ).encode("utf-8")
+        if all(path.is_file() and path.read_bytes() == payload for path, payload in payloads.items()):
+            result = {
+                "noOp": True,
+                "sourceId": identifier,
+                "repository": snapshot.repository,
+                "resolvedCommit": snapshot.resolved_commit,
+                "fileCount": len(snapshot.files),
+                "descriptor": descriptor_relative.as_posix(),
+                "skipped": list(snapshot.skipped),
+            }
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return result
+        payloads[work_log_path] = _work_log_with_entry(
+            root,
+            f"Captured GitHub source {snapshot.repository}@{snapshot.resolved_commit} "
+            f"({len(snapshot.files)} files)",
+        )
+        expected_revisions = {path: file_revision(path) for path in payloads}
+
+        def validate_base() -> None:
+            for path, expected in expected_revisions.items():
+                if file_revision(path) != expected:
+                    raise PlanningRevisionConflict(
+                        f"Source or workflow state changed while capturing GitHub input: {path.name}"
+                    )
+
+        def validate_committed() -> None:
+            committed_state = load_state(root)
+            load_source_manifest(root, committed_state)
+
+        ArtifactTransactionStore(
+            root, tuple(payloads), inherited_writer_lease=lease,
+        ).commit(
+            payloads,
+            operation="capture-github-source",
+            validate_base=validate_base,
+            validate_committed=validate_committed,
+        )
+        state.clear()
+        state.update(next_state)
+        result = {
+            "noOp": False,
+            "sourceId": identifier,
+            "repository": snapshot.repository,
+            "requestedRef": snapshot.requested_ref,
+            "resolvedCommit": snapshot.resolved_commit,
+            "fileCount": len(snapshot.files),
+            "descriptor": descriptor_relative.as_posix(),
+            "skipped": list(snapshot.skipped),
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
 
 
 def _migration_manifest(state: dict[str, Any]) -> dict[str, Any]:
@@ -1568,6 +2400,12 @@ def _effective_state(root: Path, state: dict[str, Any]) -> dict[str, Any]:
     effective = copy.deepcopy(state)
     if state.get("schemaVersion") != 2:
         return effective
+    if state.get("workflow", {}).get("stage") == "awaiting_plan_approval":
+        try:
+            validate_current_plan_review(root, state)
+        except (PlanningRevisionConflict, WorkflowError, OSError):
+            # Derived status only: keep the stale record in deck.yaml as inspectable evidence.
+            effective.setdefault("approvals", {})["planReview"] = None
     outputs = state["outputs"]
     content_approval = effective["approvals"]["bentoContent"]
     if content_approval["status"] == "approved" and outputs.get("authoringHtml") and outputs.get("authoringRegistry"):
@@ -1626,6 +2464,7 @@ def validate_current_stage(root: Path, state: dict[str, Any]) -> None:
         return
     if stage == "awaiting_plan_approval":
         validate_planning(root)
+        validate_current_plan_review(root, state)
         return
     if stage in {"html_authoring", "html_review", "ready_for_conversion", "converting"}:
         validate_html_authoring(
@@ -1719,6 +2558,14 @@ def user_status_summary(state: dict[str, Any]) -> dict[str, Any]:
             "html_review": ("資料全体のHTML確認", "変更案を確認するか、全体をBentoへ進めます"),
             "ready_for_conversion": ("資料全体のHTML承認済み", "BentoSlideへ変換します"),
         })
+    if (
+        stage == "awaiting_plan_approval"
+        and state.get("schemaVersion") == 2
+        and not isinstance(state.get("approvals", {}).get("planReview"), dict)
+    ):
+        labels["awaiting_plan_approval"] = (
+            "構成案を再確認中", "変更後の構成案を再提出してから承認してください",
+        )
     current, next_action = labels.get(stage, (stage, "状態を確認します"))
     current_id = state["workflow"].get("currentSection") or state["workflow"].get("currentChapter")
     section = state.get("sections", {}).get(current_id, {}).get("title") if current_id else None
@@ -1738,6 +2585,11 @@ def valid_actions(state: dict[str, Any]) -> list[str]:
     if stage == "planning":
         return ["edit-current", "advance"]
     if stage == "awaiting_plan_approval":
+        if (
+            state.get("schemaVersion") == 2
+            and not isinstance(state.get("approvals", {}).get("planReview"), dict)
+        ):
+            return ["edit-current", "advance"]
         return ["approve-current", "edit-current"]
     if stage == "html_authoring":
         return ["edit-current", "advance"]
@@ -1747,10 +2599,40 @@ def valid_actions(state: dict[str, Any]) -> list[str]:
             if proposal and proposal.get("status") == "proposed":
                 if proposal.get("format") != HTML_CHANGE_FORMAT:
                     return ["cancel-html-change"]
+                feedback = _html_change_feedback(state)
+                if feedback and any(
+                    value.get("state") == "needs_work"
+                    for value in feedback.get("slides", {}).values()
+                ):
+                    has_complete_instructions = all(
+                        value.get("state") != "needs_work"
+                        or _clean_feedback_instruction(value.get("instruction")) is not None
+                        for value in feedback.get("slides", {}).values()
+                    )
+                    return (
+                        ["revise-html-slide-change", "revise-html-change", "cancel-html-change"]
+                        if has_complete_instructions else
+                        ["set-html-change-feedback", "cancel-html-change"]
+                    )
                 return ["approve-html-change", "cancel-html-change"]
             if proposal and proposal.get("status") == "approved":
                 if proposal.get("format") != HTML_CHANGE_FORMAT:
                     return ["cancel-html-change"]
+                feedback = _html_change_feedback(state)
+                if feedback and any(
+                    value.get("state") == "needs_work"
+                    for value in feedback.get("slides", {}).values()
+                ):
+                    has_complete_instructions = all(
+                        value.get("state") != "needs_work"
+                        or _clean_feedback_instruction(value.get("instruction")) is not None
+                        for value in feedback.get("slides", {}).values()
+                    )
+                    return (
+                        ["revise-html-slide-change", "revise-html-change", "cancel-html-change"]
+                        if has_complete_instructions else
+                        ["set-html-change-feedback", "cancel-html-change"]
+                    )
                 return ["apply-html-change", "cancel-html-change"]
             if proposal and proposal.get("status") == "applied":
                 if proposal.get("format") != HTML_CHANGE_FORMAT:
@@ -1760,7 +2642,10 @@ def valid_actions(state: dict[str, Any]) -> list[str]:
                     return ["check-html-change"]
             if _html_review_baseline(state) is None:
                 return ["adopt-whole-deck"]
-            return ["approve-current", "edit-current", "propose-html-change"]
+            return [
+                "approve-current", "edit-current",
+                "propose-html-slide-change", "propose-html-change",
+            ]
         current = state["workflow"].get("currentSection")
         entry = state.get("sections", {}).get(current, {}) if current else {}
         return (
@@ -1793,16 +2678,33 @@ def command_capture_request(root: Path, state: dict[str, Any], *, text: str) -> 
     cleaned = text.strip()
     if not cleaned:
         raise WorkflowError("Request text must not be blank")
-    destination = _repo_path(root, state["project"]["request"], field="project.request")
     payload = (
         "# Presentation request\n\n"
         "This file is the persisted brief captured from the conversation.\n\n"
         "## Request\n\n" + cleaned + "\n"
     ).encode("utf-8")
-    ArtifactTransactionStore(root, (destination,)).commit(
-        {destination: payload}, operation="capture-presentation-request",
-    )
-    append_work_log(root, "Captured the current presentation request in REQUEST.md")
+    with request_capture_guard(root, state) as lease:
+        destination = _repo_path(root, state["project"]["request"], field="project.request")
+        transaction_payloads = {destination: payload}
+        planning_stage = state.get("workflow", {}).get("stage") in {
+            "initialized", "planning", "awaiting_plan_approval",
+        }
+        if planning_stage:
+            next_state = copy.deepcopy(state)
+            _invalidate_pending_plan_review(next_state)
+            validate_state(root, next_state)
+            transaction_payloads[(root / STATE_RELATIVE).resolve()] = yaml.safe_dump(
+                next_state, allow_unicode=True, sort_keys=False,
+            ).encode("utf-8")
+        ArtifactTransactionStore(
+            root, tuple(transaction_payloads), inherited_writer_lease=lease,
+        ).commit(
+            transaction_payloads, operation="capture-presentation-request",
+        )
+        if planning_stage:
+            state.clear()
+            state.update(next_state)
+        append_work_log(root, "Captured the current presentation request in REQUEST.md")
 
 
 def command_route(state: dict[str, Any], *, as_json: bool) -> None:
@@ -1875,9 +2777,6 @@ def command_advance(
 
 
 def command_set_project(root: Path, state: dict[str, Any], *, kind: str, title: str) -> None:
-    if state.get("schemaVersion") != 2:
-        raise WorkflowError("set-project requires deck schema v2")
-    _require_stage(state, "initialized", "planning")
     if not isinstance(kind, str) or not PROJECT_KIND_PATTERN.fullmatch(kind):
         raise WorkflowError("project kind must match ^[a-z][a-z0-9_-]*$")
     if (
@@ -1889,108 +2788,168 @@ def command_set_project(root: Path, state: dict[str, Any], *, kind: str, title: 
     ):
         raise WorkflowError("project title must be a non-empty single line without outer whitespace")
 
-    next_state = copy.deepcopy(state)
-    next_state["project"]["kind"] = kind
-    next_state["project"]["title"] = title
-    atomic_write_state(root, next_state)
-    append_work_log(root, f"Set project metadata: kind={kind!r}, title={title!r}")
+    with planning_action_guard(root, state):
+        if state.get("schemaVersion") != 2:
+            raise WorkflowError("set-project requires deck schema v2")
+        _require_stage(state, "initialized", "planning")
+        next_state = copy.deepcopy(state)
+        next_state["project"]["kind"] = kind
+        next_state["project"]["title"] = title
+        _invalidate_pending_plan_review(next_state)
+        atomic_write_state(root, next_state)
+        append_work_log(root, f"Set project metadata: kind={kind!r}, title={title!r}")
 
 
 def command_initialize(root: Path, state: dict[str, Any]) -> None:
-    _require_stage(state, "initialized")
-    ensure_source_manifest(root, state)
-    selected, _ = discover_source_candidates(root, state)
-    state["project"]["primarySource"] = selected.relative_to(root).as_posix() if selected else None
-    _transition(state, "planning", "in_progress")
-    atomic_write_state(root, state)
-    append_work_log(root, f"Initialized planning with primary source {state['project']['primarySource']}")
+    with planning_action_guard(root, state) as lease:
+        _require_stage(state, "initialized")
+        ensure_source_manifest(root, state, inherited_writer_lease=lease)
+        selected, _ = discover_source_candidates(root, state)
+        state["project"]["primarySource"] = selected.relative_to(root).as_posix() if selected else None
+        _invalidate_pending_plan_review(state)
+        _transition(state, "planning", "in_progress")
+        atomic_write_state(root, state)
+        append_work_log(root, f"Initialized planning with primary source {state['project']['primarySource']}")
 
 
 def command_configure_chapters(root: Path, state: dict[str, Any], chapter_ids: Iterable[str]) -> None:
-    _require_stage(state, "planning", "awaiting_plan_approval")
-    if state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular":
-        raise WorkflowError("configure-chapters is only available in modular authoring mode")
     values = list(dict.fromkeys(chapter_ids))
     if not values or any(not CHAPTER_PATTERN.fullmatch(value) for value in values):
         raise WorkflowError("Chapter IDs must use chapter-XX names")
-    for existing, entry in state["chapters"].items():
-        if existing not in values and entry["status"] != "planned":
-            raise WorkflowError(f"Cannot remove chapter after authoring has begun: {existing}")
-    state["chapters"] = {
-        chapter_id: state["chapters"].get(chapter_id, {
-            "html": f"chapters/{chapter_id}.preview.html",
-            "registry": f"chapters/{chapter_id}.registry.json",
-            "status": "planned",
-            "visualApproval": "pending",
-        })
-        for chapter_id in values
-    }
-    atomic_write_state(root, state)
-    append_work_log(root, "Configured chapters: " + ", ".join(values))
+    with planning_action_guard(root, state):
+        _require_stage(state, "planning", "awaiting_plan_approval")
+        if state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular":
+            raise WorkflowError("configure-chapters is only available in modular authoring mode")
+        for existing, entry in state["chapters"].items():
+            if existing not in values and entry["status"] != "planned":
+                raise WorkflowError(f"Cannot remove chapter after authoring has begun: {existing}")
+        state["chapters"] = {
+            chapter_id: state["chapters"].get(chapter_id, {
+                "html": f"chapters/{chapter_id}.preview.html",
+                "registry": f"chapters/{chapter_id}.registry.json",
+                "status": "planned",
+                "visualApproval": "pending",
+            })
+            for chapter_id in values
+        }
+        _invalidate_pending_plan_review(state)
+        atomic_write_state(root, state)
+        append_work_log(root, "Configured chapters: " + ", ".join(values))
 
 
 def command_configure_sections(root: Path, state: dict[str, Any], section_ids: Iterable[str]) -> None:
-    _require_stage(state, "planning", "awaiting_plan_approval")
-    if state.get("schemaVersion") != 2 or state["authoring"]["mode"] not in {"single", "imported"}:
-        raise WorkflowError("configure-sections requires schema v2 single/imported authoring")
     values = list(dict.fromkeys(section_ids))
     if not values or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) for value in values):
         raise WorkflowError("Section IDs must use stable alphanumeric, dot, underscore, or hyphen names")
-    for existing, entry in state["sections"].items():
-        if existing not in values and entry["status"] != "planned":
-            raise WorkflowError(f"Cannot remove section after authoring has begun: {existing}")
-    state["sections"] = {
-        section_id: state["sections"].get(section_id, {
-            "title": section_id,
-            "status": "planned",
-            "canonical": "planning",
-            "slideIds": [],
-            "bentoSlideIds": [],
-            "approvalDigest": None,
-            "bentoDocumentRevision": None,
-            "bentoRegistryRevision": None,
-            "bentoSectionDigest": None,
-            "acceptedAt": None,
-        })
-        for section_id in values
-    }
-    atomic_write_state(root, state)
-    append_work_log(root, "Configured sections: " + ", ".join(values))
+    with planning_action_guard(root, state):
+        _require_stage(state, "planning", "awaiting_plan_approval")
+        if state.get("schemaVersion") != 2 or state["authoring"]["mode"] not in {"single", "imported"}:
+            raise WorkflowError("configure-sections requires schema v2 single/imported authoring")
+        for existing, entry in state["sections"].items():
+            if existing not in values and entry["status"] != "planned":
+                raise WorkflowError(f"Cannot remove section after authoring has begun: {existing}")
+        state["sections"] = {
+            section_id: state["sections"].get(section_id, {
+                "title": section_id,
+                "status": "planned",
+                "canonical": "planning",
+                "slideIds": [],
+                "bentoSlideIds": [],
+                "approvalDigest": None,
+                "bentoDocumentRevision": None,
+                "bentoRegistryRevision": None,
+                "bentoSectionDigest": None,
+                "acceptedAt": None,
+            })
+            for section_id in values
+        }
+        _invalidate_pending_plan_review(state)
+        atomic_write_state(root, state)
+        append_work_log(root, "Configured sections: " + ", ".join(values))
 
 
 def command_submit_plan(root: Path, state: dict[str, Any]) -> None:
-    _require_stage(state, "planning")
-    validate_planning(root)
-    planned_units = state["sections"] if state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular" else state["chapters"]
-    if not planned_units:
-        raise WorkflowError("Register the planned sections or chapters before requesting approval")
-    _transition(state, "awaiting_plan_approval", "awaiting_approval")
-    atomic_write_state(root, state)
-    append_work_log(root, "Submitted explanation policy, story outline, and slide plan for approval")
+    if state.get("schemaVersion") != 2:
+        _require_stage(state, "planning")
+        validate_planning(root)
+        if not state["chapters"]:
+            raise WorkflowError("Register the planned chapters before requesting approval")
+        _transition(state, "awaiting_plan_approval", "awaiting_approval")
+        atomic_write_state(root, state)
+        append_work_log(root, "Submitted explanation policy, story outline, and slide plan for approval")
+        return
+
+    with planning_action_guard(root, state):
+        _require_stage(state, "planning", "awaiting_plan_approval")
+        validate_planning(root)
+        planned_units = _planned_units(state)
+        if not planned_units:
+            raise WorkflowError("Register the planned sections or chapters before requesting approval")
+        submitted_at = utc_now()
+        state["approvals"].update({
+            "explanationPolicy": "pending",
+            "storyOutline": "pending",
+            "slidePlan": "pending",
+            "planReview": {
+                "format": PLANNING_REVIEW_FORMAT,
+                "status": "submitted",
+                "signature": planning_review_signature(root, state),
+                "submittedAt": submitted_at,
+                "approvedAt": None,
+            },
+        })
+        _transition(state, "awaiting_plan_approval", "awaiting_approval")
+        atomic_write_state(root, state)
+        append_work_log(
+            root,
+            "Submitted a revision-bound planning bundle for approval "
+            f"({state['approvals']['planReview']['signature']})",
+        )
 
 
 def command_approve_plan(root: Path, state: dict[str, Any]) -> None:
-    _require_stage(state, "awaiting_plan_approval")
-    validate_planning(root)
-    single = state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular"
-    planned_units = state["sections"] if single else state["chapters"]
-    if not planned_units:
-        raise WorkflowError("No sections or chapters are configured")
-    for key in ("explanationPolicy", "storyOutline", "slidePlan"):
-        state["approvals"][key] = "approved"
-    first = next(iter(planned_units))
-    if single and _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
-        state["authoring"]["htmlChange"] = None
-        state["authoring"]["htmlReview"] = None
-        for entry in state["sections"].values():
-            entry.update({"status": "html_authoring", "canonical": "html", "approvalDigest": None})
-        _transition(state, "html_authoring", "in_progress", current=None)
-    else:
-        if single and state["sections"][first].get("canonical") is not None:
-            state["sections"][first].update({"status": "html_authoring", "canonical": "html"})
+    if state.get("schemaVersion") != 2:
+        _require_stage(state, "awaiting_plan_approval")
+        validate_planning(root)
+        if not state["chapters"]:
+            raise WorkflowError("No chapters are configured")
+        for key in ("explanationPolicy", "storyOutline", "slidePlan"):
+            state["approvals"][key] = "approved"
+        first = next(iter(state["chapters"]))
         _transition(state, "html_authoring", "in_progress", current=first)
-    atomic_write_state(root, state)
-    append_work_log(root, "Recorded plan approval and opened HTML authoring")
+        atomic_write_state(root, state)
+        append_work_log(root, "Recorded plan approval and opened HTML authoring")
+        return
+
+    with planning_action_guard(root, state):
+        _require_stage(state, "awaiting_plan_approval")
+        validate_planning(root)
+        planned_units = _planned_units(state)
+        if not planned_units:
+            raise WorkflowError("No sections or chapters are configured")
+        current_signature = validate_current_plan_review(root, state)
+        review = state["approvals"]["planReview"]
+        for key in ("explanationPolicy", "storyOutline", "slidePlan"):
+            state["approvals"][key] = "approved"
+        review["status"] = "approved"
+        review["approvedAt"] = utc_now()
+        first = next(iter(planned_units))
+        single = state["authoring"]["mode"] != "modular"
+        if single and _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
+            state["authoring"]["htmlChange"] = None
+            state["authoring"]["htmlChangeFeedback"] = None
+            state["authoring"]["htmlReview"] = None
+            for entry in state["sections"].values():
+                entry.update({"status": "html_authoring", "canonical": "html", "approvalDigest": None})
+            _transition(state, "html_authoring", "in_progress", current=None)
+        else:
+            if single and state["sections"][first].get("canonical") is not None:
+                state["sections"][first].update({"status": "html_authoring", "canonical": "html"})
+            _transition(state, "html_authoring", "in_progress", current=first)
+        atomic_write_state(root, state)
+        append_work_log(
+            root, f"Approved planning bundle {current_signature} and opened HTML authoring",
+        )
 
 
 def _select_section(state: dict[str, Any], requested: str | None) -> str:
@@ -2236,6 +3195,7 @@ def command_adopt_whole_deck(root: Path, state: dict[str, Any]) -> None:
     next_state = copy.deepcopy(state)
     next_state["authoring"]["strategy"] = WHOLE_DECK_STRATEGY
     next_state["authoring"]["htmlChange"] = None
+    next_state["authoring"]["htmlChangeFeedback"] = None
     _set_whole_deck_html_review(root, next_state, evidence, source="adopted-deck")
     atomic_write_state(root, next_state)
     append_work_log(root, "Adopted the existing full HTML deck as one review checkpoint")
@@ -2333,14 +3293,40 @@ def command_propose_html_change(
     impact_summary: str,
     requested_slide_ids: Iterable[str],
     related_slide_ids: Iterable[str],
+    strict_slide_scope: bool = False,
+    replace_feedback_digest: str | None = None,
 ) -> dict[str, Any]:
     """Snapshot a candidate and calculate impact without mutating canonical HTML."""
 
     _require_stage(state, "html_review")
     if _authoring_strategy(state) != WHOLE_DECK_STRATEGY:
         raise WorkflowError("HTML change proposals require whole-deck authoring")
+    requested_slide_ids = tuple(dict.fromkeys(requested_slide_ids))
+    related_slide_ids = tuple(dict.fromkeys(related_slide_ids))
+    replaced: tuple[dict[str, Any], dict[str, Any], Path, Path, Path] | None = None
     if _has_unfinished_html_change(state):
-        raise WorkflowError("Resolve the active HTML change proposal before creating another")
+        if replace_feedback_digest is None:
+            raise WorkflowError("Resolve the active HTML change proposal before creating another")
+        old_proposal, feedback = _revision_feedback(
+            state, expected_digest=replace_feedback_digest,
+        )
+        _, old_html, old_registry, old_report = _verified_html_change(
+            root, state, required_status=str(old_proposal["status"]),
+        )
+        requested_set = set(requested_slide_ids)
+        instructed = {
+            slide_id for slide_id, value in feedback["slides"].items()
+            if value["state"] == "needs_work"
+        }
+        omitted = sorted(instructed - requested_set)
+        if omitted:
+            raise WorkflowError(
+                "Revised HTML proposal omits slides with saved instructions: "
+                + ", ".join(omitted)
+            )
+        replaced = old_proposal, feedback, old_html, old_registry, old_report
+    elif replace_feedback_digest is not None:
+        raise WorkflowError("There is no active HTML change proposal to revise")
     base_evidence = _require_current_html_review(root, state)
     source_candidate = _repo_path(root, str(candidate_html), field="html-change.candidateHtml")
     if not source_candidate.is_file():
@@ -2351,7 +3337,8 @@ def command_propose_html_change(
         raise WorkflowError("Create an HTML change candidate instead of editing the canonical HTML directly")
     source_registry = (
         _repo_path(root, str(candidate_registry), field="html-change.candidateRegistry")
-        if candidate_registry is not None else canonical_registry
+        if candidate_registry is not None
+        else (replaced[3] if replaced is not None else canonical_registry)
     )
     if not source_registry.is_file():
         raise WorkflowError(f"HTML change candidate registry does not exist: {source_registry}")
@@ -2379,6 +3366,27 @@ def command_propose_html_change(
             requested_slide_ids=requested_slide_ids,
             related_slide_ids=related_slide_ids,
         )
+        if strict_slide_scope:
+            allowed = set(impact.requested_slide_ids) | set(impact.related_slide_ids)
+            unexpected = sorted(set(impact.affected_slide_ids) - allowed)
+            if (
+                impact.structural_impact or impact.global_style_changed
+                or impact.registry_changed or unexpected
+            ):
+                details: list[str] = []
+                if impact.structural_impact:
+                    details.append("slide structure/order changed")
+                if impact.global_style_changed:
+                    details.append("shared CSS changed")
+                if impact.registry_changed:
+                    details.append("registry changed")
+                if unexpected:
+                    details.append("additional affected slides: " + ", ".join(unexpected))
+                raise WorkflowError(
+                    "Localized HTML change exceeded its explained slide scope ("
+                    + "; ".join(details)
+                    + "). Explain the wider impact and use propose-html-change instead."
+                )
         candidate_evidence = _whole_deck_evidence(
             root, state, html_path=temporary_path, registry=candidate_registry_value,
         )
@@ -2400,7 +3408,10 @@ def command_propose_html_change(
         "candidateReviewDigest": candidate_evidence.review_digest,
         "candidateDependencyRevisions": dict(candidate_evidence.dependency_hashes),
         "proposalPath": _relative(root, proposal_path),
-        "request": _clean_proposal_text(request, field="request"),
+        "request": (
+            _feedback_request_text(replaced[0], replaced[1], agent_request=request)
+            if replaced is not None else _clean_proposal_text(request, field="request")
+        ),
         "summary": _clean_proposal_text(summary, field="summary"),
         "impactSummary": _clean_proposal_text(impact_summary, field="impact-summary"),
         **_proposal_impact_payload(impact, candidate_evidence),
@@ -2415,30 +3426,58 @@ def command_propose_html_change(
     proposal["proposalDigest"] = html_change_proposal_digest(proposal)
     next_state = copy.deepcopy(state)
     next_state["authoring"]["htmlChange"] = proposal
+    next_state["authoring"]["htmlChangeFeedback"] = _initial_html_change_feedback(proposal)
     validate_state(root, next_state)
     state_path = root / STATE_RELATIVE
+    base_state_revision = file_revision(state_path)
     payloads = {
         snapshot_html: candidate_html_payload,
         snapshot_registry: candidate_registry_payload,
         proposal_path: _proposal_report_payload(proposal),
         state_path: yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8"),
     }
+    if replaced is not None:
+        old_proposal, feedback, _, _, old_report = replaced
+        archived_report = copy.deepcopy(old_proposal)
+        archived_report.update({
+            "supersededAt": utc_now(),
+            "supersededByProposalId": proposal_id,
+            "supersedingFeedback": feedback,
+        })
+        payloads[old_report] = _proposal_report_payload(archived_report)
     dependency_paths = _review_dependency_paths(
         root,
         {**proposal["baseDependencyRevisions"], **proposal["candidateDependencyRevisions"]},
     )
     input_revisions = {
+        state_path: base_state_revision,
         canonical_html: proposal["baseHtmlRevision"],
         canonical_registry: proposal["baseRegistryRevision"],
         source_candidate: bytes_revision(candidate_html_payload),
         source_registry: bytes_revision(candidate_registry_payload),
     }
+    if replaced is not None:
+        old_proposal, _, old_html, old_registry, old_report = replaced
+        input_revisions.update({
+            old_html: old_proposal["candidateHtmlRevision"],
+            old_registry: old_proposal["candidateRegistryRevision"],
+            old_report: file_revision(old_report),
+        })
 
     def validate_base() -> None:
         for path, expected in input_revisions.items():
             if file_revision(path) != expected:
                 raise WorkflowError(f"HTML change input changed while creating the proposal: {path.name}")
         current_state = load_state(root)
+        if replaced is not None:
+            current_old, _ = _revision_feedback(
+                current_state, expected_digest=str(replaced[1]["feedbackDigest"]),
+            )
+            if current_old.get("proposalId") != replaced[0].get("proposalId"):
+                raise WorkflowError("HTML change proposal changed while creating its revision")
+            _verified_html_change(
+                root, current_state, required_status=str(current_old["status"]),
+            )
         current_evidence = _require_current_html_review(root, current_state)
         if current_evidence.review_digest != proposal["baseReviewDigest"]:
             raise WorkflowError("Whole-deck HTML review changed while creating the proposal")
@@ -2454,14 +3493,127 @@ def command_propose_html_change(
         (*payloads, *input_revisions, *dependency_paths),
     ).commit(
         payloads,
-        operation="propose-whole-deck-html-change",
+        operation=(
+            "revise-whole-deck-html-change"
+            if replaced is not None else "propose-whole-deck-html-change"
+        ),
         validate_base=validate_base,
     )
     append_work_log(
         root,
-        f"Proposed HTML change {proposal_id} ({proposal['scope']}); canonical HTML remains unchanged",
+        (
+            f"Revised HTML change {replaced[0]['proposalId']} as {proposal_id} "
+            f"({proposal['scope']}); canonical HTML remains unchanged"
+            if replaced is not None else
+            f"Proposed HTML change {proposal_id} ({proposal['scope']}); canonical HTML remains unchanged"
+        ),
     )
     return proposal
+
+
+def command_propose_localized_html_change(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    replacements: Mapping[str, Path],
+    candidate_registry: Path | None,
+    request: str,
+    summary: str,
+    impact_summary: str,
+    requested_slide_ids: Iterable[str],
+    related_slide_ids: Iterable[str],
+    replace_feedback_digest: str | None = None,
+) -> dict[str, Any]:
+    """Compose slide fragments into a full candidate, then use the normal review transaction."""
+
+    requested = tuple(dict.fromkeys(requested_slide_ids))
+    related = tuple(dict.fromkeys(related_slide_ids))
+    allowed = set(requested) | set(related)
+    if not requested:
+        raise WorkflowError("A localized HTML change requires at least one target slide")
+    if not set(replacements).issubset(allowed) or not set(requested).issubset(replacements):
+        raise WorkflowError(
+            "Localized replacements must include every target and may contain only target/related slides"
+        )
+    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    composition_html = canonical_html
+    composition_registry = _repo_path(
+        root, state["authoring"]["registry"], field="authoring.registry",
+    )
+    if replace_feedback_digest is not None:
+        old_proposal, _ = _revision_feedback(
+            state, expected_digest=replace_feedback_digest,
+        )
+        _, composition_html, composition_registry, _ = _verified_html_change(
+            root, state, required_status=str(old_proposal["status"]),
+        )
+    resolved_replacements = {
+        slide_id: _repo_path(root, str(path), field=f"html-change.replacement.{slide_id}")
+        for slide_id, path in replacements.items()
+    }
+    for slide_id, path in resolved_replacements.items():
+        if not path.is_file():
+            raise WorkflowError(f"Replacement HTML for {slide_id!r} does not exist: {path}")
+    try:
+        candidate_text = build_localized_html_candidate(composition_html, resolved_replacements)
+    except BentoConverterError as exc:
+        raise WorkflowError(str(exc)) from exc
+    temporary = tempfile.NamedTemporaryFile(
+        prefix=".localized-html-change-", suffix=".candidate.html",
+        dir=canonical_html.parent, delete=False,
+    )
+    temporary_path = Path(temporary.name)
+    try:
+        with temporary:
+            temporary.write(candidate_text.encode("utf-8"))
+        effective_registry = (
+            _repo_path(root, str(candidate_registry), field="html-change.candidateRegistry")
+            if candidate_registry is not None else composition_registry
+        )
+        if replace_feedback_digest is not None:
+            delta = analyze_html_change(
+                base_html=composition_html,
+                base_registry=_read_json(composition_registry, label="current candidate registry"),
+                candidate_html=temporary_path,
+                candidate_registry=_read_json(effective_registry, label="revised candidate registry"),
+                repository=root,
+                requested_slide_ids=requested,
+                related_slide_ids=related,
+            )
+            unexpected = sorted(set(delta.affected_slide_ids) - allowed)
+            if (
+                delta.structural_impact or delta.global_style_changed
+                or delta.registry_changed or unexpected
+            ):
+                details: list[str] = []
+                if delta.structural_impact:
+                    details.append("slide structure/order changed")
+                if delta.global_style_changed:
+                    details.append("shared CSS changed")
+                if delta.registry_changed:
+                    details.append("registry changed")
+                if unexpected:
+                    details.append("additional affected slides: " + ", ".join(unexpected))
+                raise WorkflowError(
+                    "Localized HTML revision exceeded its explained slide scope ("
+                    + "; ".join(details)
+                    + "). Explain the wider impact and use revise-html-change instead."
+                )
+        return command_propose_html_change(
+            root,
+            state,
+            candidate_html=temporary_path.relative_to(root),
+            candidate_registry=effective_registry.relative_to(root),
+            request=request,
+            summary=summary,
+            impact_summary=impact_summary,
+            requested_slide_ids=requested,
+            related_slide_ids=related,
+            strict_slide_scope=replace_feedback_digest is None,
+            replace_feedback_digest=replace_feedback_digest,
+        )
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _verified_html_change(
@@ -2541,9 +3693,12 @@ def _verified_html_change(
 
 def _commit_proposal_state(
     root: Path, state: dict[str, Any], proposal: dict[str, Any], proposal_path: Path, *, operation: str,
+    clear_feedback: bool = False,
 ) -> None:
     next_state = copy.deepcopy(state)
     next_state["authoring"]["htmlChange"] = proposal
+    if clear_feedback:
+        next_state["authoring"]["htmlChangeFeedback"] = None
     validate_state(root, next_state)
     state_path = root / STATE_RELATIVE
     payloads = {
@@ -2553,9 +3708,112 @@ def _commit_proposal_state(
     ArtifactTransactionStore(root, tuple(payloads)).commit(payloads, operation=operation)
 
 
+def command_set_html_change_feedback(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    proposal_id: str,
+    proposal_digest: str,
+    slide_id: str,
+    review_state: str,
+    viewed_version: str | None,
+    instruction: str | None = None,
+) -> dict[str, Any]:
+    """Persist one revision-bound preview decision and optional correction text."""
+
+    _require_stage(state, "html_review")
+    proposal = _html_change(state)
+    if not proposal or proposal.get("status") not in ACTIVE_HTML_CHANGE_STATUSES:
+        raise WorkflowError("There is no active HTML change proposal")
+    if proposal_id != proposal.get("proposalId") or proposal_digest != proposal.get("proposalDigest"):
+        raise WorkflowError("HTML change feedback is stale for the active proposal")
+    if review_state not in {"pending", "reviewed", "needs_work"}:
+        raise WorkflowError("Unknown HTML change review state")
+    if viewed_version not in {None, "canonical", "candidate"}:
+        raise WorkflowError("Unknown HTML change viewed version")
+    if review_state == "reviewed" and slide_id not in proposal["affectedSlideIds"]:
+        raise WorkflowError("Only affected slides can be marked reviewed")
+    cleaned_instruction = _clean_feedback_instruction(instruction)
+    if review_state != "needs_work" and cleaned_instruction is not None:
+        raise WorkflowError("Only slides needing work may retain an HTML change instruction")
+
+    _, snapshot_html, snapshot_registry, proposal_path = _verified_html_change(
+        root, state, required_status=str(proposal["status"]),
+    )
+
+    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    candidate_html = _repo_path(
+        root, proposal["candidateHtml"], field="authoring.htmlChange.candidateHtml",
+    )
+    known_slides = set(read_html_deck_outline(canonical_html).ordered_slide_ids)
+    known_slides.update(read_html_deck_outline(candidate_html).ordered_slide_ids)
+    if slide_id not in known_slides:
+        raise WorkflowError(f"HTML change feedback references an unknown slide: {slide_id}")
+
+    stored_feedback = _html_change_feedback(state) or _initial_html_change_feedback(proposal)
+    feedback = _upgrade_html_change_feedback(stored_feedback, proposal)
+    if (
+        feedback.get("proposalId") != proposal_id
+        or feedback.get("proposalDigest") != proposal_digest
+    ):
+        raise WorkflowError("HTML change feedback is stale for the active proposal")
+    now = utc_now()
+    if review_state == "needs_work" and cleaned_instruction is None:
+        cleaned_instruction = _clean_feedback_instruction(
+            feedback["slides"].get(slide_id, {}).get("instruction")
+        )
+    feedback["slides"][slide_id] = {
+        "state": review_state,
+        "instruction": cleaned_instruction if review_state == "needs_work" else None,
+        "viewedVersion": viewed_version,
+        "updatedAt": now,
+    }
+    feedback["updatedAt"] = now
+    feedback["feedbackDigest"] = html_change_feedback_digest(feedback)
+    next_state = copy.deepcopy(state)
+    next_state["authoring"]["htmlChangeFeedback"] = feedback
+    validate_state(root, next_state)
+
+    state_path = root / STATE_RELATIVE
+    canonical_registry = _repo_path(
+        root, state["authoring"]["registry"], field="authoring.registry",
+    )
+    dependency_paths = _review_dependency_paths(
+        root,
+        {**proposal["baseDependencyRevisions"], **proposal["candidateDependencyRevisions"]},
+    )
+    base_revision = file_revision(state_path)
+    state_payload = yaml.safe_dump(next_state, allow_unicode=True, sort_keys=False).encode("utf-8")
+
+    def validate_base() -> None:
+        if file_revision(state_path) != base_revision:
+            raise WorkflowError("deck.yaml changed while HTML change feedback was being saved")
+        current = load_state(root)
+        current_proposal = _html_change(current)
+        if not current_proposal or (
+            current_proposal.get("proposalId") != proposal_id
+            or current_proposal.get("proposalDigest") != proposal_digest
+        ):
+            raise WorkflowError("HTML change proposal changed while feedback was being saved")
+        _verified_html_change(
+            root, current, required_status=str(current_proposal["status"]),
+        )
+
+    ArtifactTransactionStore(root, (
+        state_path, canonical_html, canonical_registry,
+        snapshot_html, snapshot_registry, proposal_path, *dependency_paths,
+    )).commit(
+        {state_path: state_payload},
+        operation="set-html-change-feedback",
+        validate_base=validate_base,
+    )
+    return feedback
+
+
 def command_approve_html_change(root: Path, state: dict[str, Any]) -> None:
     _require_stage(state, "html_review")
     proposal, _, _, proposal_path = _verified_html_change(root, state, required_status="proposed")
+    _require_feedback_ready(state, proposal)
     approved = copy.deepcopy(proposal)
     approved["status"] = "approved"
     approved["approvedProposalDigest"] = approved["proposalDigest"]
@@ -2571,6 +3829,7 @@ def command_apply_html_change(root: Path, state: dict[str, Any]) -> None:
     proposal, snapshot_html, snapshot_registry, proposal_path = _verified_html_change(
         root, state, required_status="approved",
     )
+    _require_feedback_ready(state, proposal)
     canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
     canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
     candidate_html_payload = snapshot_html.read_bytes()
@@ -2605,6 +3864,7 @@ def command_apply_html_change(root: Path, state: dict[str, Any]) -> None:
     }
     next_state = copy.deepcopy(state)
     next_state["authoring"]["htmlChange"] = applied
+    next_state["authoring"]["htmlChangeFeedback"] = None
     _set_whole_deck_html_review(
         root,
         next_state,
@@ -2684,6 +3944,7 @@ def command_cancel_html_change(root: Path, state: dict[str, Any]) -> None:
     cancelled["cancelledAt"] = utc_now()
     _commit_proposal_state(
         root, state, cancelled, proposal_path, operation="cancel-whole-deck-html-change",
+        clear_feedback=True,
     )
     append_work_log(root, f"Cancelled HTML change proposal {cancelled['proposalId']}; canonical HTML was unchanged")
 
@@ -3294,9 +4555,14 @@ def command_prepare_conversion(root: Path, state: dict[str, Any]) -> None:
     validate_html_authoring(root, state, require_approved=True)
     if not state["handoff"]["readyForCodex"]:
         raise WorkflowError("Work-to-Codex handoff is not ready")
+    preflight = run_conversion_readiness_preflight(root, state)
     _transition(state, "converting", "in_progress")
     atomic_write_state(root, state)
-    append_work_log(root, "Validated conversion readiness and handed the deck to Codex")
+    warnings = preflight["summary"]["warnings"]
+    append_work_log(
+        root,
+        f"Validated conversion readiness with static HTML preflight ({warnings} warnings) and handed the deck to Codex",
+    )
 
 
 def command_mark_converted(root: Path, state: dict[str, Any]) -> None:
@@ -4093,6 +5359,13 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("chapters", nargs="+")
     configure_sections = commands.add_parser("configure-sections")
     configure_sections.add_argument("sections", nargs="+")
+    write_planning_artifact = commands.add_parser("write-planning-artifact")
+    write_planning_artifact.add_argument(
+        "--artifact", required=True, choices=tuple(PLANNING_ARTIFACT_FILES),
+    )
+    write_planning_artifact.add_argument("--from-file", required=True, type=Path)
+    write_planning_artifacts = commands.add_parser("write-planning-artifacts")
+    write_planning_artifacts.add_argument("--from-directory", required=True, type=Path)
     commands.add_parser("adopt-whole-deck")
     commands.add_parser("complete-html-deck")
     commands.add_parser("approve-html-deck")
@@ -4104,6 +5377,39 @@ def parser() -> argparse.ArgumentParser:
     propose_html_change.add_argument("--impact-summary", required=True)
     propose_html_change.add_argument("--target-slide", action="append", required=True, dest="target_slides")
     propose_html_change.add_argument("--related-slide", action="append", default=[], dest="related_slides")
+    propose_localized = commands.add_parser("propose-html-slide-change")
+    propose_localized.add_argument("--replacement", action="append", required=True)
+    propose_localized.add_argument("--candidate-registry", type=Path)
+    propose_localized.add_argument("--request", required=True)
+    propose_localized.add_argument("--summary", required=True)
+    propose_localized.add_argument("--impact-summary", required=True)
+    propose_localized.add_argument("--target-slide", action="append", required=True, dest="target_slides")
+    propose_localized.add_argument("--related-slide", action="append", default=[], dest="related_slides")
+    revise_html_change = commands.add_parser("revise-html-change")
+    revise_html_change.add_argument("--candidate-html", required=True, type=Path)
+    revise_html_change.add_argument("--candidate-registry", type=Path)
+    revise_html_change.add_argument("--request", required=True)
+    revise_html_change.add_argument("--summary", required=True)
+    revise_html_change.add_argument("--impact-summary", required=True)
+    revise_html_change.add_argument("--feedback-digest", required=True)
+    revise_html_change.add_argument("--target-slide", action="append", required=True, dest="target_slides")
+    revise_html_change.add_argument("--related-slide", action="append", default=[], dest="related_slides")
+    revise_localized = commands.add_parser("revise-html-slide-change")
+    revise_localized.add_argument("--replacement", action="append", required=True)
+    revise_localized.add_argument("--candidate-registry", type=Path)
+    revise_localized.add_argument("--request", required=True)
+    revise_localized.add_argument("--summary", required=True)
+    revise_localized.add_argument("--impact-summary", required=True)
+    revise_localized.add_argument("--feedback-digest", required=True)
+    revise_localized.add_argument("--target-slide", action="append", required=True, dest="target_slides")
+    revise_localized.add_argument("--related-slide", action="append", default=[], dest="related_slides")
+    set_feedback = commands.add_parser("set-html-change-feedback")
+    set_feedback.add_argument("--proposal-id", required=True)
+    set_feedback.add_argument("--proposal-digest", required=True)
+    set_feedback.add_argument("--slide", required=True)
+    set_feedback.add_argument("--state", required=True, choices=("pending", "reviewed", "needs_work"))
+    set_feedback.add_argument("--viewed-version", choices=("canonical", "candidate"))
+    set_feedback.add_argument("--instruction")
     commands.add_parser("approve-html-change")
     commands.add_parser("apply-html-change")
     check_html_change = commands.add_parser("check-html-change")
@@ -4153,6 +5459,17 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("reopen-finalization")
     discover = commands.add_parser("discover-sources")
     discover.add_argument("--json", action="store_true", dest="as_json")
+    github_source = commands.add_parser("capture-github-source")
+    github_source.add_argument("--repository", required=True)
+    github_source.add_argument("--ref", default="HEAD", dest="requested_ref")
+    github_source.add_argument("--source-id")
+    github_source.add_argument(
+        "--role", choices=("primary", "evidence", "reference", "supplementary"),
+        default="primary",
+    )
+    github_source.add_argument("--include", action="append", default=[], dest="include_patterns")
+    github_source.add_argument("--exclude", action="append", default=[], dest="exclude_patterns")
+    github_source.add_argument("--replace-primary", action="store_true")
     blocked = commands.add_parser("block")
     blocked.add_argument("--owner", choices=("work", "codex"), required=True)
     blocked.add_argument("--reason", required=True)
@@ -4186,12 +5503,53 @@ def run(args: argparse.Namespace) -> int:
         selected, candidates = discover_source_candidates(root, state)
         payload = {"primarySource": selected.relative_to(root).as_posix() if selected else None, "candidates": [path.relative_to(root).as_posix() for path in candidates]}
         print(json.dumps(payload, ensure_ascii=False, indent=2) if args.as_json else "\n".join(payload["candidates"]))
+    elif command == "capture-github-source":
+        command_capture_github_source(
+            root,
+            state,
+            repository=args.repository,
+            requested_ref=args.requested_ref,
+            include_patterns=args.include_patterns,
+            exclude_patterns=args.exclude_patterns,
+            source_id=args.source_id,
+            role=args.role,
+            replace_primary=args.replace_primary,
+        )
     elif command == "initialize":
         command_initialize(root, state)
     elif command == "configure-chapters":
         command_configure_chapters(root, state, args.chapters)
     elif command == "configure-sections":
         command_configure_sections(root, state, args.sections)
+    elif command == "write-planning-artifact":
+        source = _repo_path(root, str(args.from_file), field="planning.fromFile")
+        if not source.is_file():
+            raise WorkflowError(f"Planning input file does not exist: {args.from_file}")
+        command_write_planning_artifacts(root, state, {args.artifact: source.read_bytes()})
+    elif command == "write-planning-artifacts":
+        source_directory = _repo_path(
+            root, str(args.from_directory), field="planning.fromDirectory",
+        )
+        if not source_directory.is_dir():
+            raise WorkflowError(
+                f"Planning input directory does not exist: {args.from_directory}"
+            )
+        required_names = ("explanation-policy", "story-outline", "slide-plan")
+        missing = [
+            PLANNING_ARTIFACT_FILENAMES[name]
+            for name in required_names
+            if not (source_directory / PLANNING_ARTIFACT_FILENAMES[name]).is_file()
+        ]
+        if missing:
+            raise WorkflowError(
+                "Planning input directory is missing: " + ", ".join(missing)
+            )
+        planning_payloads = {
+            name: (source_directory / filename).read_bytes()
+            for name, filename in PLANNING_ARTIFACT_FILENAMES.items()
+            if (source_directory / filename).is_file()
+        }
+        command_write_planning_artifacts(root, state, planning_payloads)
     elif command == "adopt-whole-deck":
         command_adopt_whole_deck(root, state)
     elif command == "complete-html-deck":
@@ -4210,6 +5568,66 @@ def run(args: argparse.Namespace) -> int:
             related_slide_ids=args.related_slides,
         )
         print(json.dumps(proposal, ensure_ascii=False, indent=2))
+    elif command == "propose-html-slide-change":
+        try:
+            replacements = parse_replacement_arguments(args.replacement)
+        except BentoConverterError as exc:
+            raise WorkflowError(str(exc)) from exc
+        proposal = command_propose_localized_html_change(
+            root,
+            state,
+            replacements=replacements,
+            candidate_registry=args.candidate_registry,
+            request=args.request,
+            summary=args.summary,
+            impact_summary=args.impact_summary,
+            requested_slide_ids=args.target_slides,
+            related_slide_ids=args.related_slides,
+        )
+        print(json.dumps(proposal, ensure_ascii=False, indent=2))
+    elif command == "revise-html-change":
+        proposal = command_propose_html_change(
+            root, state,
+            candidate_html=args.candidate_html,
+            candidate_registry=args.candidate_registry,
+            request=args.request,
+            summary=args.summary,
+            impact_summary=args.impact_summary,
+            requested_slide_ids=args.target_slides,
+            related_slide_ids=args.related_slides,
+            replace_feedback_digest=args.feedback_digest,
+        )
+        print(json.dumps(proposal, ensure_ascii=False, indent=2))
+    elif command == "revise-html-slide-change":
+        try:
+            replacements = parse_replacement_arguments(args.replacement)
+        except BentoConverterError as exc:
+            raise WorkflowError(str(exc)) from exc
+        proposal = command_propose_localized_html_change(
+            root,
+            state,
+            replacements=replacements,
+            candidate_registry=args.candidate_registry,
+            request=args.request,
+            summary=args.summary,
+            impact_summary=args.impact_summary,
+            requested_slide_ids=args.target_slides,
+            related_slide_ids=args.related_slides,
+            replace_feedback_digest=args.feedback_digest,
+        )
+        print(json.dumps(proposal, ensure_ascii=False, indent=2))
+    elif command == "set-html-change-feedback":
+        feedback = command_set_html_change_feedback(
+            root,
+            state,
+            proposal_id=args.proposal_id,
+            proposal_digest=args.proposal_digest,
+            slide_id=args.slide,
+            review_state=args.state,
+            viewed_version=args.viewed_version,
+            instruction=args.instruction,
+        )
+        print(json.dumps(feedback, ensure_ascii=False, indent=2))
     elif command == "approve-html-change":
         command_approve_html_change(root, state)
     elif command == "apply-html-change":
