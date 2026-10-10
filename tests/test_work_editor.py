@@ -72,6 +72,22 @@ class WorkEditorTests(unittest.TestCase):
         self.assertEqual(extract_bento_doc(load_html(storage.target)), json.loads(storage.sidecar.read_text(encoding="utf-8")))
         self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), self.source_hash)
 
+    def test_protected_text_matches_across_inline_math_delimiters(self) -> None:
+        html = load_html(self.source)
+        document = extract_bento_doc(html)
+        next(
+            element for slide in document["slides"] for element in slide["elements"]
+            if element["id"] == "slide-1-title"
+        )["html"] = "0.7$t_{\\mathrm{ana}}$"
+        self.source.write_text(embed_bento_doc(html, document), encoding="utf-8")
+        registry = json.loads(self.registry.read_text(encoding="utf-8"))
+        registry["protected"]["requiredText"] = ["0.7t"]
+        self.registry.write_text(json.dumps(registry, ensure_ascii=False), encoding="utf-8")
+
+        storage = self.storage()
+
+        self.assertEqual(storage.status()["validation"], "pass")
+
     def test_existing_final_is_not_overwritten_without_reset(self) -> None:
         storage = self.storage()
         edited, revision, document = self.edited_html(storage, delta=7)
@@ -493,6 +509,28 @@ class WorkEditorBrowserTests(unittest.TestCase):
                     })
                   };
                 }""")
+                toolbar_layout = page.evaluate("""() => {
+                  const toolbar = document.getElementById('bento-work-editor');
+                  const host = document.getElementById('bento-work-editor-host');
+                  const toolbarRect = toolbar.getBoundingClientRect();
+                  const nativeTopButtons = [...document.querySelectorAll('button')]
+                    .filter(button => !host.contains(button))
+                    .map(button => button.getBoundingClientRect())
+                    .filter(rect => rect.width > 0 && rect.height > 0 && rect.top < 40);
+                  const overlaps = nativeTopButtons.filter(rect => !(
+                    toolbarRect.right <= rect.left || toolbarRect.left >= rect.right
+                    || toolbarRect.bottom <= rect.top || toolbarRect.top >= rect.bottom
+                  ));
+                  return {
+                    toolbarTop: toolbarRect.top,
+                    toolbarWidth: toolbarRect.width,
+                    toolbarHeight: toolbarRect.height,
+                    centerOffset: Math.abs((toolbarRect.left + toolbarRect.right) / 2 - innerWidth / 2),
+                    nativeToolbarBottom: Math.max(0, ...nativeTopButtons.map(rect => rect.bottom)),
+                    overlapCount: overlaps.length,
+                    insideViewport: toolbarRect.left >= 0 && toolbarRect.right <= innerWidth
+                  };
+                }""")
                 detached_contract = page.evaluate("""() => {
                   const host = document.getElementById('bento-work-editor-host');
                   const parent = host.parentNode;
@@ -591,6 +629,12 @@ class WorkEditorBrowserTests(unittest.TestCase):
             self.assertTrue(serialize_contract["connected"])
             self.assertTrue(serialize_contract["visible"])
             self.assertTrue(serialize_contract["buttonsUsable"])
+            self.assertGreaterEqual(toolbar_layout["toolbarTop"], toolbar_layout["nativeToolbarBottom"] + 6)
+            self.assertLessEqual(toolbar_layout["toolbarWidth"], 650)
+            self.assertLessEqual(toolbar_layout["toolbarHeight"], 40)
+            self.assertLessEqual(toolbar_layout["centerOffset"], 1)
+            self.assertEqual(toolbar_layout["overlapCount"], 0)
+            self.assertTrue(toolbar_layout["insideViewport"])
             self.assertEqual(detached_contract, {
                 "isString": True, "isPromise": False, "hasThen": False, "remainedDetached": True,
             })

@@ -22,6 +22,7 @@ from bento_converter.section_approval import (
 )
 from scripts.deck_workflow import (
     WorkflowError,
+    _validate_height_overflow_acceptance,
     atomic_write_state,
     command_adopt_whole_deck,
     command_apply_html_change,
@@ -418,6 +419,109 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "screenshot revision is stale"):
             command_approve_html_deck(self.root, checked)
         screenshot_path.write_bytes(screenshot_payload)
+        command_approve_html_deck(self.root, checked)
+        self.assertEqual(load_state(self.root)["workflow"]["stage"], "ready_for_conversion")
+
+    def test_pending_post_apply_review_can_be_superseded_by_corrective_proposal(self) -> None:
+        state = self.whole_deck_review()
+        canonical_path = self.root / "deck/deck.preview.html"
+        first = self.candidate(
+            canonical_path.read_text(encoding="utf-8").replace("Method", "Updated method")
+        )
+        applied_proposal = command_propose_html_change(
+            self.root, state, candidate_html=first, candidate_registry=None,
+            request="方法の説明を更新", summary="方法スライドの説明を更新します",
+            impact_summary="方法スライドだけに影響します",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        command_approve_html_change(self.root, load_state(self.root))
+        command_apply_html_change(self.root, load_state(self.root))
+        applied_state = load_state(self.root)
+
+        corrected = self.candidate(
+            canonical_path.read_text(encoding="utf-8").replace(
+                "Updated method", "Corrected method",
+            )
+        )
+        with self.assertRaisesRegex(WorkflowError, "Resolve the active HTML change"):
+            command_propose_html_change(
+                self.root, applied_state, candidate_html=corrected, candidate_registry=None,
+                request="表示寸法を補正", summary="表示上のはみ出しを補正します",
+                impact_summary="方法スライドだけに影響します",
+                requested_slide_ids=["method-1"], related_slide_ids=[],
+            )
+
+        replacement = command_propose_html_change(
+            self.root, applied_state, candidate_html=corrected, candidate_registry=None,
+            request="表示寸法を補正", summary="表示上のはみ出しを補正します",
+            impact_summary="方法スライドだけに影響します",
+            requested_slide_ids=["method-1"], related_slide_ids=[],
+            supersede_pending_post_apply_review=True,
+        )
+        current = load_state(self.root)
+        self.assertEqual(current["authoring"]["htmlChange"]["proposalId"], replacement["proposalId"])
+        self.assertEqual(current["authoring"]["htmlChange"]["status"], "proposed")
+        self.assertIn("Updated method", canonical_path.read_text(encoding="utf-8"))
+        old_report = json.loads(
+            (self.root / applied_proposal["proposalPath"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(old_report["supersededByProposalId"], replacement["proposalId"])
+        self.assertEqual(
+            old_report["supersedingReason"], "post-apply browser review correction",
+        )
+    def test_equation_height_acceptance_rejects_revision_drift_and_width_overflow(self) -> None:
+        review = {"htmlRevision": "sha256:" + "a" * 64,
+                  "registryRevision": "sha256:" + "b" * 64,
+                  "proposalDigest": "sha256:" + "c" * 64,
+                  "affectedSlideIds": ["method-1"]}
+        proposal = {"proposalId": "123456789abc"}
+        acceptance = {"format": "bento/equation-height-overflow-acceptance/v1",
+                      "userInstruction": "Keep the equation height overflow and convert",
+                      "proposalId": proposal["proposalId"], **review,
+                      "issues": [{"slideId": "method-1", "elementId": "equation-1",
+                                  "kind": "element-content-overflow", "client": {"w": 100, "h": 30},
+                                  "scroll": {"w": 100, "h": 34}}]}
+        _validate_height_overflow_acceptance(acceptance, review, proposal)
+        with self.assertRaisesRegex(WorkflowError, "stale"):
+            _validate_height_overflow_acceptance({**acceptance, "htmlRevision": "sha256:" + "d" * 64}, review, proposal)
+        acceptance["issues"][0]["scroll"]["w"] = 101
+        with self.assertRaisesRegex(WorkflowError, "Only measured"):
+            _validate_height_overflow_acceptance(acceptance, review, proposal)
+
+    def test_accepted_height_warning_is_persisted_and_allows_current_html_approval(self) -> None:
+        state = self.whole_deck_review()
+        canonical = (self.root / "deck/deck.preview.html").read_text(encoding="utf-8")
+        command_propose_html_change(
+            self.root, state, candidate_html=self.candidate(canonical.replace("Method", "Updated method")),
+            candidate_registry=None, request="Update method", summary="Update method",
+            impact_summary="Only method changes", requested_slide_ids=["method-1"], related_slide_ids=[],
+        )
+        command_approve_html_change(self.root, load_state(self.root))
+        command_apply_html_change(self.root, load_state(self.root))
+        state = load_state(self.root)
+        proposal = state["authoring"]["htmlChange"]
+        review = proposal["postApplyReview"]
+        issue = {"kind": "element-content-overflow", "elementId": "equation-1",
+                 "client": {"w": 100, "h": 30}, "scroll": {"w": 100, "h": 34}}
+        acceptance = {"format": "bento/equation-height-overflow-acceptance/v1",
+                      "userInstruction": "Keep the equation height overflow and convert",
+                      "proposalId": proposal["proposalId"],
+                      **{key: review[key] for key in ("htmlRevision", "registryRevision", "proposalDigest")},
+                      "issues": [{"slideId": "method-1", **issue}]}
+        path = self.root / "scratch/accepted-height.json"
+        path.write_text(json.dumps(acceptance), encoding="utf-8")
+        evidence = self.browser_evidence(["method-1"])
+        evidence.report.update({"status": "pass-with-accepted-warnings", "heightOverflowAcceptance": acceptance,
+                                "checks": [{"slideId": "method-1", "status": "accepted-warning",
+                                            "issues": [issue], "acceptedIssues": [issue]}]})
+        with patch("scripts.deck_workflow.collect_html_change_browser_evidence", return_value=evidence) as collect:
+            command_check_html_change(self.root, state, browser_executable=None,
+                                      accept_equation_height_overflow=path)
+        self.assertEqual(collect.call_args.kwargs["height_overflow_acceptance"], acceptance)
+        checked = load_state(self.root)
+        report = json.loads((self.root / checked["authoring"]["htmlChange"]["postApplyReview"]["reportPath"]).read_text())
+        self.assertEqual(report["heightOverflowAcceptance"]["issues"], acceptance["issues"])
+        self.assertEqual(report["status"], "pass-with-accepted-warnings")
         command_approve_html_deck(self.root, checked)
         self.assertEqual(load_state(self.root)["workflow"]["stage"], "ready_for_conversion")
 

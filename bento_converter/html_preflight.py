@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
@@ -16,6 +17,7 @@ from .html_source import SourceUnit
 
 PREFLIGHT_FORMAT = "bento/html-preflight/v1"
 ANNOTATION_ATTRIBUTES = {"data-bento-id", "data-bento-type", "data-bento-export"}
+PART_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 VOID_ELEMENTS = {
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
     "meta", "param", "source", "track", "wbr",
@@ -237,6 +239,28 @@ def _annotated_nodes(parser: _StructureParser) -> list[_Node]:
     return result
 
 
+def _all_nodes(parser: _StructureParser) -> list[_Node]:
+    result: list[_Node] = []
+
+    def visit(node: _Node) -> None:
+        result.append(node)
+        for child in node.children:
+            visit(child)
+
+    for root in parser.roots:
+        visit(root)
+    return result
+
+
+def _nearest_annotated_ancestor(node: _Node) -> _Node | None:
+    ancestor = node.parent
+    while ancestor is not None:
+        if ancestor.annotated:
+            return ancestor
+        ancestor = ancestor.parent
+    return None
+
+
 def analyze_html_sources(
     units: Iterable[SourceUnit], registry: dict[str, Any],
 ) -> HtmlPreflightReport:
@@ -254,6 +278,7 @@ def analyze_html_sources(
         parser.feed(unit.html_path.read_text(encoding="utf-8-sig"))
         parser.close()
         annotated = _annotated_nodes(parser)
+        all_nodes = _all_nodes(parser)
         annotated_count += len(annotated)
         slide_count += len(parser.slides)
 
@@ -274,6 +299,33 @@ def analyze_html_sources(
                 global_slide_ids.add(slide.slide_id)
 
         ids_by_slide: dict[str | None, set[str]] = {}
+        part_ids_by_owner: dict[int, set[str]] = {}
+        for part in (node for node in all_nodes if "data-bento-part" in node.attrs):
+            part_id = part.attrs.get("data-bento-part", "").strip()
+            owner = _nearest_annotated_ancestor(part)
+            if owner is None:
+                issues.append(_issue(
+                    "error", "bento-part-without-owner", unit, part,
+                    "data-bento-part is not inside an annotated Bento element.",
+                    "Place the part inside its data-bento-id owner or remove data-bento-part.",
+                ))
+                continue
+            if not PART_ID_PATTERN.fullmatch(part_id):
+                issues.append(_issue(
+                    "error", "invalid-bento-part-id", unit, owner,
+                    f"Bento part id {part_id!r} is not a stable identifier.",
+                    "Use letters, digits, hyphen, or underscore, beginning with a letter or digit.",
+                ))
+                continue
+            seen_parts = part_ids_by_owner.setdefault(id(owner), set())
+            if part_id in seen_parts:
+                issues.append(_issue(
+                    "error", "duplicate-bento-part-id", unit, owner,
+                    f"Bento part id {part_id!r} is duplicated within one owner.",
+                    "Use a unique data-bento-part value for each editable part of the owner.",
+                ))
+            else:
+                seen_parts.add(part_id)
         for node in annotated:
             if node.slide_id is None:
                 issues.append(_issue(

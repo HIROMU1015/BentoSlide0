@@ -76,9 +76,13 @@ def classify_native_compatibility(element: dict[str, Any]) -> Compatibility:
         if element.get("hasExplicitDescendants")
         else element.get("text") or ""
     ).strip())
+    has_semantic_content = bool(
+        has_owned_text
+        or (element_type == "equation" and (element.get("equationId") or element.get("registryId")))
+    )
     needs_editable_decomposition = bool(
         element.get("hasExplicitDescendants")
-        or (element_type == "shape" and has_owned_text)
+        or (element_type in {"shape", "text", "equation"} and has_semantic_content)
     )
     if unsupported and needs_editable_decomposition:
         return Compatibility(

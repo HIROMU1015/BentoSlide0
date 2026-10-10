@@ -31,7 +31,11 @@ from .registry_document import (
     validate_source_original_transition,
 )
 from .resource_embedding import scan_document_resources
-from .work_editor_storage import document_persistence_equal, document_revision
+from .work_editor_storage import (
+    document_persistence_equal,
+    document_revision,
+    protected_text_projection,
+)
 
 
 class AuthoringConflict(BentoConverterError):
@@ -78,16 +82,20 @@ def _elements(document: dict[str, Any]):
 
 
 def _visible_document_text(document: dict[str, Any]) -> str:
-    values = [str(document.get("title", ""))]
+    values = [protected_text_projection(str(document.get("title", "")))]
     for slide in document.get("slides", []):
         if not isinstance(slide, dict):
             continue
-        values.append(str(slide.get("notes", "")))
+        values.append(protected_text_projection(str(slide.get("notes", ""))))
         for element in slide.get("elements", []):
             if isinstance(element, dict):
-                values.append(str(element.get("html", "")))
-                values.append(str(element.get("sourceText", "")))
-                values.append(json.dumps(element.get("rows", []), ensure_ascii=False, sort_keys=True))
+                values.append(protected_text_projection(str(element.get("html", ""))))
+                values.append(protected_text_projection(str(element.get("sourceText", ""))))
+                values.append(
+                    protected_text_projection(
+                        json.dumps(element.get("rows", []), ensure_ascii=False, sort_keys=True)
+                    )
+                )
     return "\n".join(values)
 
 

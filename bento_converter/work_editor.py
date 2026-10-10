@@ -25,9 +25,10 @@ TOOLBAR = r"""
     host.dataset.workEditorUi = 'true';
     host.innerHTML = `
       <style id="bento-work-editor-style">
-      #bento-work-editor{position:fixed;right:12px;top:12px;z-index:2147483647;display:flex;gap:6px;align-items:center;padding:8px;background:rgba(15,23,42,.94);color:#fff;border-radius:8px;box-shadow:0 4px 18px #0004;font:12px/1.3 system-ui,sans-serif}
-      #bento-work-editor button{border:0;border-radius:5px;padding:6px 9px;cursor:pointer;background:#e2e8f0;color:#0f172a}
-      #bento-work-editor-status{max-width:320px;white-space:pre-wrap}
+      #bento-work-editor{position:fixed;left:50%;right:auto;top:52px;transform:translateX(-50%);z-index:2147483647;display:flex;flex-wrap:wrap;max-width:calc(100vw - 24px);gap:4px;align-items:center;padding:5px 6px;box-sizing:border-box;background:rgba(15,23,42,.94);color:#fff;border-radius:6px;box-shadow:0 3px 12px #0004;font:11px/1.2 system-ui,sans-serif}
+      #bento-work-editor button{border:0;border-radius:4px;padding:4px 7px;cursor:pointer;background:#e2e8f0;color:#0f172a;font:inherit}
+      #bento-work-editor-mode{font-size:10px;opacity:.72}
+      #bento-work-editor-status{display:block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       </style>
       <div id="bento-work-editor" data-work-editor-ui="true">
         <button id="work-save" type="button">&#x30ED;&#x30FC;&#x30AB;&#x30EB;&#x4FDD;&#x5B58;</button>
@@ -48,7 +49,7 @@ TOOLBAR = r"""
     const status = document.getElementById('bento-work-editor-status');
     const controls = Array.from(host.querySelectorAll('button'));
     controls.forEach(button => { button.disabled = true; });
-    const message = text => { status.textContent = text; };
+    const message = text => { status.textContent = text; status.title = text; };
     const errorText = payload => (payload.errors || [payload.error || '\u4e0d\u660e\u306a\u30a8\u30e9\u30fc']).join('\n');
     const originalSerialize = window.bento.serialize.bind(window.bento);
     const guardedSerialize = (...args) => {

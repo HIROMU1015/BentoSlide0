@@ -17,6 +17,7 @@ from .bento_validator import validate_bento_doc
 from .browser_harness import BrowserHarness
 from .errors import BentoConverterError
 from .html_document import embed_bento_doc, extract_bento_doc
+from .html_converter import sanitize_inline_html
 from .work_editor_client import WorkEditorClient
 
 
@@ -53,6 +54,7 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
         "properties": ["x", "y", "w", "h"],
     },
     "set-text": {"modes": ["authoring"], "plainTextOnly": True},
+    "set-text-html": {"modes": ["authoring"], "sanitizedInlineHtmlOnly": True},
     "set-order": {
         "modes": ["authoring", "final"],
         "orders": ["front", "forward", "backward", "back"],
@@ -138,7 +140,7 @@ def validate_browser_edit_plan(value: Any) -> dict[str, Any]:
         slide_id = raw.get("slideId")
         _require(isinstance(slide_id, str) and slide_id, f"operations[{index}].slideId is required")
         operation = dict(raw)
-        if name in {"set-shape", "set-text-style", "set-geometry", "set-order", "set-text", "duplicate", "delete"}:
+        if name in {"set-shape", "set-text-style", "set-geometry", "set-order", "set-text", "set-text-html", "duplicate", "delete"}:
             element_id = raw.get("elementId")
             _require(isinstance(element_id, str) and element_id, f"operations[{index}].elementId is required")
         if name == "align":
@@ -164,6 +166,11 @@ def validate_browser_edit_plan(value: Any) -> dict[str, Any]:
             operation["properties"] = properties
         if name == "set-text":
             _require(isinstance(raw.get("text"), str), f"operations[{index}].text must be a string")
+        if name == "set-text-html":
+            _require(isinstance(raw.get("html"), str), f"operations[{index}].html must be a string")
+            sanitized = sanitize_inline_html(raw["html"])
+            _require(sanitized, f"operations[{index}].html must contain visible inline content")
+            operation["html"] = sanitized
         if name in {"set-order", "add-rectangle"}:
             order = raw.get("order", "front")
             allowed_orders = CAPABILITIES[name]["orders"]
@@ -397,6 +404,14 @@ def _apply_authoring_plan(
                     "set-text refuses equations; use the registered equation authoring route",
                 )
                 target["html"] = html_module.escape(operation["text"])
+            elif name == "set-text-html":
+                _require(target.get("type") == "text", "set-text-html requires a text element")
+                _require(
+                    not target.get("equationId") and not target.get("latexSource")
+                    and not str(target.get("html", "")).startswith("$$"),
+                    "set-text-html refuses equations; use the registered equation authoring route",
+                )
+                target["html"] = operation["html"]
             elif name == "set-order":
                 _move_element(elements, target, operation["order"])
             elif name == "duplicate":

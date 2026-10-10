@@ -88,6 +88,42 @@ class HtmlPreflightTests(unittest.TestCase):
             self.assertEqual(report.issues, ())
             self.assertEqual(report.as_dict()["summary"]["annotatedElements"], 2)
 
+    def test_unique_bento_parts_inside_one_owner_are_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            html_path, registry_path, value = write_pair(
+                root,
+                "<section class='slide' data-slide-id='one'>"
+                "<div data-bento-id='card' data-bento-type='shape'>"
+                "<strong data-bento-part='heading'>Heading</strong>"
+                "<span data-bento-part='body'>Body</span>"
+                "</div></section>",
+            )
+            report = analyze_html_sources([SourceUnit("deck", html_path, registry_path, value)], value)
+
+            self.assertTrue(report.passed)
+            self.assertNotIn("invalid-bento-part-id", [item.code for item in report.issues])
+            self.assertNotIn("duplicate-bento-part-id", [item.code for item in report.issues])
+
+    def test_duplicate_or_unowned_bento_parts_are_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            html_path, registry_path, value = write_pair(
+                root,
+                "<section class='slide' data-slide-id='one'>"
+                "<span data-bento-part='orphan'>Orphan</span>"
+                "<div data-bento-id='card' data-bento-type='shape'>"
+                "<strong data-bento-part='same'>Heading</strong>"
+                "<span data-bento-part='same'>Body</span>"
+                "</div></section>",
+            )
+            report = analyze_html_sources([SourceUnit("deck", html_path, registry_path, value)], value)
+
+            self.assertFalse(report.passed)
+            codes = [item.code for item in report.errors]
+            self.assertIn("bento-part-without-owner", codes)
+            self.assertIn("duplicate-bento-part-id", codes)
+
     def test_duplicate_ids_and_fallback_without_id_fail_before_browser_launch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

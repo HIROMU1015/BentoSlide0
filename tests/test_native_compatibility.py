@@ -66,6 +66,17 @@ class NativeCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(classify_native_compatibility(candidate).classification, "background-image-required")
 
+    def test_unsupported_semantic_text_and_equation_keep_editable_overlays(self) -> None:
+        for element_type in ("text", "equation"):
+            candidate = item(
+                type=element_type, text="Editable",
+                style={**item()["style"], "filter": "blur(2px)"},
+            )
+            self.assertEqual(
+                classify_native_compatibility(candidate).classification,
+                "background-image-required",
+            )
+
     def test_slide_gradient_is_background_adjustment(self) -> None:
         result = classify_slide_background({"backgroundStyle": {"backgroundImage": "linear-gradient(90deg, red, blue)"}})
         self.assertEqual(result.classification, "native-with-adjustment")

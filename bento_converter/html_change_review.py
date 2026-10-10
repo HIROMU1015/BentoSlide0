@@ -69,6 +69,18 @@ def _overflow_issue(element: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _accepted_equation_height_issue(
+    slide_id: str, element: dict[str, Any], issue: dict[str, Any],
+    accepted_issues: Iterable[dict[str, Any]],
+) -> bool:
+    """Accept only the exact measured, explicitly acknowledged equation height issue."""
+    if element.get("type") != "equation" or issue.get("kind") != "element-content-overflow":
+        return False
+    if issue["scroll"]["w"] > issue["client"]["w"] + TOLERANCE:
+        return False
+    return {"slideId": slide_id, **issue} in accepted_issues
+
+
 def collect_html_change_browser_evidence(
     *,
     html_path: str | Path,
@@ -76,6 +88,7 @@ def collect_html_change_browser_evidence(
     affected_slide_ids: Iterable[str],
     screenshots_dir: str | Path,
     browser_executable: str | Path | None = None,
+    height_overflow_acceptance: dict[str, Any] | None = None,
 ) -> HtmlChangeBrowserEvidence:
     """Render the current deck and return strict evidence for every affected slide."""
 
@@ -100,15 +113,21 @@ def collect_html_change_browser_evidence(
     }
     checks: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    accepted_issues = (height_overflow_acceptance or {}).get("issues", [])
+    observed_accepted: list[dict[str, Any]] = []
     selected_screenshots: dict[str, Path] = {}
     for slide_id in affected:
         slide = slides[slide_id]
-        issues = [
-            issue
-            for element in slide.get("elements", [])
-            for issue in (_frame_issue(element), _overflow_issue(element))
-            if issue is not None
-        ]
+        issues: list[dict[str, Any]] = []
+        accepted: list[dict[str, Any]] = []
+        for element in slide.get("elements", []):
+            for issue in (_frame_issue(element), _overflow_issue(element)):
+                if issue is None:
+                    continue
+                issues.append(issue)
+                if _accepted_equation_height_issue(slide_id, element, issue, accepted_issues):
+                    accepted.append(issue)
+                    observed_accepted.append({"slideId": slide_id, **issue})
         screenshot = screenshot_by_slide[slide_id]
         if not screenshot.is_file():
             issues.append({"kind": "missing-screenshot"})
@@ -119,11 +138,16 @@ def collect_html_change_browser_evidence(
             "sourceSize": {"w": slide.get("sourceWidth"), "h": slide.get("sourceHeight")},
             "elementCount": len(slide.get("elements", [])),
             "issues": issues,
-            "status": "pass" if not issues else "fail",
+            "acceptedIssues": accepted,
+            "status": "pass" if not issues else (
+                "accepted-warning" if issues == accepted else "fail"
+            ),
         }
         checks.append(check)
-        if issues:
+        if check["status"] == "fail":
             failures.append(check)
+    if accepted_issues != observed_accepted:
+        raise BrowserCheckError("Accepted equation height issues are stale or do not match current measurements")
     if failures:
         summary = ", ".join(
             f"{item['slideId']} ({', '.join(issue['kind'] for issue in item['issues'])})"
@@ -133,7 +157,8 @@ def collect_html_change_browser_evidence(
     return HtmlChangeBrowserEvidence(
         report={
             "format": POST_APPLY_REPORT_FORMAT,
-            "status": "pass",
+            "status": "pass-with-accepted-warnings" if observed_accepted else "pass",
+            "heightOverflowAcceptance": height_overflow_acceptance,
             "affectedSlideIds": list(affected),
             "checks": checks,
             "networkPolicy": environment["browserEnvironment"]["networkPolicy"],

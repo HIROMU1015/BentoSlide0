@@ -91,6 +91,19 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
         self.assertEqual(report["transactionId"], result["transactionId"])
         self.assertIn("demo-slide-1", report["slides"]["changed"])
 
+    def test_initialization_matches_protected_text_across_inline_math_delimiters(self) -> None:
+        html = load_html(self.generated)
+        document = extract_bento_doc(html)
+        self.title(document)["html"] = "0.7$t_{\\mathrm{ana}}$"
+        self.generated.write_text(embed_bento_doc(html, document), encoding="utf-8")
+        registry = json.loads(self.generated_registry.read_text(encoding="utf-8"))
+        registry["protected"]["requiredText"] = ["0.7t"]
+        self.generated_registry.write_text(json.dumps(registry), encoding="utf-8")
+
+        storage = self.storage()
+
+        self.assertEqual(storage.status()["validation"], "pass")
+
     def test_no_op_save_does_not_create_backup_report_or_transaction(self) -> None:
         storage = self.storage()
         status = storage.status()

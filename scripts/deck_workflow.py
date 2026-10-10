@@ -3282,6 +3282,62 @@ def _relative(root: Path, path: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
 
 
+def _verified_applied_html_change_pending_review(
+    root: Path, state: dict[str, Any],
+) -> tuple[dict[str, Any], Path, Path, Path]:
+    """Verify the exact applied proposal before replacing a failed review candidate."""
+
+    proposal = _html_change(state)
+    review = _post_apply_review(proposal)
+    if (
+        not proposal
+        or proposal.get("status") != "applied"
+        or not review
+        or review.get("status") != "pending"
+    ):
+        raise WorkflowError("There is no applied HTML change with a pending post-apply review")
+    if proposal.get("format") != HTML_CHANGE_FORMAT:
+        raise WorkflowError("Only a current dependency-bound HTML change may be superseded")
+    if proposal.get("proposalDigest") != html_change_proposal_digest(proposal):
+        raise WorkflowError("Applied HTML change explanation or impact changed after approval")
+
+    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    snapshot_html = _repo_path(root, proposal["candidateHtml"], field="authoring.htmlChange.candidateHtml")
+    snapshot_registry = _repo_path(
+        root, proposal["candidateRegistry"], field="authoring.htmlChange.candidateRegistry",
+    )
+    proposal_path = _repo_path(
+        root, proposal["proposalPath"], field="authoring.htmlChange.proposalPath",
+    )
+    checks = (
+        (canonical_html, proposal["candidateHtmlRevision"], "applied canonical HTML"),
+        (canonical_registry, proposal["candidateRegistryRevision"], "applied canonical registry"),
+        (snapshot_html, proposal["candidateHtmlRevision"], "applied candidate HTML snapshot"),
+        (snapshot_registry, proposal["candidateRegistryRevision"], "applied candidate registry snapshot"),
+    )
+    for path, expected, label in checks:
+        if file_revision(path) != expected:
+            raise WorkflowError(f"The {label} changed before the corrective proposal")
+    if (
+        review.get("htmlRevision") != proposal["candidateHtmlRevision"]
+        or review.get("registryRevision") != proposal["candidateRegistryRevision"]
+        or review.get("proposalDigest") != proposal["proposalDigest"]
+    ):
+        raise WorkflowError("Pending post-apply review is stale for the applied proposal")
+    _require_current_html_review(root, state)
+    baseline = _html_review_baseline(state)
+    if not baseline or baseline.get("proposalDigest") != proposal["proposalDigest"]:
+        raise WorkflowError("Whole-deck review is not bound to the applied proposal")
+    if _read_json(proposal_path, label="applied HTML change proposal report") != proposal:
+        raise WorkflowError("Applied HTML change proposal report differs from workflow state")
+    for relative, expected in proposal["candidateDependencyRevisions"].items():
+        path = _repo_path(root, relative, field="authoring.htmlChange.candidateDependencyRevisions")
+        if file_revision(path) != expected:
+            raise WorkflowError(f"Applied HTML change dependency changed: {relative}")
+    return proposal, snapshot_html, snapshot_registry, proposal_path
+
+
 def command_propose_html_change(
     root: Path,
     state: dict[str, Any],
@@ -3295,6 +3351,7 @@ def command_propose_html_change(
     related_slide_ids: Iterable[str],
     strict_slide_scope: bool = False,
     replace_feedback_digest: str | None = None,
+    supersede_pending_post_apply_review: bool = False,
 ) -> dict[str, Any]:
     """Snapshot a candidate and calculate impact without mutating canonical HTML."""
 
@@ -3304,29 +3361,37 @@ def command_propose_html_change(
     requested_slide_ids = tuple(dict.fromkeys(requested_slide_ids))
     related_slide_ids = tuple(dict.fromkeys(related_slide_ids))
     replaced: tuple[dict[str, Any], dict[str, Any], Path, Path, Path] | None = None
+    superseded: tuple[dict[str, Any], Path, Path, Path] | None = None
     if _has_unfinished_html_change(state):
-        if replace_feedback_digest is None:
+        if supersede_pending_post_apply_review:
+            if replace_feedback_digest is not None:
+                raise WorkflowError(
+                    "A feedback revision cannot also supersede a pending post-apply review"
+                )
+            superseded = _verified_applied_html_change_pending_review(root, state)
+        elif replace_feedback_digest is None:
             raise WorkflowError("Resolve the active HTML change proposal before creating another")
-        old_proposal, feedback = _revision_feedback(
-            state, expected_digest=replace_feedback_digest,
-        )
-        _, old_html, old_registry, old_report = _verified_html_change(
-            root, state, required_status=str(old_proposal["status"]),
-        )
-        requested_set = set(requested_slide_ids)
-        instructed = {
-            slide_id for slide_id, value in feedback["slides"].items()
-            if value["state"] == "needs_work"
-        }
-        omitted = sorted(instructed - requested_set)
-        if omitted:
-            raise WorkflowError(
-                "Revised HTML proposal omits slides with saved instructions: "
-                + ", ".join(omitted)
+        else:
+            old_proposal, feedback = _revision_feedback(
+                state, expected_digest=replace_feedback_digest,
             )
-        replaced = old_proposal, feedback, old_html, old_registry, old_report
-    elif replace_feedback_digest is not None:
-        raise WorkflowError("There is no active HTML change proposal to revise")
+            _, old_html, old_registry, old_report = _verified_html_change(
+                root, state, required_status=str(old_proposal["status"]),
+            )
+            requested_set = set(requested_slide_ids)
+            instructed = {
+                slide_id for slide_id, value in feedback["slides"].items()
+                if value["state"] == "needs_work"
+            }
+            omitted = sorted(instructed - requested_set)
+            if omitted:
+                raise WorkflowError(
+                    "Revised HTML proposal omits slides with saved instructions: "
+                    + ", ".join(omitted)
+                )
+            replaced = old_proposal, feedback, old_html, old_registry, old_report
+    elif replace_feedback_digest is not None or supersede_pending_post_apply_review:
+        raise WorkflowError("There is no matching HTML change proposal to replace")
     base_evidence = _require_current_html_review(root, state)
     source_candidate = _repo_path(root, str(candidate_html), field="html-change.candidateHtml")
     if not source_candidate.is_file():
@@ -3445,6 +3510,15 @@ def command_propose_html_change(
             "supersedingFeedback": feedback,
         })
         payloads[old_report] = _proposal_report_payload(archived_report)
+    if superseded is not None:
+        old_proposal, _, _, old_report = superseded
+        archived_report = copy.deepcopy(old_proposal)
+        archived_report.update({
+            "supersededAt": utc_now(),
+            "supersededByProposalId": proposal_id,
+            "supersedingReason": "post-apply browser review correction",
+        })
+        payloads[old_report] = _proposal_report_payload(archived_report)
     dependency_paths = _review_dependency_paths(
         root,
         {**proposal["baseDependencyRevisions"], **proposal["candidateDependencyRevisions"]},
@@ -3458,6 +3532,13 @@ def command_propose_html_change(
     }
     if replaced is not None:
         old_proposal, _, old_html, old_registry, old_report = replaced
+        input_revisions.update({
+            old_html: old_proposal["candidateHtmlRevision"],
+            old_registry: old_proposal["candidateRegistryRevision"],
+            old_report: file_revision(old_report),
+        })
+    if superseded is not None:
+        old_proposal, old_html, old_registry, old_report = superseded
         input_revisions.update({
             old_html: old_proposal["candidateHtmlRevision"],
             old_registry: old_proposal["candidateRegistryRevision"],
@@ -3478,6 +3559,12 @@ def command_propose_html_change(
             _verified_html_change(
                 root, current_state, required_status=str(current_old["status"]),
             )
+        if superseded is not None:
+            current_old, _, _, _ = _verified_applied_html_change_pending_review(
+                root, current_state,
+            )
+            if current_old.get("proposalId") != superseded[0].get("proposalId"):
+                raise WorkflowError("Applied HTML change changed while creating its correction")
         current_evidence = _require_current_html_review(root, current_state)
         if current_evidence.review_digest != proposal["baseReviewDigest"]:
             raise WorkflowError("Whole-deck HTML review changed while creating the proposal")
@@ -3496,6 +3583,7 @@ def command_propose_html_change(
         operation=(
             "revise-whole-deck-html-change"
             if replaced is not None else "propose-whole-deck-html-change"
+            if superseded is None else "supersede-applied-whole-deck-html-change"
         ),
         validate_base=validate_base,
     )
@@ -3505,6 +3593,9 @@ def command_propose_html_change(
             f"Revised HTML change {replaced[0]['proposalId']} as {proposal_id} "
             f"({proposal['scope']}); canonical HTML remains unchanged"
             if replaced is not None else
+            f"Superseded applied HTML change {superseded[0]['proposalId']} as {proposal_id} "
+            f"after pending browser review ({proposal['scope']}); canonical HTML remains unchanged"
+            if superseded is not None else
             f"Proposed HTML change {proposal_id} ({proposal['scope']}); canonical HTML remains unchanged"
         ),
     )
@@ -3523,6 +3614,7 @@ def command_propose_localized_html_change(
     requested_slide_ids: Iterable[str],
     related_slide_ids: Iterable[str],
     replace_feedback_digest: str | None = None,
+    supersede_pending_post_apply_review: bool = False,
 ) -> dict[str, Any]:
     """Compose slide fragments into a full candidate, then use the normal review transaction."""
 
@@ -3611,6 +3703,7 @@ def command_propose_localized_html_change(
             related_slide_ids=related,
             strict_slide_scope=replace_feedback_digest is None,
             replace_feedback_digest=replace_feedback_digest,
+            supersede_pending_post_apply_review=supersede_pending_post_apply_review,
         )
     finally:
         temporary_path.unlink(missing_ok=True)
@@ -3977,8 +4070,22 @@ def _require_current_post_apply_review(root: Path, state: dict[str, Any]) -> Non
         raise WorkflowError("Post-apply browser environment revision is stale")
     report = _read_json(report_path, label="post-apply browser report")
     environment = _read_json(environment_path, label="post-apply browser environment")
-    if report.get("status") != "pass" or report.get("proposalDigest") != proposal["proposalDigest"]:
+    if report.get("status") not in {"pass", "pass-with-accepted-warnings"} or report.get("proposalDigest") != proposal["proposalDigest"]:
         raise WorkflowError("Post-apply browser report does not pass for the current proposal")
+    if report.get("status") == "pass-with-accepted-warnings":
+        acceptance = report.get("heightOverflowAcceptance")
+        _validate_height_overflow_acceptance(acceptance, review, proposal)
+        observed = [
+            {"slideId": check["slideId"], **issue}
+            for check in report.get("checks", [])
+            for issue in check.get("acceptedIssues", [])
+        ]
+        if observed != acceptance["issues"] or any(
+            check.get("status") not in {"pass", "accepted-warning"}
+            or check.get("issues", []) != check.get("acceptedIssues", [])
+            for check in report.get("checks", [])
+        ):
+            raise WorkflowError("Post-apply browser report has unaccepted issues")
     if report.get("htmlRevision") != review["htmlRevision"] or report.get("registryRevision") != review["registryRevision"]:
         raise WorkflowError("Post-apply browser report artifact revisions are stale")
     if report.get("affectedSlideIds") != review["affectedSlideIds"]:
@@ -3994,11 +4101,41 @@ def _require_current_post_apply_review(root: Path, state: dict[str, Any]) -> Non
             raise WorkflowError(f"Post-apply screenshot revision is stale: {slide_id}")
 
 
+def _validate_height_overflow_acceptance(
+    acceptance: Any, review: dict[str, Any], proposal: dict[str, Any],
+) -> None:
+    if not isinstance(acceptance, dict) or acceptance.get("format") != "bento/equation-height-overflow-acceptance/v1":
+        raise WorkflowError("Invalid equation height overflow acceptance")
+    if not str(acceptance.get("userInstruction") or "").strip():
+        raise WorkflowError("Equation height overflow acceptance needs an explicit user instruction")
+    for key in ("htmlRevision", "registryRevision", "proposalDigest"):
+        if acceptance.get(key) != review[key]:
+            raise WorkflowError(f"Equation height overflow acceptance is stale: {key}")
+    if acceptance.get("proposalId") != proposal["proposalId"] or not acceptance.get("issues"):
+        raise WorkflowError("Equation height overflow acceptance belongs to another proposal or has no issues")
+    for issue in acceptance["issues"]:
+        try:
+            valid = (
+                issue["slideId"] in review["affectedSlideIds"]
+                and issue["kind"] == "element-content-overflow"
+                and bool(issue["elementId"])
+                and issue["scroll"]["w"] == issue["client"]["w"]
+                and issue["scroll"]["h"] > issue["client"]["h"] + 1
+                and all(isinstance(value, (int, float)) and 0 < value < 100000
+                        for size in (issue["client"], issue["scroll"]) for value in size.values())
+            )
+        except (KeyError, TypeError):
+            valid = False
+        if not valid:
+            raise WorkflowError("Only measured equation height overflow may be accepted")
+
+
 def command_check_html_change(
     root: Path,
     state: dict[str, Any],
     *,
     browser_executable: Path | None,
+    accept_equation_height_overflow: Path | None = None,
 ) -> None:
     """Create revision-bound browser evidence for an applied HTML change."""
 
@@ -4017,6 +4154,10 @@ def command_check_html_change(
         raise WorkflowError("Applied HTML changed before post-apply browser review")
     if file_revision(canonical_registry) != review["registryRevision"]:
         raise WorkflowError("Applied registry changed before post-apply browser review")
+    acceptance = None
+    if accept_equation_height_overflow is not None:
+        acceptance = _read_json(accept_equation_height_overflow, label="equation height overflow acceptance")
+        _validate_height_overflow_acceptance(acceptance, review, proposal)
 
     with tempfile.TemporaryDirectory(prefix="bento-html-change-review-") as temporary:
         evidence = collect_html_change_browser_evidence(
@@ -4025,6 +4166,7 @@ def command_check_html_change(
             affected_slide_ids=review["affectedSlideIds"],
             screenshots_dir=Path(temporary) / "screenshots",
             browser_executable=browser_executable,
+            height_overflow_acceptance=acceptance,
         )
         checked_at = utc_now()
         review_root = root / "output" / "html-change-reviews" / proposal["proposalId"]
@@ -5377,6 +5519,7 @@ def parser() -> argparse.ArgumentParser:
     propose_html_change.add_argument("--impact-summary", required=True)
     propose_html_change.add_argument("--target-slide", action="append", required=True, dest="target_slides")
     propose_html_change.add_argument("--related-slide", action="append", default=[], dest="related_slides")
+    propose_html_change.add_argument("--supersede-pending-post-apply-review", action="store_true")
     propose_localized = commands.add_parser("propose-html-slide-change")
     propose_localized.add_argument("--replacement", action="append", required=True)
     propose_localized.add_argument("--candidate-registry", type=Path)
@@ -5385,6 +5528,7 @@ def parser() -> argparse.ArgumentParser:
     propose_localized.add_argument("--impact-summary", required=True)
     propose_localized.add_argument("--target-slide", action="append", required=True, dest="target_slides")
     propose_localized.add_argument("--related-slide", action="append", default=[], dest="related_slides")
+    propose_localized.add_argument("--supersede-pending-post-apply-review", action="store_true")
     revise_html_change = commands.add_parser("revise-html-change")
     revise_html_change.add_argument("--candidate-html", required=True, type=Path)
     revise_html_change.add_argument("--candidate-registry", type=Path)
@@ -5414,6 +5558,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("apply-html-change")
     check_html_change = commands.add_parser("check-html-change")
     check_html_change.add_argument("--browser-executable", type=Path)
+    check_html_change.add_argument("--accept-equation-height-overflow", type=Path)
     commands.add_parser("cancel-html-change")
     commands.add_parser("submit-plan")
     commands.add_parser("approve-plan")
@@ -5566,6 +5711,7 @@ def run(args: argparse.Namespace) -> int:
             impact_summary=args.impact_summary,
             requested_slide_ids=args.target_slides,
             related_slide_ids=args.related_slides,
+            supersede_pending_post_apply_review=args.supersede_pending_post_apply_review,
         )
         print(json.dumps(proposal, ensure_ascii=False, indent=2))
     elif command == "propose-html-slide-change":
@@ -5583,6 +5729,7 @@ def run(args: argparse.Namespace) -> int:
             impact_summary=args.impact_summary,
             requested_slide_ids=args.target_slides,
             related_slide_ids=args.related_slides,
+            supersede_pending_post_apply_review=args.supersede_pending_post_apply_review,
         )
         print(json.dumps(proposal, ensure_ascii=False, indent=2))
     elif command == "revise-html-change":
@@ -5635,6 +5782,7 @@ def run(args: argparse.Namespace) -> int:
     elif command == "check-html-change":
         command_check_html_change(
             root, state, browser_executable=args.browser_executable,
+            accept_equation_height_overflow=args.accept_equation_height_overflow,
         )
     elif command == "cancel-html-change":
         command_cancel_html_change(root, state)

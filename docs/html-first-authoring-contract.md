@@ -1,5 +1,7 @@
 # HTML-first authoring contract
 
+Measured table cells use the same per-edge border fields as native shapes. Cell-specific line height and transparent backgrounds remain authoritative. Asymmetric dashed/dotted edges become editable native dash/dot fragments so thin and vertical borders preserve their gaps without modifying the Bento runtime; adjacent cells with different uniform borders also require decomposition. Single-line text uses measured width and available bounds, with a one-pixel fallback only when text-layout measurements are absent.
+
 ## Sources of truth
 
 New schema v2 decks use one pair:
@@ -30,7 +32,9 @@ Every slide must be exactly 1280 × 720 computed CSS pixels and use:
 
 Before Chromium starts, the converter runs a static annotation preflight. It fails early for duplicate slide/element IDs, explicit fallbacks without stable IDs, annotations outside identified slides, invalid fallback scope, and any whole-element image fallback that would bake rendered text or annotated descendants into pixels. It reports editability warnings for text-bearing shapes, annotated grouping containers, nested conversion annotations, and explicit image fallbacks. The complete deterministic report is written to `diagnostics/html-preflight.json` and is also embedded in `conversion-report.json`. Warnings do not block ordinary conversion; use `python -m scripts.check_html_preflight --html ... --registry ... --strict-editability` when an editable-native authoring target should reject them.
 
-For an editable card, a text-free background shape plus sibling text remains the preferred source structure. The converter also decomposes text-bearing shapes and annotated containers: native-compatible backgrounds remain shapes, unsupported visual effects become a background-only image, owned text becomes a `--label` text element, and annotated descendants retain their original editable IDs. Flex text containers with unannotated direct child labels become stable `--part-N` native text elements. A whole-element image fallback may be used only when it contains no rendered text, equation, table, or annotated descendant.
+For an editable card, a text-free background shape plus sibling text remains the preferred source structure. The converter also decomposes text-bearing shapes and annotated containers: native-compatible backgrounds remain shapes, unsupported visual effects become a background-only image, owned text becomes a `--label` text element, and annotated descendants retain their original editable IDs. Flex text containers with unannotated direct child labels become stable `--part-N` native text elements. Authors may add `data-bento-part="heading"` (or another unique stable token) to a child when that editable part needs an ID that remains stable even if sibling order changes. This annotation is measurement-only: it does not change HTML rendering or require a Bento-specific CSS variant. A whole-element image fallback may be used only when it contains no rendered text, equation, table, or annotated descendant.
+
+The source HTML screenshot remains the visual baseline. During extraction the converter records browser line boxes, safe sibling/parent width constraints, and standalone equation glyph bounds without rewriting the source DOM or CSS. Bento placement corrections are bounded to the corresponding editable text/equation element; decoration shapes and the original LaTeX stay unchanged. Consequently, conversion hints improve editability and renderer matching without simplifying the HTML design.
 
 Short mathematical notation embedded in prose uses `<span data-bento-inline-math="v1">...</span>` with `sub`/`sup` for scripts. Conversion translates that marked fragment into Bento's editable inline `$...$` LaTeX syntax, including Greek symbols and roman multi-letter scripts, instead of preserving browser-only rich-text tags that the Bento runtime would flatten. A table containing such a marker is emitted as measured native cell-background shapes plus editable cell-text elements, because native Bento table cells do not render inline LaTeX; no visible `$` delimiters remain. Complete standalone formulas still use `data-bento-type="equation"` plus registry LaTeX and become editable `$$...$$` elements. Unmarked prose is never heuristically reinterpreted as mathematics.
 
@@ -39,6 +43,7 @@ Supported element annotations:
 | Attribute | Meaning |
 |---|---|
 | `data-bento-type` | `text`, `equation`, `shape`, `table`, `chart`, `image`, `svg`, `media`, or a custom complex block |
+| `data-bento-part` | Optional stable token for an editable child part inside one annotated owner; unique within that owner |
 | `data-bento-export` | `native`, `svg`, `image`, `auto`, or `ignore`; default is `auto` |
 | `data-bento-fallback-scope` | `background` or `whole`; semantic content defaults to `background`, and unsafe `whole` capture is rejected |
 | `data-bento-critical` | `true` explicitly makes a localized crop failure fail the slide/build |

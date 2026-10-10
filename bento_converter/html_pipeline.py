@@ -23,6 +23,7 @@ from .incremental_cache import (
     comparison_cache_key,
     compute_source_fingerprint_inputs,
 )
+from .render_calibration import calibrate_equation_rendering
 from .visual_comparison import compare_crops, compare_images, open_image_pair
 
 
@@ -263,6 +264,21 @@ def build_from_html(
             )
             emit("converting", slideCount=len(layout.slides))
             conversion = convert_html_layout(layout, registry, chapters)
+            emit("calibrating-rendering", slideCount=len(layout.slides))
+            render_calibration = calibrate_equation_rendering(
+                base_path=base,
+                document=conversion.document,
+                report=conversion.report,
+                layout=layout,
+                harness=harness,
+                temporary_parent=root,
+            )
+            conversion.report["renderCalibration"] = {
+                "format": render_calibration["format"],
+                "equations": render_calibration["equations"],
+                "adjusted": render_calibration["adjusted"],
+                "path": "diagnostics/render-calibration.json",
+            }
             emit("validating-document", slideCount=len(conversion.document["slides"]))
             validate_bento_doc(conversion.document)
             harness.record_embedded_fonts(conversion.document)
@@ -278,6 +294,7 @@ def build_from_html(
             _write_json(json_path, conversion.document)
             _write_json(diagnostics_dir / "computed-layout.json", {"slides": layout.slides})
             _write_json(diagnostics_dir / "merged-registry.json", registry)
+            _write_json(diagnostics_dir / "render-calibration.json", render_calibration)
 
             if browser_check:
                 emit("checking-browser", slideCount=len(conversion.document["slides"]))

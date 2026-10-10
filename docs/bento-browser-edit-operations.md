@@ -27,6 +27,7 @@ The command-line executor automatically selects `authoring-api` for authoring an
 | `set-text-style` | Text color, typography, geometry, opacity | yes | yes |
 | `set-geometry` | Geometry for non-text/non-shape native elements | yes | no |
 | `set-text` | Replace ordinary editable text | yes | no |
+| `set-text-html` | Replace sanitized inline rich text while preserving editable inline math | yes | no |
 | `set-order` | Front/back and one-layer movement | yes | yes |
 | `add-rectangle` | Add a rectangle or a correctly layered background card | yes | no |
 | `duplicate` | Duplicate the selected element | yes | no |

@@ -15,6 +15,7 @@ from bento_converter.browser_harness import BrowserHarness
 from bento_converter.errors import BentoConverterError, BrowserCheckError
 from bento_converter.html_converter import convert_html_layout, sanitize_inline_html
 from bento_converter.html_change_review import (
+    _accepted_equation_height_issue,
     _frame_issue,
     _overflow_issue,
     collect_html_change_browser_evidence,
@@ -175,6 +176,324 @@ class HtmlConversionTests(unittest.TestCase):
             ["math-table", "math-table--cell-r0-c0-bg", "math-table--cell-r0-c0-text"],
         )
 
+    def test_table_cell_decomposition_preserves_bottom_only_borders(self) -> None:
+        bottom_border = {
+            "borderWidth": 0,
+            "borderColor": "rgb(24, 42, 52)",
+            "borderTopWidth": 0, "borderTopColor": "rgb(24, 42, 52)", "borderTopStyle": "none",
+            "borderRightWidth": 0, "borderRightColor": "rgb(24, 42, 52)", "borderRightStyle": "none",
+            "borderBottomWidth": 1, "borderBottomColor": "rgb(183, 203, 199)", "borderBottomStyle": "solid",
+            "borderLeftWidth": 0, "borderLeftColor": "rgb(24, 42, 52)", "borderLeftStyle": "none",
+        }
+        source = element(
+            "comparison-table", "table", x=70, y=320, w=600, h=100,
+            style={**element("unused", "table")["style"], "borderWidth": 0},
+            table={
+                "rows": [[{
+                    "html": 'Candidate <span data-bento-inline-math="v1">K<sub>m</sub></span>',
+                    "align": "left", "color": "#10243e", "bg": "transparent", "bold": False,
+                    "rect": {"x": 0, "y": 0, "w": 600, "h": 100},
+                    "style": {
+                        "fontFamily": "Arial", "fontSize": 20, "fontWeight": 400,
+                        "padding": "8px 12px", **bottom_border,
+                    },
+                }]],
+                "headerRows": 0,
+            },
+        )
+
+        result = self.convert([source])
+
+        by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+        background = by_id["comparison-table--cell-r0-c0-bg"]
+        self.assertEqual(background["strokeWidth"], 0)
+        self.assertEqual(background["stroke"], "transparent")
+        self.assertIn("comparison-table--cell-r0-c0-bg--border-bottom", by_id)
+        self.assertNotIn("comparison-table--cell-r0-c0-bg--border-left", by_id)
+        self.assertNotIn("comparison-table--cell-r0-c0-bg--border-right", by_id)
+        self.assertNotIn("comparison-table--cell-r0-c0-bg--border-top", by_id)
+
+    def test_non_math_table_cell_decomposition_preserves_bottom_only_borders(self) -> None:
+        bottom_border = {
+            "borderWidth": 0,
+            "borderColor": "rgb(24, 42, 52)",
+            "borderTopWidth": 0, "borderTopColor": "rgb(24, 42, 52)", "borderTopStyle": "none",
+            "borderRightWidth": 0, "borderRightColor": "rgb(24, 42, 52)", "borderRightStyle": "none",
+            "borderBottomWidth": 1, "borderBottomColor": "rgb(183, 203, 199)", "borderBottomStyle": "solid",
+            "borderLeftWidth": 0, "borderLeftColor": "rgb(24, 42, 52)", "borderLeftStyle": "none",
+        }
+        source = element(
+            "plain-comparison-table", "table", x=70, y=320, w=600, h=100,
+            style={**element("unused", "table")["style"], "borderWidth": 0},
+            table={
+                "rows": [[{
+                    "html": "Candidate",
+                    "align": "left", "color": "#10243e", "bg": "transparent", "bold": False,
+                    "rect": {"x": 0, "y": 0, "w": 600, "h": 100},
+                    "style": {
+                        "fontFamily": "Arial", "fontSize": 20, "fontWeight": 400,
+                        "padding": "8px 12px", **bottom_border,
+                    },
+                }]],
+                "headerRows": 0,
+            },
+        )
+
+        result = self.convert([source])
+
+        by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+        self.assertEqual(result.report["elements"][0]["strategy"], "native-decomposition")
+        self.assertEqual(by_id["plain-comparison-table--cell-r0-c0-bg"]["strokeWidth"], 0)
+        self.assertIn("plain-comparison-table--cell-r0-c0-bg--border-bottom", by_id)
+        self.assertNotIn("plain-comparison-table--cell-r0-c0-bg--border-left", by_id)
+        self.assertNotIn("plain-comparison-table--cell-r0-c0-bg--border-right", by_id)
+        self.assertNotIn("plain-comparison-table--cell-r0-c0-bg--border-top", by_id)
+
+    def test_zero_width_native_table_border_is_not_replaced_by_default_grid(self) -> None:
+        source = element(
+            "plain-table", "table",
+            style={**element("unused", "table")["style"], "borderWidth": 0},
+            table={"rows": [[{"html": "A", "style": {}}]], "headerRows": 0},
+        )
+
+        result = self.convert([source])
+
+        table = result.document["slides"][0]["elements"][0]
+        self.assertEqual(table["type"], "table")
+        self.assertEqual(table["style"]["borderWidth"], 0)
+
+    def test_single_line_text_guard_uses_measured_width(self) -> None:
+        source = element(
+            "chapter-label", "text", x=70, y=30, w=154, h=19,
+            scrollWidth=154, scrollHeight=19,
+            textLayout={"singleLine": True, "requiredWidth": 154, "maxWidth": 168},
+            style={**element("unused", "text")["style"], "fontSize": 14, "lineHeight": 1.2},
+        )
+
+        result = self.convert([source])
+
+        label = next(
+            item for item in result.document["slides"][0]["elements"] if item["id"] == "chapter-label"
+        )
+        self.assertEqual(label["x"], 70)
+        self.assertGreater(label["w"], 154)
+        self.assertLess(label["w"], 158)
+
+    def test_adjacent_single_line_text_does_not_gain_an_overlap(self) -> None:
+        left = element(
+            "left", "text", x=100, y=100, w=100, h=24,
+            scrollWidth=100, scrollHeight=24,
+            textLayout={"singleLine": True, "requiredWidth": 31, "maxWidth": 100},
+            style={**element("unused", "text")["style"], "fontSize": 20, "lineHeight": 1.2},
+        )
+        right = element(
+            "right", "text", x=200, y=100, w=100, h=24,
+            scrollWidth=100, scrollHeight=24,
+            textLayout={"singleLine": True, "requiredWidth": 45, "maxWidth": 1080},
+            style={**element("unused", "text")["style"], "fontSize": 20, "lineHeight": 1.2},
+        )
+
+        result = self.convert([left, right])
+
+        by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+        self.assertEqual(by_id["left"]["w"], 100)
+        self.assertEqual(by_id["right"]["w"], 100)
+        self.assertEqual(result.report["summary"]["unresolvedWarnings"], 0)
+
+    def test_owned_text_fragment_guard_stays_within_measured_boundary(self) -> None:
+        panel = element(
+            "panel", "shape", text="", html="",
+            ownedTextFragments=[{
+                "x": 214, "y": 380, "w": 46, "h": 31,
+                "scrollWidth": 46, "scrollHeight": 31,
+                "text": "採用", "html": '<span class="medium">採用</span>',
+                "textLayout": {"singleLine": True, "requiredWidth": 46, "maxWidth": 62},
+                "style": {
+                    "fontSize": 23, "fontFamily": "Arial", "fontWeight": 800,
+                    "lineHeight": 1.28, "letterSpacing": 0, "textAlign": "left",
+                    "verticalAlign": "baseline", "display": "inline",
+                    "paddingLeft": 0, "paddingRight": 0, "paddingTop": 0, "paddingBottom": 0,
+                },
+            }],
+        )
+
+        result = self.convert([panel])
+
+        label = next(
+            item for item in result.document["slides"][0]["elements"]
+            if item["id"] == "panel--label--part-1"
+        )
+        self.assertGreater(label["w"], 46)
+        self.assertLessEqual(label["w"], 62)
+
+    def test_owned_text_fragment_uses_stable_bento_part_id(self) -> None:
+        panel = element(
+            "panel", "shape", text="", html="",
+            ownedTextFragments=[{
+                "partId": "heading", "x": 214, "y": 380, "w": 86, "h": 31,
+                "scrollWidth": 86, "scrollHeight": 31,
+                "text": "検証範囲", "html": "<span>検証範囲</span>",
+                "textLayout": {"singleLine": True, "requiredWidth": 86, "maxWidth": 100},
+                "style": {
+                    "fontSize": 18, "fontFamily": "Arial", "fontWeight": 700,
+                    "lineHeight": 1.2, "letterSpacing": 0, "textAlign": "left",
+                    "verticalAlign": "baseline", "display": "block",
+                    "paddingLeft": 0, "paddingRight": 0, "paddingTop": 0, "paddingBottom": 0,
+                },
+            }],
+        )
+
+        result = self.convert([panel])
+
+        ids = [item["id"] for item in result.document["slides"][0]["elements"]]
+        self.assertIn("panel--label--heading", ids)
+        self.assertNotIn("panel--label--part-1", ids)
+
+    def test_asymmetric_shape_borders_become_editable_edge_shapes(self) -> None:
+        source = element(
+            "open-panel", "shape", text="", html="", w=320, h=120,
+            style={
+                **element("unused", "shape")["style"],
+                "backgroundColor": "transparent",
+                "borderColor": "rgb(20, 30, 40) rgb(20, 30, 40) rgb(20, 30, 40) rgb(22, 134, 127)",
+                "borderWidth": 0,
+                "borderTopWidth": 0, "borderTopColor": "rgb(20, 30, 40)", "borderTopStyle": "none",
+                "borderRightWidth": 0, "borderRightColor": "rgb(20, 30, 40)", "borderRightStyle": "none",
+                "borderBottomWidth": 1, "borderBottomColor": "rgb(190, 205, 202)", "borderBottomStyle": "solid",
+                "borderLeftWidth": 3, "borderLeftColor": "rgb(22, 134, 127)", "borderLeftStyle": "solid",
+            },
+        )
+
+        result = self.convert([source])
+
+        output = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+        self.assertEqual(output["open-panel"]["strokeWidth"], 0)
+        self.assertEqual(output["open-panel--border-bottom"]["fill"], "rgb(190, 205, 202)")
+        self.assertEqual(output["open-panel--border-bottom"]["h"], 1)
+        self.assertEqual(output["open-panel--border-left"]["fill"], "rgb(22, 134, 127)")
+        self.assertEqual(output["open-panel--border-left"]["w"], 3)
+        self.assertEqual(result.report["elements"][0]["strategy"], "native-decomposition")
+
+    def test_text_bottom_border_and_simple_pseudo_decoration_remain_native(self) -> None:
+        source = element(
+            "condition", "text", x=80, y=100, w=400, h=60,
+            text="Condition", html="Condition",
+            htmlWithPseudoReservations="<span>&nbsp;&nbsp;&nbsp;&nbsp;Condition</span>",
+            pseudoDecorations=[{
+                "idSuffix": "pseudo-1-before", "x": 80, "y": 104, "w": 22, "h": 3,
+                "opacity": 1,
+                "style": {
+                    "backgroundColor": "rgb(22, 134, 127)", "borderColor": "transparent",
+                    "borderWidth": 0, "borderRadius": 0,
+                },
+            }],
+            style={
+                **element("unused", "text")["style"],
+                "backgroundColor": "transparent",
+                "borderColor": "rgb(20, 30, 40) rgb(20, 30, 40) rgb(183, 203, 199)",
+                "borderWidth": 0,
+                "borderTopWidth": 0, "borderTopColor": "rgb(20, 30, 40)", "borderTopStyle": "none",
+                "borderRightWidth": 0, "borderRightColor": "rgb(20, 30, 40)", "borderRightStyle": "none",
+                "borderBottomWidth": 1, "borderBottomColor": "rgb(183, 203, 199)", "borderBottomStyle": "solid",
+                "borderLeftWidth": 0, "borderLeftColor": "rgb(20, 30, 40)", "borderLeftStyle": "none",
+            },
+        )
+
+        result = self.convert([source])
+
+        output = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+        self.assertEqual(output["condition--decoration--border-bottom"]["h"], 1)
+        self.assertEqual(output["condition--pseudo-1-before"]["fill"], "rgb(22, 134, 127)")
+        self.assertEqual(output["condition"]["type"], "text")
+        self.assertIn("&nbsp;&nbsp;", output["condition"]["html"])
+        self.assertEqual(result.report["elements"][0]["strategy"], "native-decomposition")
+    def test_asymmetric_cell_borders_preserve_native_text_and_measured_height(self) -> None:
+        borders = {
+            f"border{side.title()}{field}": value
+            for side in ("top", "right", "bottom", "left")
+            for field, value in (("Width", 0), ("Color", "#ccc"), ("Style", "none"))
+        }
+        borders.update({"borderBottomWidth": 1, "borderBottomStyle": "solid"})
+        source = element("table", "table", table={"rows": [[{
+            "html": "H6", "rect": {"x": 0, "y": 0, "w": 54, "h": 52},
+            "style": {"padding": "10px 12px", "fontSize": 22, "lineHeight": 1.35, **borders},
+        }]], "headerRows": 0})
+        result = self.convert([source])
+        output = {e["id"]: e for e in result.document["slides"][0]["elements"]}
+        self.assertEqual(output["table"]["type"], "shape")
+        self.assertEqual(output["table--cell-r0-c0-bg"]["strokeWidth"], 0)
+        self.assertEqual(output["table--cell-r0-c0-bg"]["fill"], "transparent")
+        self.assertEqual(output["table--cell-r0-c0-bg--border-bottom"]["shape"], "rect")
+        self.assertNotIn("table--cell-r0-c0-bg--border-top", output)
+        self.assertEqual(output["table--cell-r0-c0-text"]["html"], "H6")
+        self.assertEqual(output["table--cell-r0-c0-text"]["h"], 52)
+        self.assertEqual(output["table--cell-r0-c0-text"]["lineHeight"], 1.35)
+
+    def test_measured_single_line_label_does_not_gain_a_line_break(self) -> None:
+        source = element("page", "text", html="06 / 46", text="06 / 46", w=59, h=22,
+                         scrollWidth=59, scrollHeight=22,
+                         style={**element("unused", "text")["style"], "fontSize": 18, "lineHeight": 1.2})
+        result = self.convert([source])
+        output = next(e for e in result.document["slides"][0]["elements"] if e["id"] == "page")
+        self.assertEqual(output["html"], '06 / 46')
+        self.assertEqual(output["w"], 60)
+        self.assertEqual(output["h"], 22)
+
+    def test_table_preserves_different_uniform_borders_between_cells(self) -> None:
+        cells = []
+        for width, color in ((1, "#112233"), (2, "#335577")):
+            style = {
+                f"border{side.title()}{field}": value
+                for side in ("top", "right", "bottom", "left")
+                for field, value in (("Width", width), ("Color", color), ("Style", "solid"))
+            }
+            cells.append({"html": "Cell", "style": style, "bg": "transparent"})
+        source = element("table", "table", table={"rows": [cells], "headerRows": 0})
+
+        result = self.convert([source])
+
+        by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+        self.assertEqual(by_id["table"]["type"], "shape")
+        self.assertEqual(by_id["table--cell-r0-c0-bg"]["strokeWidth"], 1)
+        self.assertEqual(by_id["table--cell-r0-c1-bg"]["strokeWidth"], 2)
+        self.assertEqual(by_id["table--cell-r0-c1-bg"]["stroke"], "#335577")
+
+    def test_thin_dashed_and_vertical_dotted_cell_edges_keep_gaps_and_bounds(self) -> None:
+        style = {
+            f"border{side.title()}{field}": value
+            for side in ("top", "right", "bottom", "left")
+            for field, value in (("Width", 0), ("Color", "#112233"), ("Style", "none"))
+        }
+        style.update({"borderBottomWidth": 1, "borderBottomStyle": "dashed",
+                      "borderRightWidth": 2, "borderRightStyle": "dotted"})
+        source = element("table", "table", x=100, y=200, w=100, h=52,
+                         table={"rows": [[{"html": "Cell", "bg": "transparent", "style": style,
+                                           "rect": {"x": 0, "y": 0, "w": 100, "h": 52}}]], "headerRows": 0})
+
+        result = self.convert([source])
+
+        output = result.document["slides"][0]["elements"]
+        bottom = [item for item in output if "--border-bottom" in item["id"]]
+        right = [item for item in output if "--border-right" in item["id"]]
+        self.assertGreater(len(bottom), 1)
+        self.assertGreater(len(right), 1)
+        self.assertTrue(all(item["shape"] == "rect" and item["h"] == 1 and item["y"] == 251 for item in bottom))
+        self.assertTrue(all(item["shape"] == "ellipse" and item["w"] == 2 and item["x"] == 198 for item in right))
+        self.assertTrue(all(item["x"] + item["w"] <= 200 for item in bottom))
+        self.assertTrue(all(item["y"] + item["h"] <= 252 for item in right))
+        self.assertGreater(bottom[1]["x"], bottom[0]["x"] + bottom[0]["w"])
+        self.assertGreater(right[1]["y"], right[0]["y"] + right[0]["h"])
+
+    def test_single_line_fallback_does_not_extend_past_canvas(self) -> None:
+        source = element("edge", "text", x=1279, y=10, w=1, h=22,
+                         scrollWidth=1, scrollHeight=22,
+                         style={**element("unused", "text")["style"], "whiteSpace": "nowrap"})
+
+        result = self.convert([source])
+
+        output = next(item for item in result.document["slides"][0]["elements"] if item["id"] == "edge")
+        self.assertEqual(output["x"] + output["w"], 1280)
+
     def test_background_fallback_keeps_owned_and_descendant_text_editable(self) -> None:
         parent = element(
             "card", "shape", text="Protected label", html="Protected label",
@@ -214,6 +533,54 @@ class HtmlConversionTests(unittest.TestCase):
         self.assertEqual(result.report["summary"]["coveredEditableElementCount"], 0)
         validation = validate_bento_doc(result.document)
         self.assertEqual(validation.warnings, ())
+
+    def test_shape_label_contrast_uses_the_parent_shape_fill(self) -> None:
+        source = element(
+            "summary", "shape", text="Readable on dark fill", html="Readable on dark fill",
+            style={
+                **element("unused", "shape")["style"],
+                "color": "rgb(255, 255, 255)",
+                "backgroundColor": "rgb(33, 56, 53)",
+            },
+        )
+
+        result = self.convert([source])
+
+        by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+        self.assertEqual(by_id["summary--label"]["color"], "rgb(255, 255, 255)")
+        self.assertFalse(any(
+            item["kind"] == "low-contrast" and item["elementId"] == "summary--label"
+            for item in result.report["corrections"]
+        ))
+
+    def test_unsupported_equation_keeps_an_editable_equation_overlay(self) -> None:
+        source = element(
+            "equation", "equation", equationId="eq", text="x squared", html="x squared",
+            style={**element("unused", "equation")["style"], "filter": "blur(2px)"},
+        )
+        layout = LayoutResult(({
+            "id": "slide", "background": "rgb(255, 255, 255)", "transition": "none", "notes": "",
+            "layout": "free", "elements": [source],
+        },), (), {"slide/equation": "data:image/png;base64,AAAA"}, "test Chromium")
+
+        result = convert_html_layout(layout, self.registry, [self.chapter])
+
+        by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+        self.assertEqual(by_id["equation"]["type"], "image")
+        self.assertEqual(by_id["equation--label"]["type"], "text")
+        self.assertEqual(by_id["equation--label"]["equationId"], "eq")
+        self.assertEqual(by_id["equation--label"]["latexSource"], "x^2")
+        self.assertEqual(by_id["equation--label"]["html"], "$$x^2$$")
+        decision = result.report["elements"][0]
+        self.assertEqual(decision["strategy"], "background-image")
+        self.assertEqual(decision["editableOverlayIds"], ["equation--label"])
+        self.assertEqual(result.report["summary"]["bakedEquationCount"], 0)
+
+    def test_svg_equation_is_reported_as_baked_content(self) -> None:
+        result = self.convert([element("equation", "equation", equationId="eq", exportMode="svg")])
+
+        self.assertEqual(result.report["elements"][0]["strategy"], "svg")
+        self.assertEqual(result.report["summary"]["bakedEquationCount"], 1)
 
     def test_flex_text_children_keep_separate_native_positions(self) -> None:
         source = element(
@@ -297,17 +664,36 @@ class HtmlConversionTests(unittest.TestCase):
         self.assertIsNotNone(issue)
         self.assertEqual(issue["kind"], "element-content-overflow")
 
+    def test_height_acceptance_is_exact_and_does_not_accept_other_failures(self) -> None:
+        equation = element("formula", "equation", clientWidth=200, clientHeight=30,
+                           scrollWidth=200, scrollHeight=34)
+        issue = _overflow_issue(equation)
+        accepted = [{"slideId": "slide", **issue}]
+        self.assertTrue(_accepted_equation_height_issue("slide", equation, issue, accepted))
+        self.assertFalse(_accepted_equation_height_issue("another", equation, issue, accepted))
+        self.assertFalse(_accepted_equation_height_issue("slide", {**equation, "type": "text"}, issue, accepted))
+        self.assertFalse(_accepted_equation_height_issue("slide", equation, {**issue, "scroll": {"w": 200, "h": 35}}, accepted))
+        width_issue = {**issue, "scroll": {"w": 205, "h": 34}}
+        self.assertFalse(_accepted_equation_height_issue("slide", equation, width_issue, [{"slideId": "slide", **width_issue}]))
+        bounds_issue = {"kind": "element-out-of-bounds", "elementId": "formula"}
+        self.assertFalse(_accepted_equation_height_issue("slide", equation, bounds_issue, [{"slideId": "slide", **bounds_issue}]))
+
     def test_explicit_native_still_falls_back_for_impossible_css(self) -> None:
         unsafe = element(
             "clipped", "text", exportMode="native",
             style={**element("unused", "text")["style"], "clipPath": "polygon(0 0,100% 0,50% 100%)"},
         )
-        result = self.convert([unsafe])
-        output = result.document["slides"][0]["elements"][0]
+        layout = LayoutResult(({
+            "id": "slide", "background": "rgb(255, 255, 255)", "transition": "none", "notes": "",
+            "layout": "free", "elements": [unsafe],
+        },), (), {"slide/clipped": "data:image/png;base64,AAAA"}, "test Chromium")
+        result = convert_html_layout(layout, self.registry, [self.chapter])
+        output = result.document["slides"][0]["elements"]
         decision = result.report["elements"][0]
-        self.assertEqual(output["type"], "svg")
-        self.assertEqual(decision["nativeCompatibility"], "localized-svg-recommended")
-        self.assertIn("clip-path", decision["reason"])
+        self.assertEqual([item["type"] for item in output], ["image", "text"])
+        self.assertEqual(decision["strategy"], "background-image")
+        self.assertEqual(decision["nativeCompatibility"], "background-image-required")
+        self.assertIn("clip-path", " ".join(decision["compatibilityReasons"]))
 
     def test_complex_table_uses_local_svg_and_preserves_image_markup(self) -> None:
         cell_style = {"backgroundColor": "rgb(255,255,255)", "color": "rgb(0,0,0)", "fontSize": 14, "fontFamily": "Arial", "textAlign": "center"}
@@ -332,6 +718,268 @@ class HtmlConversionTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("BENTO_BROWSER_TEST") == "1", "Set BENTO_BROWSER_TEST=1 for Chromium HTML-first integration.")
 class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
+    def test_measured_table_cell_styles_and_patterned_edges_survive_serialize(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "cell-styles.preview.html"
+            registry_path = root / "cell-styles.registry.json"
+            output = root / "output/presentation.generated.bento.html"
+            source.write_text(
+                "<!doctype html><style>html,body{margin:0}.slide{position:relative;width:1280px;height:720px;"
+                "background:#f4f7fb}table{position:absolute;left:100px;top:200px;width:240px;border-spacing:0;"
+                "border-collapse:separate;font:18px/1.2 Arial}td{height:52px;box-sizing:border-box;padding:8px 12px;"
+                "background:transparent;border:0;border-bottom:1px dashed #112233;"
+                "border-right:2px dotted #112233;line-height:1.35}</style>"
+                "<section class='slide' data-slide-id='cell-styles'><table data-bento-id='table' "
+                "data-bento-type='table'><tbody><tr><td>Measured cell</td></tr></tbody></table></section>",
+                encoding="utf-8",
+            )
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "cell-styles", "sources": {},
+                "document": {"title": "Cell styles"}, "assets": {}, "fonts": {},
+                "equations": {}, "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }), encoding="utf-8")
+            result = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html", output_path=output,
+            )
+            by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+            self.assertEqual(by_id["table--cell-r0-c0-bg"]["fill"], "rgba(0, 0, 0, 0)")
+            self.assertAlmostEqual(by_id["table--cell-r0-c0-text"]["lineHeight"], 1.35)
+            self.assertEqual(by_id["table--cell-r0-c0-bg--border-bottom"]["h"], 1)
+            self.assertEqual(by_id["table--cell-r0-c0-bg--border-right"]["w"], 2)
+            with BrowserHarness() as harness:
+                with harness.page("bentoCheck") as page:
+                    page.goto(output.resolve().as_uri(), wait_until="load")
+                    page.wait_for_selector('.ed-stage [data-el-id="table--cell-r0-c0-text"]')
+                    harness.settle(page)
+                    visible_patterns = page.evaluate("""() => ({
+                        dashes: document.querySelectorAll('.ed-stage [data-el-id*="--border-bottom"] rect').length,
+                        dots: document.querySelectorAll('.ed-stage [data-el-id*="--border-right"] ellipse').length,
+                        serialized: window.bento.serialize()
+                    })""")
+                    self.assertGreater(visible_patterns["dashes"], 1)
+                    self.assertGreater(visible_patterns["dots"], 1)
+                    saved = extract_bento_doc(visible_patterns["serialized"])
+                    self.assertEqual(saved["slides"], result.document["slides"])
+
+    def test_block_heading_with_direct_body_text_becomes_separate_editable_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "block-heading.preview.html"
+            registry_path = root / "block-heading.registry.json"
+            output = root / "output/presentation.generated.bento.html"
+            source.write_text(
+                "<!doctype html><style>html,body{margin:0}.slide{position:relative;width:1280px;height:720px;"
+                "background:#fff}.panel{position:absolute;left:100px;top:100px;width:520px;height:150px;"
+                "padding:12px;box-sizing:border-box;font:400 17px/1.35 Arial;color:#263b44}.panel-title{display:block;"
+                "margin:0 0 7px;font-size:13px;line-height:1.35;font-weight:800;color:#16867f}.panel-title:before{"
+                "content:'';display:inline-block;width:22px;height:3px;margin:0 9px 3px 0;background:#16867f}"
+                ".small{font-size:14px;line-height:1.5;color:#647478}</style>"
+                "<section class='slide' data-slide-id='block-heading'><div class='panel' data-bento-id='panel' "
+                "data-bento-type='shape'><span class='panel-title' data-bento-part='heading'>今回の検証範囲</span>"
+                "条件を指定して直接生成<br><span class='small'>各"
+                "<span data-bento-inline-math='v1'>L</span>で500</span></div></section>",
+                encoding="utf-8",
+            )
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "block-heading", "sources": {},
+                "document": {"title": "Block heading"}, "assets": {}, "fonts": {},
+                "equations": {}, "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }), encoding="utf-8")
+
+            result = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html", output_path=output,
+            )
+            by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+            heading = by_id["panel--label--heading"]
+            body = by_id["panel--label--part-2"]
+            self.assertEqual(heading["html"], '<span class="panel-title">今回の検証範囲</span>')
+            self.assertNotIn("条件を指定", heading["html"])
+            self.assertIn("条件を指定して直接生成<br>", body["html"])
+            self.assertIn("各$L$で500", body["html"])
+            self.assertNotIn("今回の検証範囲", body["html"])
+            self.assertGreaterEqual(body["y"], heading["y"] + heading["h"] + 5)
+            self.assertEqual(heading["fontSize"], 13)
+            self.assertEqual(body["fontSize"], 17)
+            computed = json.loads((output.parent / "diagnostics/computed-layout.json").read_text(encoding="utf-8"))
+            source_panel = next(
+                item for item in computed["slides"][0]["elements"] if item["id"] == "panel"
+            )
+            source_heading = source_panel["ownedTextFragments"][0]
+            self.assertEqual(source_heading["partId"], "heading")
+            self.assertEqual(source_heading["textLayout"]["lineCount"], 1)
+            self.assertEqual(len(source_heading["textLayout"]["lines"]), 1)
+
+            with BrowserHarness() as harness:
+                with harness.page("bentoCheck") as page:
+                    page.goto(output.resolve().as_uri(), wait_until="load")
+                    page.wait_for_selector('.ed-stage [data-el-id="panel--label--part-2"]')
+                    harness.settle(page)
+                    positions = page.evaluate(
+                        """() => {
+                          const heading = document.querySelector('.ed-stage [data-el-id="panel--label--heading"]');
+                          const body = document.querySelector('.ed-stage [data-el-id="panel--label--part-2"]');
+                          const textRect = (root, needle) => {
+                            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                            while (walker.nextNode()) {
+                              const node = walker.currentNode;
+                              const index = node.textContent.indexOf(needle);
+                              if (index >= 0) {
+                                const range = document.createRange();
+                                range.setStart(node, index); range.setEnd(node, index + needle.length);
+                                return range.getBoundingClientRect();
+                              }
+                            }
+                            return null;
+                          };
+                          const headingText = textRect(heading, '今回の検証範囲');
+                          const firstBody = textRect(body, '条件を指定して直接生成');
+                          const secondBody = textRect(body, '各');
+                          return {
+                            headingBottom: headingText.bottom,
+                            firstBodyTop: firstBody.top,
+                            firstBodyBottom: firstBody.bottom,
+                            secondBodyTop: secondBody.top,
+                          };
+                        }"""
+                    )
+                    self.assertGreaterEqual(positions["firstBodyTop"], positions["headingBottom"] + 5)
+                    self.assertGreater(positions["secondBodyTop"], positions["firstBodyBottom"])
+
+    def test_inline_pseudo_decoration_keeps_its_text_advance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "pseudo.preview.html"
+            registry_path = root / "pseudo.registry.json"
+            output = root / "output/presentation.generated.bento.html"
+            source.write_text(
+                "<!doctype html><style>html,body{margin:0}.slide{position:relative;width:1280px;height:720px;"
+                "background:#fff}.panel{position:absolute;left:100px;top:100px;width:420px;height:120px;"
+                "padding:8px;box-sizing:border-box;font:400 18px Arial}.panel-title{display:block;margin:0 0 8px;"
+                "font-size:13px;font-weight:800;color:#16867f}.medium{font-size:23px;font-weight:800}.small{font-size:14px}"
+                ".panel-title:before{content:'';display:inline-block;width:22px;height:3px;margin:0 9px 3px 0;"
+                "background:#16867f}.hidden{top:260px}.hidden .panel-title:before{opacity:0}</style>"
+                "<section class='slide' data-slide-id='pseudo'><div class='panel' data-bento-id='panel' "
+                "data-bento-type='shape'><span class='panel-title'>Heading</span><span class='medium'>Metric</span>"
+                "<br><span class='small'>Second</span></div><div class='panel hidden' data-bento-id='hidden-panel' "
+                "data-bento-type='shape'><span class='panel-title'>Hidden decoration</span></div></section>",
+                encoding="utf-8",
+            )
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "pseudo", "sources": {},
+                "document": {"title": "Pseudo spacing"}, "assets": {}, "fonts": {},
+                "equations": {}, "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }), encoding="utf-8")
+
+            result = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html", output_path=output,
+            )
+            by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+            self.assertIn("panel--pseudo-2-before", by_id)
+            self.assertNotIn("hidden-panel--pseudo-2-before", by_id)
+            self.assertEqual(
+                [by_id[f"panel--label--part-{index}"]["fontSize"] for index in (1, 2, 3)],
+                [13, 23, 14],
+            )
+
+            with BrowserHarness() as harness:
+                with harness.page("bentoCheck") as page:
+                    page.goto(output.resolve().as_uri(), wait_until="load")
+                    page.wait_for_selector(".ed-root")
+                    harness.settle(page)
+                    positions = page.evaluate(
+                        """() => {
+                          const line = document.querySelector('.ed-stage [data-el-id="panel--pseudo-2-before"]')
+                            .getBoundingClientRect();
+                          const label = document.querySelector('.ed-stage [data-el-id="panel--label--part-1"]');
+                          const metricLabel = document.querySelector('.ed-stage [data-el-id="panel--label--part-2"]');
+                          const smallLabel = document.querySelector('.ed-stage [data-el-id="panel--label--part-3"]');
+                          const locate = needle => {
+                            for (const root of [label, metricLabel, smallLabel]) {
+                              const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                              while (walker.nextNode()) {
+                                const node = walker.currentNode;
+                                const index = node.textContent.indexOf(needle);
+                                if (index >= 0) {
+                                  const range = document.createRange();
+                                  range.setStart(node, index); range.setEnd(node, index + 1);
+                                  return range.getBoundingClientRect();
+                                }
+                              }
+                            }
+                            return null;
+                          };
+                          const first = locate('Heading');
+                          const medium = locate('Metric');
+                          const second = locate('Second');
+                          const styleFor = needle => {
+                            for (const root of [label, metricLabel, smallLabel]) {
+                              const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                              while (walker.nextNode()) {
+                                if (walker.currentNode.textContent.includes(needle)) {
+                                  const style = getComputedStyle(walker.currentNode.parentElement);
+                                  return {display: style.display, fontSize: style.fontSize};
+                                }
+                              }
+                            }
+                            return null;
+                          };
+                          return {lineRight: line.right, firstLeft: first.left, firstBottom: first.bottom,
+                            mediumTop: medium.top, secondLeft: second.left,
+                            labelLeft: smallLabel.getBoundingClientRect().left,
+                            headingStyle: styleFor('Heading'), mediumStyle: styleFor('Metric'),
+                            smallStyle: styleFor('Second')};
+                        }"""
+                    )
+                    self.assertGreaterEqual(positions["firstLeft"], positions["lineRight"] + 7)
+                    self.assertLessEqual(positions["firstLeft"], positions["lineRight"] + 24)
+                    self.assertGreaterEqual(
+                        positions["mediumTop"], positions["firstBottom"] + 5.5, positions,
+                    )
+                    self.assertAlmostEqual(positions["secondLeft"], positions["labelLeft"], delta=2)
+                    self.assertEqual(positions["headingStyle"]["fontSize"], "13px")
+                    self.assertEqual(positions["mediumStyle"]["fontSize"], "23px")
+                    self.assertEqual(positions["smallStyle"]["fontSize"], "14px")
+
+    def test_adjacent_single_line_html_text_does_not_gain_an_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "adjacent.preview.html"
+            registry_path = root / "adjacent.registry.json"
+            output = root / "output/presentation.generated.bento.html"
+            source.write_text(
+                "<!doctype html><style>html,body{margin:0}.slide{position:relative;width:1280px;height:720px;"
+                "background:#fff}.text{position:absolute;top:100px;width:100px;height:24px;"
+                "font:400 20px/1.2 Arial}</style><section class='slide' data-slide-id='adjacent'>"
+                "<div class='text' style='left:100px' data-bento-id='left' data-bento-type='text'>Left</div>"
+                "<div class='text' style='left:200px' data-bento-id='right' data-bento-type='text'>Right</div>"
+                "</section>",
+                encoding="utf-8",
+            )
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "adjacent", "sources": {},
+                "document": {"title": "Adjacent text"}, "assets": {}, "fonts": {},
+                "equations": {}, "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": [], "requiredText": []},
+            }), encoding="utf-8")
+
+            result = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html", output_path=output,
+                browser_check=False,
+            )
+
+            by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+            self.assertEqual(by_id["left"]["w"], 100)
+            self.assertEqual(by_id["right"]["w"], 100)
+            self.assertEqual(result.report["summary"]["unresolvedWarnings"], 0)
+
     def test_table_inline_math_renders_without_visible_delimiters_and_survives_serialize(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -491,6 +1139,58 @@ class HtmlFirstBrowserIntegrationTests(unittest.TestCase):
             self.assertEqual(result.report["summary"]["bakedEquationCount"], 0)
             self.assertEqual(result.report["summary"]["coveredEditableElementCount"], 0)
             self.assertTrue(result.report["browserCheck"]["serialize_roundtrip"])
+
+    def test_styled_equation_uses_background_capture_with_editable_math(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "equation.preview.html"
+            registry_path = root / "equation.registry.json"
+            output = root / "output/presentation.generated.bento.html"
+            source.write_text(
+                "<!doctype html><style>html,body{margin:0}.slide{position:relative;width:1280px;height:720px;"
+                "background:#fff}.equation{position:absolute;left:200px;top:180px;width:700px;height:120px;"
+                "font:400 34px Arial;color:#10243e;filter:drop-shadow(0 8px 5px #94a3b8)}</style>"
+                "<section class='slide' data-slide-id='equation-slide'>"
+                "<div class='equation' data-bento-id='equation' data-bento-type='equation' "
+                "data-equation-id='eq'>x²</div></section>",
+                encoding="utf-8",
+            )
+            registry_path.write_text(json.dumps({
+                "format": "bento/html-registry/v2", "unitId": "equation-slide", "sources": {},
+                "document": {"title": "Editable styled equation"}, "assets": {}, "fonts": {},
+                "equations": {"eq": {"latex": "x^2"}}, "figures": {}, "tables": {}, "charts": {},
+                "protected": {"slideIds": [], "elementIds": ["equation"], "requiredText": []},
+            }), encoding="utf-8")
+
+            result = build_from_html(
+                html_path=source, registry_path=registry_path,
+                base_path=ROOT / "Bento_Slides.base.bento.html", output_path=output,
+            )
+
+            by_id = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+            self.assertEqual(by_id["equation"]["type"], "image")
+            self.assertEqual(by_id["equation--label"]["equationId"], "eq")
+            self.assertEqual(by_id["equation--label"]["latexSource"], "x^2")
+            self.assertEqual(result.report["summary"]["bakedEquationCount"], 0)
+            self.assertEqual(result.report["renderCalibration"]["equations"], 1)
+            calibration_path = output.parent / "diagnostics/render-calibration.json"
+            self.assertTrue(calibration_path.is_file())
+            calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+            measurement = calibration["measurements"][0]
+            self.assertLess(
+                measurement["initialBentoGlyphFrame"]["w"],
+                by_id["equation--label"]["w"],
+            )
+            self.assertTrue(result.report["browserCheck"]["serialize_roundtrip"])
+
+            with BrowserHarness() as harness:
+                with harness.page("bentoCheck") as page:
+                    page.goto(output.resolve().as_uri(), wait_until="load")
+                    page.wait_for_selector('.ed-stage [data-el-id="equation--label"] math')
+                    harness.settle(page)
+                    overlay = page.locator('.ed-stage [data-el-id="equation--label"]')
+                    self.assertEqual(overlay.locator("math").count(), 1)
+                    self.assertNotIn("$", overlay.text_content() or "")
 
     def test_post_apply_review_captures_only_affected_slides(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

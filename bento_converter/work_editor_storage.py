@@ -73,6 +73,16 @@ def _visible_text(value: str) -> str:
     return html_lib.unescape("".join(parser.parts))
 
 
+def protected_text_projection(value: str) -> str:
+    """Project Bento rich text to the source-visible text used by registry guards."""
+
+    # HTML-first inline math becomes Bento's editable ``$...$`` syntax.  The
+    # delimiters are editor metadata rather than visible source characters, so
+    # retaining them would make a protected fragment such as ``0.7t`` appear to
+    # disappear after conversion as ``0.7$t_{...}$``.
+    return _visible_text(value).replace("$", "")
+
+
 def _document_text(document: dict[str, Any]) -> str:
     values: list[str] = [str(document.get("title", ""))]
     for slide in document.get("slides", []):
@@ -83,11 +93,11 @@ def _document_text(document: dict[str, Any]) -> str:
             if not isinstance(element, dict):
                 continue
             if isinstance(element.get("html"), str):
-                values.append(_visible_text(element["html"]))
+                values.append(protected_text_projection(element["html"]))
             for row in element.get("rows", []) if isinstance(element.get("rows"), list) else []:
                 for cell in row.get("cells", []) if isinstance(row, dict) else []:
                     if isinstance(cell, dict) and isinstance(cell.get("html"), str):
-                        values.append(_visible_text(cell["html"]))
+                        values.append(protected_text_projection(cell["html"]))
     return "\n".join(values)
 
 

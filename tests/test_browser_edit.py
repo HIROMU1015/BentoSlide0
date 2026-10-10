@@ -101,6 +101,20 @@ class BrowserEditPlanTests(unittest.TestCase):
         })
         self.assertEqual(plan["operations"][0]["op"], "set-text")
 
+    def test_sanitizes_inline_html_replacement(self) -> None:
+        plan = validate_browser_edit_plan({
+            "format": PLAN_FORMAT,
+            "operations": [{
+                "op": "set-text-html", "slideId": "demo-slide-1",
+                "elementId": "slide-1-lead",
+                "html": '<span class="label">&nbsp;&nbsp;$\\kappa_1$</span><script>bad()</script>',
+            }],
+        })
+        self.assertEqual(
+            plan["operations"][0]["html"],
+            '<span class="label">&nbsp;&nbsp;$\\kappa_1$</span>',
+        )
+
     def test_cli_persists_committed_post_save_failure_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

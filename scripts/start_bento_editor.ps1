@@ -172,7 +172,7 @@ try {
         if ($startedProcess.HasExited) {
             break
         }
-        $candidateStatus = Get-BentoEditorStatus -HostAddress $hostAddress -Port $Port -TimeoutSeconds 1
+        $candidateStatus = Get-BentoEditorStatus -HostAddress $hostAddress -Port $Port -TimeoutSeconds 10
         if ($null -ne $candidateStatus) {
             if ((Test-BentoStatusTarget -Status $candidateStatus -ExpectedTarget $expectedStatusTarget) -and
                 [string]$candidateStatus.editingMode -eq $Mode) {

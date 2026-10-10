@@ -246,6 +246,123 @@ def _transparent(value: object) -> bool:
     return normalized in {"", "transparent", "rgba(0,0,0,0)", "hsla(0,0%,0%,0)"}
 
 
+_BORDER_SIDES = ("top", "right", "bottom", "left")
+
+
+def _border_sides(style: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    fallback_width = float(style.get("borderWidth") or 0)
+    fallback_color = style.get("borderColor") or "transparent"
+    result: dict[str, dict[str, Any]] = {}
+    for side in _BORDER_SIDES:
+        title = side.capitalize()
+        width = float(style.get(f"border{title}Width", fallback_width) or 0)
+        color = style.get(f"border{title}Color") or fallback_color
+        stroke_style = str(style.get(f"border{title}Style") or ("solid" if width > 0 else "none")).lower()
+        active = width > 0 and stroke_style not in {"none", "hidden"} and not _transparent(color)
+        result[side] = {
+            "width": width,
+            "color": color,
+            "style": stroke_style,
+            "active": active,
+        }
+    return result
+
+
+def _uniform_border(style: dict[str, Any]) -> dict[str, Any] | None:
+    sides = _border_sides(style)
+    active = [sides[side] for side in _BORDER_SIDES if sides[side]["active"]]
+    if len(active) != 4:
+        return None
+    first = active[0]
+    if all(
+        abs(float(item["width"]) - float(first["width"])) < 0.001
+        and item["color"] == first["color"]
+        and item["style"] == first["style"]
+        for item in active[1:]
+    ):
+        return first
+    return None
+
+
+def _apply_native_border(result: dict[str, Any], style: dict[str, Any]) -> None:
+    border = _uniform_border(style)
+    if border is None:
+        result["stroke"] = "transparent"
+        result["strokeWidth"] = 0
+        result.pop("strokeStyle", None)
+        return
+    result["stroke"] = border["color"]
+    result["strokeWidth"] = _compact(border["width"])
+    if border["style"] in {"solid", "dashed", "dotted"}:
+        result["strokeStyle"] = border["style"]
+
+
+def _border_edge_shapes(
+    element: dict[str, Any], base: dict[str, Any], *, id_prefix: str | None = None,
+) -> list[dict[str, Any]]:
+    style = element.get("style", {})
+    if _uniform_border(style) is not None:
+        return []
+    sides = _border_sides(style)
+    x, y, width, height = (float(base[field]) for field in ("x", "y", "w", "h"))
+    emitted: list[dict[str, Any]] = []
+    for side in _BORDER_SIDES:
+        border = sides[side]
+        if not border["active"]:
+            continue
+        thickness = min(float(border["width"]), height if side in {"top", "bottom"} else width)
+        if side == "top":
+            frame = {"x": x, "y": y, "w": width, "h": thickness}
+        elif side == "right":
+            frame = {"x": x + width - thickness, "y": y, "w": thickness, "h": height}
+        elif side == "bottom":
+            frame = {"x": x, "y": y + height - thickness, "w": width, "h": thickness}
+        else:
+            frame = {"x": x, "y": y, "w": thickness, "h": height}
+        edge = {
+            "id": f"{id_prefix or base['id']}--border-{side}",
+            **{field: _compact(value) for field, value in frame.items()},
+            "rotation": _compact(element.get("rotation", 0)),
+            "opacity": _compact(element.get("opacity", 1)),
+            "type": "shape",
+            "shape": "rect",
+            "fill": border["color"],
+            "stroke": "transparent",
+            "strokeWidth": 0,
+            "radius": 0,
+        }
+        for field in ("role", "figureId", "tableId"):
+            if element.get(field):
+                edge[field] = element[field]
+        # Native line shapes clamp stroke width to two pixels and are always
+        # horizontal. Measured dash/dot fragments preserve thin and vertical
+        # CSS edges without changing the embedded Bento runtime.
+        if border["style"] in {"dashed", "dotted"}:
+            horizontal = side in {"top", "bottom"}
+            length = float(frame["w"] if horizontal else frame["h"])
+            segment_length = (
+                max(thickness * 2.4, 7.0) if border["style"] == "dashed" else thickness
+            )
+            gap = max(thickness * (1.8 if border["style"] == "dashed" else 2.2), 5.0)
+            offset = 0.0
+            index = 0
+            while offset < length:
+                part = dict(edge)
+                if index:
+                    part["id"] = f"{edge['id']}--part-{index + 1}"
+                part["shape"] = "ellipse" if border["style"] == "dotted" else "rect"
+                part["x" if horizontal else "y"] = _compact(
+                    float(frame["x"] if horizontal else frame["y"]) + offset
+                )
+                part["w" if horizontal else "h"] = _compact(min(segment_length, length - offset))
+                emitted.append(part)
+                offset += segment_length + gap
+                index += 1
+        else:
+            emitted.append(edge)
+    return emitted
+
+
 def _frame(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str) -> dict[str, Any]:
     original = {field: float(element[field]) for field in ("x", "y", "w", "h")}
     corrected = dict(original)
@@ -345,6 +462,53 @@ def _text(element: dict[str, Any], registry: dict[str, Any], corrections: list[d
                 align = "center"
             if style.get("alignItems") == "center":
                 valign = "middle"
+    text_layout = element.get("textLayout") or {}
+    if (
+        element.get("type") == "text"
+        and align == "left"
+        and text_layout.get("singleLine") is True
+    ):
+        before_guard = {field: common[field] for field in ("x", "y", "w", "h")}
+        required_width = max(0.0, float(text_layout.get("requiredWidth") or 0))
+        measured_limit = max(
+            float(common["w"]),
+            float(text_layout.get("maxWidth") or common["w"]),
+        )
+        safe_limit = min(measured_limit, CANVAS_WIDTH - float(common["x"]))
+        metric_slack = max(1.0, min(3.0, font_size * 0.12))
+        target_width = min(required_width + metric_slack, safe_limit)
+        if target_width > float(common["w"]) + 0.25:
+            common["w"] = _compact(target_width)
+        if common != before_guard:
+            corrections.append({
+                "slideId": slide_id, "elementId": element["id"], "kind": "text-font-metric-width-guard",
+                "before": before_guard, "after": {field: common[field] for field in ("x", "y", "w", "h")},
+                "measurement": {
+                    "requiredWidth": _compact(required_width),
+                    "maxWidth": _compact(safe_limit),
+                    "metricSlack": _compact(metric_slack),
+                },
+                "contentChanged": False,
+            })
+    elif (
+        not text_layout
+        and element.get("type") == "text"
+        and not equation_id
+        and "<br" not in content.lower()
+        and (
+            style.get("whiteSpace") == "nowrap"
+            or common["h"] <= font_size * float(style.get("lineHeight") or 1.2) + 1
+        )
+    ):
+        before_width = common["w"]
+        common["w"] = _compact(min(CANVAS_WIDTH - common["x"], before_width + 1))
+        if common["w"] > before_width:
+            corrections.append({
+                "slideId": slide_id, "elementId": element["id"],
+                "kind": "text-single-line-width-guard",
+                "before": {"w": before_width}, "after": {"w": common["w"]},
+                "contentChanged": False,
+            })
     result = {
         **common,
         "type": "text",
@@ -367,11 +531,13 @@ def _text(element: dict[str, Any], registry: dict[str, Any], corrections: list[d
     return result
 
 
-def _text_decoration(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str) -> dict[str, Any] | None:
+def _text_decoration(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str) -> list[dict[str, Any]]:
     style = element["style"]
     gradient = _gradient(style.get("backgroundImage"))
-    if _transparent(style.get("backgroundColor")) and not gradient and float(style.get("borderWidth") or 0) <= 0:
-        return None
+    has_border = any(item["active"] for item in _border_sides(style).values())
+    has_shadow = style.get("boxShadow") not in {None, "", "none"}
+    if _transparent(style.get("backgroundColor")) and not gradient and not has_border and not has_shadow:
+        return []
     common = _common(element, corrections, slide_id)
     common["id"] = f"{element['id']}--decoration"
     common.pop("link", None)
@@ -380,13 +546,14 @@ def _text_decoration(element: dict[str, Any], corrections: list[dict[str, Any]],
     result = {
         **common, "type": "shape", "shape": "rect",
         "fill": style.get("backgroundColor") or "transparent",
-        "stroke": style.get("borderColor") or "transparent",
-        "strokeWidth": _compact(style.get("borderWidth") or 0),
         "radius": _compact(style.get("borderRadius") or 0),
     }
+    _apply_native_border(result, style)
     if gradient:
         result["fillGradient"] = gradient
-    return result
+    edges = _border_edge_shapes(element, result)
+    keep_base = not _transparent(result["fill"]) or gradient or _uniform_border(style) is not None or has_shadow
+    return ([result] if keep_base else []) + edges
 
 
 def _endpoint(value: str | None) -> dict[str, str] | None:
@@ -407,10 +574,9 @@ def _shape(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id:
         "type": "shape",
         "shape": shape,
         "fill": style.get("backgroundColor") or "transparent",
-        "stroke": style.get("borderColor") or "transparent",
-        "strokeWidth": _compact(style.get("borderWidth") or 0),
         "radius": _compact(style.get("borderRadius") or 0),
     }
+    _apply_native_border(result, style)
     if shape == "line":
         line_color = style.get("borderTopColor") or style.get("borderColor") or style.get("backgroundColor")
         result["fill"] = line_color
@@ -455,21 +621,52 @@ def _shape(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id:
     return result
 
 
+def _pseudo_shapes(
+    element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str,
+) -> list[dict[str, Any]]:
+    emitted: list[dict[str, Any]] = []
+    for decoration in element.get("pseudoDecorations") or ():
+        synthetic = {
+            "id": f"{element['id']}--{decoration['idSuffix']}",
+            "type": "shape",
+            "shape": "rect",
+            "x": decoration["x"], "y": decoration["y"],
+            "w": decoration["w"], "h": decoration["h"],
+            "rotation": 0,
+            "opacity": float(element.get("opacity", 1)) * float(decoration.get("opacity", 1)),
+            "style": decoration.get("style") or {},
+        }
+        for field in ("role", "figureId"):
+            if element.get(field):
+                synthetic[field] = element[field]
+        base = _shape(synthetic, corrections, slide_id)
+        emitted.append(base)
+        emitted.extend(_border_edge_shapes(synthetic, base))
+    return emitted
+
+
 def _editable_text_overlay(
     element: dict[str, Any], registry: dict[str, Any],
     corrections: list[dict[str, Any]], slide_id: str,
 ) -> dict[str, Any] | None:
     """Create an editable label without re-emitting annotated descendants."""
 
+    equation_id = element.get("equationId") or (
+        element.get("registryId") if element.get("type") == "equation" else None
+    )
     text = str(
         element.get("residualText")
         if element.get("hasExplicitDescendants")
         else element.get("text") or ""
     ).strip()
     source_shape = element.get("shape") or "rect"
-    if not text or (source_shape in {"connector", "line"} and text in {"→", "←", "↔"}):
+    if (not text and not equation_id) or (source_shape in {"connector", "line"} and text in {"→", "←", "↔"}):
         return None
-    html = element.get("residualHtml") if element.get("hasExplicitDescendants") else element.get("html")
+    html = (
+        element.get("residualHtml")
+        if element.get("hasExplicitDescendants")
+        else element.get("htmlWithPseudoReservations") or element.get("html")
+    )
     residual_frame = element.get("residualFrame") if element.get("hasExplicitDescendants") else None
     style = {
         **element.get("style", {}),
@@ -482,15 +679,15 @@ def _editable_text_overlay(
     source = {
         **element,
         "id": f"{element['id']}--label",
-        "type": "text",
+        "type": "equation" if equation_id else "text",
         "text": text,
         "html": html or html_lib.escape(text, quote=False),
         "style": style,
         "role": None,
         "morphId": None,
         "link": None,
-        "equationId": None,
-        "registryId": None,
+        "equationId": equation_id,
+        "registryId": element.get("registryId") if equation_id else None,
         "assetId": None,
         "figureId": None,
         "chartId": None,
@@ -507,16 +704,20 @@ def _editable_text_overlay(
 
 def _editable_text_fragments(
     element: dict[str, Any], registry: dict[str, Any],
-    corrections: list[dict[str, Any]], slide_id: str,
+    corrections: list[dict[str, Any]], slide_id: str, *,
+    field: str = "textFragments", id_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Convert flex child labels into independently positioned native text."""
+    """Convert measured child labels into independently positioned native text."""
 
     result: list[dict[str, Any]] = []
-    for index, fragment in enumerate(element.get("textFragments") or (), start=1):
+    for index, fragment in enumerate(element.get(field) or (), start=1):
+        part_id = str(fragment.get("partId") or "").strip()
+        safe_part_id = re.sub(r"[^A-Za-z0-9_-]+", "-", part_id).strip("-")
+        fragment_suffix = safe_part_id or f"part-{index}"
         source = {
             **element,
             **{field: fragment[field] for field in ("x", "y", "w", "h", "scrollWidth", "scrollHeight")},
-            "id": f"{element['id']}--part-{index}",
+            "id": f"{id_prefix or element['id']}--{fragment_suffix}",
             "type": "text",
             "text": fragment.get("text") or "",
             "html": fragment.get("html") or "",
@@ -531,6 +732,7 @@ def _editable_text_fragments(
             "chartId": None,
             "tableId": None,
             "rotation": 0,
+            "textLayout": fragment.get("textLayout"),
         }
         item = _text(source, registry, corrections, slide_id)
         item.pop("shadow", None)
@@ -587,6 +789,9 @@ def _table(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id:
         {},
     )
     pad_y, pad_x = _cell_padding(first_cell)
+    border_width = style.get("borderWidth")
+    if border_width is None:
+        border_width = 1
     return {
         **_common(element, corrections, slide_id), "type": "table",
         "columns": columns, "rows": native_rows,
@@ -594,18 +799,45 @@ def _table(element: dict[str, Any], corrections: list[dict[str, Any]], slide_id:
         "style": {
             "headerBg": style.get("backgroundColor") or "#eef2f7", "headerColor": style.get("color") or "#111111",
             "zebra": "rgba(0,0,0,0.03)", "borderColor": style.get("borderColor") or "#cbd5e1",
-            "borderWidth": _compact(style.get("borderWidth") or 1),
+            "borderWidth": _compact(border_width),
             "cellPadX": _compact(pad_x), "cellPadY": _compact(pad_y),
             "fontSize": _compact(style.get("fontSize") or 16), "color": style.get("color") or "#111111",
             "radius": _compact(style.get("borderRadius") or 0),
         },
-    }
+}
 
 
-def _table_inline_math_decomposition(
-    element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str,
+def _table_requires_cell_border_decomposition(element: dict[str, Any]) -> bool:
+    signatures: list[tuple[tuple[bool, float, str, str], ...]] = []
+    for row in (element.get("table") or {}).get("rows", []):
+        for cell in row:
+            if not isinstance(cell, dict):
+                continue
+            style = cell.get("style") if isinstance(cell.get("style"), dict) else {}
+            if not any(f"border{side.capitalize()}Width" in style for side in _BORDER_SIDES):
+                continue
+            sides = _border_sides(style)
+            if any(edge["active"] and edge["style"] in {"dashed", "dotted"} for edge in sides.values()):
+                return True
+            signature = tuple(
+                (
+                    bool(sides[side]["active"]),
+                    round(float(sides[side]["width"]), 3),
+                    str(sides[side]["color"]),
+                    str(sides[side]["style"]),
+                )
+                for side in _BORDER_SIDES
+            )
+            signatures.append(signature)
+            if len(set(signature)) > 1:
+                return True
+    return len(set(signatures)) > 1
+
+
+def _table_cell_decomposition(
+    element: dict[str, Any], corrections: list[dict[str, Any]], slide_id: str, *, includes_math: bool,
 ) -> list[dict[str, Any]]:
-    """Render a math-bearing HTML table as editable native shapes and text."""
+    """Render HTML cells as editable shapes/text when native table styling is insufficient."""
 
     data = element.get("table") or {"rows": []}
     rows = data.get("rows", [])
@@ -625,8 +857,13 @@ def _table_inline_math_decomposition(
     source_h = max(1.0, float(element.get("h") or 1))
     column_count = max((len(row) for row in rows), default=1)
     header_rows = int(data.get("headerRows") or 0)
-    border_color = table_style.get("borderColor") or "#cbd5e1"
-    border_width = _compact(table_style.get("borderWidth") or 1)
+    fallback_border_width = table_style.get("borderWidth")
+    if fallback_border_width is None:
+        fallback_border_width = 1
+    fallback_border_style = {
+        "borderColor": table_style.get("borderColor") or "#cbd5e1",
+        "borderWidth": fallback_border_width,
+    }
 
     for row_index, row in enumerate(rows):
         for column_index, cell_value in enumerate(row):
@@ -638,25 +875,44 @@ def _table_inline_math_decomposition(
             cell_h = float(rect.get("h", source_h / max(len(rows), 1)))
             x = float(base["x"]) + cell_x
             y = float(base["y"]) + cell_y
-            bg = cell.get("bg")
-            if _transparent(bg):
-                bg = "rgba(0,0,0,0.03)" if row_index >= header_rows and row_index % 2 == 0 else "transparent"
             cell_id = f"{element['id']}--cell-r{row_index}-c{column_index}"
-            emitted.append({
+            cell_style = cell.get("style") if isinstance(cell.get("style"), dict) else {}
+            measured_borders = any(f"border{side.capitalize()}Width" in cell_style for side in _BORDER_SIDES)
+            bg = cell.get("bg") or "transparent"
+            if _transparent(bg) and not measured_borders:
+                bg = "rgba(0,0,0,0.03)" if row_index >= header_rows and row_index % 2 == 0 else "transparent"
+            border_style = (
+                cell_style
+                if measured_borders
+                else fallback_border_style
+            )
+            background = {
                 "id": f"{cell_id}-bg",
                 "x": _compact(x), "y": _compact(y),
                 "w": _compact(cell_w), "h": _compact(cell_h),
                 "rotation": _compact(element.get("rotation", 0)),
                 "opacity": _compact(element.get("opacity", 1)),
                 "type": "shape", "shape": "rect",
-                "fill": bg, "stroke": border_color, "strokeWidth": border_width, "radius": 0,
+                "fill": bg, "radius": _compact(cell_style.get("borderRadius") or 0),
                 **({"tableId": element["tableId"]} if element.get("tableId") else {}),
                 **({"figureId": element["figureId"]} if element.get("figureId") else {}),
-            })
+            }
+            _apply_native_border(background, border_style)
+            emitted.append(background)
+            emitted.extend(_border_edge_shapes(
+                {
+                    "style": border_style,
+                    "rotation": element.get("rotation", 0),
+                    "opacity": element.get("opacity", 1),
+                    "tableId": element.get("tableId"),
+                    "figureId": element.get("figureId"),
+                },
+                background,
+                id_prefix=background["id"],
+            ))
             cell_html = sanitize_inline_html(str(cell.get("html", "")))
             if not cell_html:
                 continue
-            cell_style = cell.get("style") if isinstance(cell.get("style"), dict) else {}
             pad_y, pad_x = _cell_padding(cell)
             vertical_align = cell_style.get("verticalAlign") or "middle"
             text_y = y if vertical_align == "middle" else y + pad_y
@@ -677,7 +933,7 @@ def _table_inline_math_decomposition(
                 "color": cell.get("color") or cell_style.get("color") or table_style.get("color") or "#111111",
                 "align": align,
                 "valign": "middle" if vertical_align == "middle" else "top",
-                "lineHeight": _compact(float(table_style.get("lineHeight") or 1.3)),
+                "lineHeight": _compact(float(cell_style.get("lineHeight") or table_style.get("lineHeight") or 1.3)),
                 "letterSpacing": _compact(float(table_style.get("letterSpacing") or 0)),
                 **({"tableId": element["tableId"]} if element.get("tableId") else {}),
                 **({"figureId": element["figureId"]} if element.get("figureId") else {}),
@@ -685,7 +941,7 @@ def _table_inline_math_decomposition(
     corrections.append({
         "slideId": slide_id,
         "elementId": element["id"],
-        "kind": "table-inline-math-decomposition",
+        "kind": "table-inline-math-decomposition" if includes_math else "table-cell-border-decomposition",
         "before": {"type": "table", "rows": len(rows)},
         "after": {"type": "shape+text", "elements": len(emitted)},
         "contentChanged": False,
@@ -880,7 +1136,8 @@ def _identity_layout(slides: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]
         "id", "type", "exportMode", "critical", "compareCrop", "role", "registryId", "equationId", "assetId", "figureId",
         "chartId", "tableId", "morphId", "link", "shape", "lineStart", "lineEnd", "from", "to",
         "layout", "layoutGroup", "x", "y", "w", "h", "rotation", "opacity", "z", "text", "html",
-        "residualText", "residualHtml", "residualFrame", "residualStyle", "textFragments", "explicitDescendantIds",
+        "htmlWithPseudoReservations",
+        "residualText", "residualHtml", "residualFrame", "residualStyle", "textLayout", "textFragments", "ownedTextFragments", "explicitDescendantIds",
         "fallbackScope", "fallbackCapture", "svg", "mediaKind", "chartOption", "table", "style",
         "boundingFrame", "transform", "compatibility",
     )
@@ -955,6 +1212,21 @@ def _correct_contrast(slides: list[dict[str, Any]], corrections: list[dict[str, 
                 continue
             decoration = by_id.get(f"{element['id']}--decoration")
             background = decoration.get("fill") if decoration else slide["background"]
+            label_parent_id: str | None = None
+            if element["id"].endswith("--label"):
+                label_parent_id = element["id"][:-len("--label")]
+            elif "--label--part-" in element["id"]:
+                label_parent_id = element["id"].split("--label--part-", 1)[0]
+            if not decoration and label_parent_id:
+                parent = by_id.get(label_parent_id)
+                if parent and parent.get("type") == "shape":
+                    if parent.get("fillGradient") or _rgb(parent.get("fill")) is None:
+                        continue
+                    background = parent["fill"]
+                elif parent and parent.get("type") in {"image", "svg"}:
+                    # A raster/SVG background may be locally light or dark. The slide
+                    # background is not evidence for changing its editable overlay.
+                    continue
             ratio = _contrast(element.get("color"), background)
             if ratio is None or ratio >= 3:
                 continue
@@ -1286,7 +1558,12 @@ def convert_html_layout(
             strategy = "native"
             reason = "Supported semantic element converted to an editable Bento native type."
             table_decomposition: list[dict[str, Any]] | None = None
-            conversion_element = element
+            table_decomposition_reason: str | None = None
+            conversion_element = (
+                {**element, "html": element["htmlWithPseudoReservations"]}
+                if element.get("htmlWithPseudoReservations")
+                else element
+            )
             if element["type"] == "text" and element.get("textFragments"):
                 conversion_element = {**element, "text": "", "html": ""}
             elif element["type"] in {"text", "equation"} and element.get("hasExplicitDescendants"):
@@ -1308,7 +1585,15 @@ def convert_html_layout(
                     asset_id = f"fallback-{slide_id}-{element_id}"
                     assets[asset_id] = source
                     converted = {**_common(element, corrections, slide_id), "type": "image", "src": source, "fit": "contain", "radius": 0}
-                    capture_scope = (element.get("fallbackCapture") or {}).get("scope", element.get("fallbackScope", "whole"))
+                    capture_scope = (element.get("fallbackCapture") or {}).get("scope")
+                    if not capture_scope:
+                        capture_scope = (
+                            element.get("fallbackScope", "whole")
+                            if mode == "image"
+                            else "background"
+                            if compatibility.classification == "background-image-required"
+                            else element.get("fallbackScope", "whole")
+                        )
                     source_text = str(element.get("text") or "").strip()
                     if source_text and capture_scope != "background":
                         converted["sourceText"] = source_text
@@ -1334,15 +1619,26 @@ def convert_html_layout(
                 elif element["type"] == "shape":
                     converted = _shape(element, corrections, slide_id)
                 elif element["type"] == "table":
-                    if any(
+                    table_contains_math = any(
                         isinstance(cell, dict) and _contains_inline_math(cell.get("html"))
                         for row in (element.get("table") or {}).get("rows", [])
                         for cell in row
-                    ):
-                        table_decomposition = _table_inline_math_decomposition(
-                            element, corrections, slide_id,
+                    )
+                    table_needs_border_decomposition = _table_requires_cell_border_decomposition(element)
+                    if table_contains_math or table_needs_border_decomposition:
+                        table_decomposition = _table_cell_decomposition(
+                            element, corrections, slide_id, includes_math=table_contains_math,
                         )
                         converted = table_decomposition[0]
+                        table_decomposition_reason = (
+                            "Table cells became editable native shapes and text so computed per-edge borders "
+                            "remain faithful to the measured HTML grid"
+                            + (
+                                " and inline LaTeX renders without visible delimiters."
+                                if table_contains_math
+                                else "."
+                            )
+                        )
                     else:
                         converted = _table(element, corrections, slide_id)
                 elif element["type"] == "chart":
@@ -1395,16 +1691,17 @@ def convert_html_layout(
             emitted = table_decomposition or ([converted] if converted is not None else [])
             if table_decomposition:
                 strategy = "native-decomposition"
-                reason = (
-                    "Math-bearing table cells became editable native shape and text elements so inline "
-                    "LaTeX renders without visible delimiters while preserving the measured HTML grid."
-                )
+                reason = table_decomposition_reason or "Table cells became editable native shapes and text."
             if strategy == "native" and element["type"] in {"text", "equation"}:
-                decoration = _text_decoration(element, corrections, slide_id)
-                if decoration:
-                    emitted.insert(0, decoration)
+                decorations = _text_decoration(element, corrections, slide_id)
+                pseudo_shapes = _pseudo_shapes(element, corrections, slide_id)
+                if decorations or pseudo_shapes:
+                    emitted[0:0] = decorations + pseudo_shapes
                     strategy = "native-decomposition"
-                    reason = "Semantic text stayed editable; computed background/border became a native shape."
+                    reason = (
+                        "Semantic text stayed editable; computed backgrounds, per-edge borders, and simple "
+                        "decorative pseudo-elements became native shapes."
+                    )
                 fragments = _editable_text_fragments(element, registry, corrections, slide_id)
                 if fragments:
                     emitted.extend(fragments)
@@ -1417,11 +1714,33 @@ def convert_html_layout(
                         "own residual text and decoration."
                     )
             if strategy == "native" and element["type"] == "shape":
-                label = _editable_text_overlay(element, registry, corrections, slide_id)
-                if label:
-                    emitted.append(label)
+                edge_shapes = _border_edge_shapes(element, converted) if converted is not None else []
+                pseudo_shapes = _pseudo_shapes(element, corrections, slide_id)
+                if edge_shapes or pseudo_shapes:
+                    emitted.extend(edge_shapes + pseudo_shapes)
                     strategy = "native-decomposition"
-                    reason = "Text-bearing HTML shape became an editable Bento shape plus text label."
+                    reason = (
+                        "The editable Bento shape retained asymmetric CSS borders and simple decorative "
+                        "pseudo-elements as independent native shapes."
+                    )
+                owned_fragments = _editable_text_fragments(
+                    element, registry, corrections, slide_id,
+                    field="ownedTextFragments", id_prefix=f"{element['id']}--label",
+                )
+                if owned_fragments:
+                    emitted.extend(owned_fragments)
+                    strategy = "native-decomposition"
+                    reason = (
+                        "Text-bearing HTML shape became an editable Bento shape plus independently measured "
+                        "child text labels so CSS block flow and typography remain faithful."
+                    )
+                else:
+                    label = _editable_text_overlay(element, registry, corrections, slide_id)
+                    if label:
+                        emitted.append(label)
+                        strategy = "native-decomposition"
+                        if not edge_shapes and not pseudo_shapes:
+                            reason = "Text-bearing HTML shape became an editable Bento shape plus text label."
             if strategy == "background-image":
                 label = _editable_text_overlay(element, registry, corrections, slide_id)
                 if label:
@@ -1458,8 +1777,8 @@ def convert_html_layout(
                 "excludedSemanticElementIds": list(capture.get("excludedElementIds") or ()),
                 "ownedTextExcludedFromFallback": bool(capture.get("ownedTextExcluded")),
                 "editableOverlayIds": [item["id"] for item in emitted if item["type"] in {"text", "table"}],
-                "bakedTextCount": 0 if strategy == "background-image" else int(strategy == "image" and bool(element.get("text"))),
-                "bakedEquationCount": 0 if strategy == "background-image" else int(strategy == "image" and element.get("type") == "equation"),
+                "bakedTextCount": 0 if strategy == "background-image" else int(strategy in {"image", "svg"} and bool(element.get("text"))),
+                "bakedEquationCount": 0 if strategy == "background-image" else int(strategy in {"image", "svg"} and element.get("type") == "equation"),
                 "contentPreserved": True,
                 "adjustments": list(compatibility.adjustments),
                 "warnings": [reason] if strategy in {"svg", "image", "background-image"} else [],
