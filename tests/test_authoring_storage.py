@@ -599,6 +599,47 @@ class AuthoringArtifactStorageTests(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=5)
 
+    def test_authoring_http_api_accepts_every_segment_operation_name(self) -> None:
+        storage = self.storage()
+        server = create_work_editor_server(storage, port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        def post(payload: dict):
+            request = Request(base + "/api/save", data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urlopen(request, timeout=10) as response:
+                    return response.status, json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+        try:
+            for operation in ("segment-insert-after", "segment-append", "segment-replace-range"):
+                status = storage.status()
+                html = load_html(self.target)
+                document = extract_bento_doc(html)
+                self.title(document)["html"] = f"API {operation}"
+                code, saved = post({
+                    "baseDocumentRevision": status["documentRevision"],
+                    "baseRegistryRevision": status["registryRevision"],
+                    "serializedHtml": embed_bento_doc(html, document),
+                    "replaceSlideIds": ["demo-slide-1"],
+                    "operation": operation,
+                })
+                self.assertEqual(code, 200, saved)
+            status = storage.status()
+            code, rejected = post({
+                "baseDocumentRevision": status["documentRevision"],
+                "baseRegistryRevision": status["registryRevision"],
+                "serializedHtml": load_html(self.target),
+                "operation": "segment-unknown",
+            })
+            self.assertNotEqual(code, 200)
+            self.assertIn("Unsupported authoring save operation", json.dumps(rejected))
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=5)
+
     def test_authoring_root_waits_for_consistent_transaction_snapshot(self) -> None:
         storage = self.storage()
         status = storage.status()

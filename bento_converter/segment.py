@@ -24,6 +24,14 @@ RELATIONSHIP_FIELDS = {
     *ELEMENT_REFERENCE_FIELDS, *SLIDE_REFERENCE_FIELDS,
     "link", "href", "morphId", "stateOf", "transition", "connector",
 }
+SEGMENT_OPERATION_ALIASES = {"import": "append", "replace": "replace-slide"}
+SEGMENT_OPERATIONS = frozenset({
+    "append", "insert-before", "insert-after", "replace-slide", "replace-range", "replace-section",
+})
+# Operation names a segment save reports to authoring storage, including the CLI aliases.
+SEGMENT_SAVE_OPERATIONS = frozenset(
+    f"segment-{name}" for name in (*SEGMENT_OPERATIONS, *SEGMENT_OPERATION_ALIASES)
+)
 
 
 def canonical_projection_hash(value: Any) -> str:
@@ -294,11 +302,8 @@ def merge_segment(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Return a fully validated authoring document/registry merge and evidence report."""
 
-    aliases = {"import": "append", "replace": "replace-slide"}
-    normalized_operation = aliases.get(operation, operation)
-    if normalized_operation not in {
-        "append", "insert-before", "insert-after", "replace-slide", "replace-range", "replace-section",
-    }:
+    normalized_operation = SEGMENT_OPERATION_ALIASES.get(operation, operation)
+    if normalized_operation not in SEGMENT_OPERATIONS:
         raise BentoConverterError(f"Unsupported segment operation: {operation}")
     current = copy.deepcopy(current_document)
     segment_slides = [copy.deepcopy(slide) for slide in segment_document.get("slides", []) if isinstance(slide, dict)]

@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from .errors import BentoConverterError, ValidationError
 from .authoring_storage import AuthoringArtifactStorage, AuthoringConflict
+from .segment import SEGMENT_SAVE_OPERATIONS
 from .work_editor_storage import WorkEditorConflict, WorkEditorStorage
 
 
@@ -333,7 +334,7 @@ def create_work_editor_server(
                                     )
                                 arguments["scoped_slide_ids"] = set(scoped_slide_ids)
                             operation = payload.get("operation", "authoring-save")
-                            if operation not in {"authoring-save", "browser-edit", "segment-import", "segment-replace"}:
+                            if operation not in {"authoring-save", "browser-edit", *SEGMENT_SAVE_OPERATIONS}:
                                 raise BentoConverterError("Unsupported authoring save operation")
                             report_details = payload.get("operationReport")
                             if report_details is not None and not isinstance(report_details, dict):
