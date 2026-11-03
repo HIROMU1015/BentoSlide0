@@ -41,11 +41,13 @@ from scripts.deck_workflow import (
     command_propose_localized_html_change,
     command_set_html_change_feedback,
     command_prepare_conversion,
+    command_reopen_html_deck,
     command_submit_plan,
     command_unlock_section,
     load_state,
     migrate_v1_state,
     parser as workflow_parser,
+    valid_actions,
     validate_state,
     validate_sections,
 )
@@ -305,6 +307,46 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
         self.assertTrue(preflight["passed"])
         self.assertEqual(preflight["summary"]["errors"], 0)
         self.assertFalse((self.root / "output/presentation.generated.bento.html").exists())
+
+    def test_approved_whole_deck_can_be_reopened_for_review_before_conversion(self) -> None:
+        state = self.whole_deck_review()
+        command_approve_current(self.root, state)
+        approved = load_state(self.root)
+        html_before = (self.root / "deck/deck.preview.html").read_bytes()
+        registry_before = (self.root / "deck/deck.registry.json").read_bytes()
+        baseline_before = approved["authoring"]["htmlReview"]
+        self.assertEqual(valid_actions(approved), ["reopen-html-deck"])
+
+        command_reopen_html_deck(self.root, approved)
+
+        reopened = load_state(self.root)
+        self.assertEqual(reopened["workflow"]["stage"], "html_review")
+        self.assertIsNone(reopened["workflow"]["currentSection"])
+        self.assertFalse(reopened["handoff"]["readyForCodex"])
+        self.assertTrue(all(entry["status"] == "html_review" for entry in reopened["sections"].values()))
+        self.assertTrue(all(entry["approvalDigest"] is None for entry in reopened["sections"].values()))
+        self.assertEqual(reopened["authoring"]["htmlReview"], baseline_before)
+        self.assertEqual((self.root / "deck/deck.preview.html").read_bytes(), html_before)
+        self.assertEqual((self.root / "deck/deck.registry.json").read_bytes(), registry_before)
+        with self.assertRaisesRegex(WorkflowError, "does not allow"):
+            command_prepare_conversion(self.root, reopened)
+
+        command_approve_current(self.root, reopened)
+        self.assertEqual(load_state(self.root)["workflow"]["stage"], "ready_for_conversion")
+
+    def test_reopen_html_deck_rejects_other_stages_and_stale_canonical_html(self) -> None:
+        state = self.whole_deck_review()
+        with self.assertRaisesRegex(WorkflowError, "does not allow"):
+            command_reopen_html_deck(self.root, state)
+        command_approve_current(self.root, state)
+        approved = load_state(self.root)
+        original = (self.root / "deck/deck.preview.html").read_text(encoding="utf-8")
+        (self.root / "deck/deck.preview.html").write_text(
+            original.replace("</style>", "body{color:red}</style>"), encoding="utf-8",
+        )
+        with self.assertRaisesRegex(WorkflowError, "stale"):
+            command_reopen_html_deck(self.root, approved)
+        self.assertEqual(load_state(self.root)["workflow"]["stage"], "ready_for_conversion")
 
     def test_adopt_existing_full_html_opens_one_review_without_changing_html(self) -> None:
         state = load_state(self.root)

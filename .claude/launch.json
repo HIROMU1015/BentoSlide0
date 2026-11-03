@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "html-preview",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "scripts.run_html_preview", "--root", ".", "--host", "127.0.0.1", "--port", "4173"],
+      "port": 4173
+    }
+  ]
+}

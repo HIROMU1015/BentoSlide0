@@ -285,7 +285,9 @@ class WorkEditorTests(unittest.TestCase):
             status, page = self.get(base + "/")
             self.assertEqual(status, 200)
             self.assertIn("bento-work-editor", page)
+            self.assertIn('math{font-family:"Cambria Math",math}', page)
             self.assertNotIn("bento-work-editor", load_html(storage.target))
+            self.assertNotIn('math{font-family:"Cambria Math",math}', load_html(storage.target))
             _, revision_payload = self.get(base + "/api/revision")
             _, status_payload = self.get(base + "/api/status")
             _, document_payload = self.get(base + "/api/document")
@@ -498,6 +500,7 @@ class WorkEditorBrowserTests(unittest.TestCase):
                     hasThen: Boolean(result && typeof result.then === 'function'),
                     guardMarker: window.bento.serialize.workEditorGuard === true,
                     excludedToolbarIds: toolbarIds.every(id => !result.includes(id)),
+                    excludedMathFontRule: !result.includes('math{font-family:"Cambria Math",math}'),
                     containsWorkEditor: result.includes('bento-work-editor'),
                     sameParent: host.parentNode === parent,
                     sameNextSibling: host.nextSibling === next,
@@ -623,6 +626,7 @@ class WorkEditorBrowserTests(unittest.TestCase):
             self.assertFalse(serialize_contract["hasThen"])
             self.assertTrue(serialize_contract["guardMarker"])
             self.assertTrue(serialize_contract["excludedToolbarIds"])
+            self.assertTrue(serialize_contract["excludedMathFontRule"])
             self.assertFalse(serialize_contract["containsWorkEditor"])
             self.assertTrue(serialize_contract["sameParent"])
             self.assertTrue(serialize_contract["sameNextSibling"])

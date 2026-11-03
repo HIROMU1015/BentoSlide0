@@ -47,6 +47,7 @@ CLASS_GROUPS = {
     "tests.test_quick_edit.QuickEditIntegrationTests": "browser",
     "tests.test_quick_edit.QuickEditPlanTests": "unit",
     "tests.test_registry_document.RegistryDocumentTests": "unit",
+    "tests.test_render_calibration.InlineMathTextFitTests": "unit",
     "tests.test_resource_embedding.ResourceEmbeddingTests": "unit",
     "tests.test_roundtrip.IntegrationRoundtripTests": "unit",
     "tests.test_section_approval.SectionDigestTests": "unit",

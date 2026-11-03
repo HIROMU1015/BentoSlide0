@@ -127,25 +127,31 @@ class _InlineSanitizer(HTMLParser):
         elif not self.blocked and tag in self.allowed and tag != "br":
             self.parts.append(f"</{tag}>")
 
+    def _append_math(self, data: str) -> None:
+        # Inline math is emitted into HTML: decoded characters such as "<" (from &lt;) must be
+        # re-escaped, or the output would open a tag in the middle of the formula.
+        text = self._math_text(data, scripted=any(tag in {"sub", "sup"} for tag in self.inline_math_tags))
+        self.parts.append(html_lib.escape(text, quote=False))
+
     def handle_data(self, data: str) -> None:
         if self.inline_math_tags:
             if self.blocked:
                 return
-            self.parts.append(self._math_text(data, scripted=any(tag in {"sub", "sup"} for tag in self.inline_math_tags)))
+            self._append_math(data)
             return
         if not self.blocked:
             self.parts.append(html_lib.escape(data, quote=False))
 
     def handle_entityref(self, name: str) -> None:
         if self.inline_math_tags:
-            self.parts.append(self._math_text(html_lib.unescape(f"&{name};"), scripted=any(tag in {"sub", "sup"} for tag in self.inline_math_tags)))
+            self._append_math(html_lib.unescape(f"&{name};"))
             return
         if not self.blocked:
             self.parts.append(f"&{name};")
 
     def handle_charref(self, name: str) -> None:
         if self.inline_math_tags:
-            self.parts.append(self._math_text(html_lib.unescape(f"&#{name};"), scripted=any(tag in {"sub", "sup"} for tag in self.inline_math_tags)))
+            self._append_math(html_lib.unescape(f"&#{name};"))
             return
         if not self.blocked:
             self.parts.append(f"&#{name};")
@@ -446,7 +452,10 @@ def _text(element: dict[str, Any], registry: dict[str, Any], corrections: list[d
         if not equation:
             raise ConversionError(f"Equation {equation_id!r} referenced by {slide_id}/{element['id']} is missing from the registry.")
         latex = equation["latex"].strip()
-        content = f"$${latex}$$"
+        # The element content is HTML: escape <, > and & so that LaTeX such as \sum_{i<n} or
+        # aligned "&" survives HTML parsing; the runtime reads the math from the parsed text.
+        # The raw LaTeX stays available unescaped in latexSource.
+        content = f"$${html_lib.escape(latex, quote=False)}$$"
     else:
         content = sanitize_inline_html(element.get("html", "")) or html_lib.escape(element.get("text", ""), quote=False)
     align = style.get("textAlign") if style.get("textAlign") in {"left", "center", "right", "justify"} else "left"
@@ -487,6 +496,42 @@ def _text(element: dict[str, Any], registry: dict[str, Any], corrections: list[d
                     "requiredWidth": _compact(required_width),
                     "maxWidth": _compact(safe_limit),
                     "metricSlack": _compact(metric_slack),
+                },
+                "contentChanged": False,
+            })
+    elif (
+        element.get("type") == "text"
+        and align in {"center", "right"}
+        and text_layout.get("singleLine") is True
+    ):
+        # Bento wraps instead of overflowing, so a centered/right-aligned label whose box
+        # was shrink-wrapped to its Chromium width breaks onto a second line. Widen the box
+        # around the text's measured position by the same metric slack as left text.
+        before_guard = {field: common[field] for field in ("x", "y", "w", "h")}
+        line_widths = [float(line.get("w") or 0) for line in text_layout.get("lines") or []]
+        natural_width = max(line_widths or [float(text_layout.get("requiredWidth") or 0)])
+        metric_slack = max(1.0, min(3.0, font_size * 0.12))
+        target_width = min(natural_width + metric_slack, float(CANVAS_WIDTH))
+        width = float(common["w"])
+        if target_width > width + 0.25:
+            left = float(common["x"])
+            fits = natural_width <= width + 0.25
+            if align == "center":
+                anchor = left + (width / 2 if fits else natural_width / 2)
+                new_left = anchor - target_width / 2
+            else:
+                new_left = left + width - target_width if fits else left
+            new_left = min(max(0.0, new_left), CANVAS_WIDTH - target_width)
+            common["x"] = _compact(new_left)
+            common["w"] = _compact(target_width)
+        if any(common[field] != before_guard[field] for field in before_guard):
+            corrections.append({
+                "slideId": slide_id, "elementId": element["id"], "kind": "text-font-metric-width-guard",
+                "before": before_guard, "after": {field: common[field] for field in ("x", "y", "w", "h")},
+                "measurement": {
+                    "naturalWidth": _compact(natural_width),
+                    "metricSlack": _compact(metric_slack),
+                    "align": align,
                 },
                 "contentChanged": False,
             })

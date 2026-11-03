@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 .venv/
+.claude/settings.local.json
 browser-output/
 ci-output/
 demo.generated.bento.html

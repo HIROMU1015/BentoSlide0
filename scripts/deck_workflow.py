@@ -2653,6 +2653,8 @@ def valid_actions(state: dict[str, Any]) -> list[str]:
             if entry.get("status") == "bento_integration"
             else ["approve-current", "edit-current"]
         )
+    if stage == "ready_for_conversion" and _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
+        return ["reopen-html-deck"]
     if stage == "bento_authoring":
         return ["edit-current", "finish-current-section", "reopen-current-section"]
     if stage == "content_review":
@@ -3245,6 +3247,39 @@ def command_approve_html_deck(root: Path, state: dict[str, Any]) -> None:
     _transition(next_state, "ready_for_conversion", "ready", current=None)
     atomic_write_state(root, next_state)
     append_work_log(root, "Approved the complete HTML deck at one human checkpoint")
+
+
+def command_reopen_html_deck(root: Path, state: dict[str, Any]) -> None:
+    """Return an approved whole-deck HTML to review before conversion.
+
+    Every section approval is cleared and the Codex handoff is withdrawn, so a fresh
+    whole-deck approval is required again. The canonical HTML/registry and the existing
+    review baseline (with any post-apply evidence bound to it) are left unchanged; the
+    baseline must still match the canonical bytes. Later edits use the normal proposal flow.
+    """
+
+    _require_stage(state, "ready_for_conversion")
+    if _authoring_strategy(state) != WHOLE_DECK_STRATEGY:
+        raise WorkflowError("reopen-html-deck requires whole-deck authoring")
+    if _has_active_html_change(state):
+        raise WorkflowError("Resolve the active HTML change proposal before reopening the deck")
+    evidence = _require_current_html_review(root, state)
+    if set(evidence.section_digests) != set(state["sections"]):
+        raise WorkflowError("Whole-deck HTML section IDs no longer match deck.yaml")
+    next_state = copy.deepcopy(state)
+    for section_id in evidence.section_digests:
+        slide_ids = [
+            slide_id for slide_id in evidence.ordered_slide_ids
+            if evidence.slide_section_ids[slide_id] == section_id
+        ]
+        next_state["sections"][section_id].update({
+            "status": "html_review", "canonical": "html",
+            "slideIds": slide_ids, "approvalDigest": None,
+        })
+    next_state["handoff"]["readyForCodex"] = False
+    _transition(next_state, "html_review", "awaiting_approval", current=None)
+    atomic_write_state(root, next_state)
+    append_work_log(root, "Reopened the approved HTML deck for review; every section approval was cleared")
 
 
 def _clean_proposal_text(value: str, *, field: str) -> str:
@@ -5511,6 +5546,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("adopt-whole-deck")
     commands.add_parser("complete-html-deck")
     commands.add_parser("approve-html-deck")
+    commands.add_parser("reopen-html-deck")
     propose_html_change = commands.add_parser("propose-html-change")
     propose_html_change.add_argument("--candidate-html", required=True, type=Path)
     propose_html_change.add_argument("--candidate-registry", type=Path)
@@ -5701,6 +5737,8 @@ def run(args: argparse.Namespace) -> int:
         command_complete_html_deck(root, state)
     elif command == "approve-html-deck":
         command_approve_html_deck(root, state)
+    elif command == "reopen-html-deck":
+        command_reopen_html_deck(root, state)
     elif command == "propose-html-change":
         proposal = command_propose_html_change(
             root, state,

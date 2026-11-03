@@ -77,6 +77,7 @@ approve-current                 approve only the displayed plan/HTML/content che
 adopt-whole-deck                adopt an existing complete HTML deck without rewriting it
 complete-html-deck              validate the complete deck and open one HTML review
 approve-html-deck               bind one approval to all current section digests
+reopen-html-deck                ready_for_conversion -> html_review for a whole deck; clears every section approval
 propose-html-change             snapshot and analyze a candidate; canonical stays unchanged
 propose-html-slide-change       compose named slide fragments into one strictly scoped full candidate
 revise-html-change              atomically replace an active proposal from exact saved feedback

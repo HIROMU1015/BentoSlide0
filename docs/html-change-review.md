@@ -66,6 +66,8 @@ If the human explicitly accepts known equation height overflow without changing 
 
 After application, all section HTML approvals are pending again. Whole-deck approval records the current per-section DOM, referenced registry/provenance closure, asset hashes, and global CSS/theme digests, then conversion revalidates them. Generated, authoring, and final artifacts are never changed by the proposal workflow.
 
+To change an approved whole deck before conversion starts, run `reopen-html-deck`. It moves `ready_for_conversion` back to `html_review`, clears every section approval and the Codex handoff, and keeps the canonical HTML/registry and the current review baseline (with any post-apply evidence bound to it) unchanged; it refuses if that baseline no longer matches the canonical bytes. Changes then use the ordinary proposal flow, and a fresh `approve-html-deck` is required before conversion.
+
 ## Compatibility
 
 `rolling_sections` remains available for migrated or explicitly incremental work. It retains its separate HTML promotion and Bento acceptance gates. Existing schema v2 states without an `authoring.strategy` field are interpreted as rolling for compatibility; new working decks should declare `whole_deck` explicitly.

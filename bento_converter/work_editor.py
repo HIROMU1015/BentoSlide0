@@ -29,6 +29,8 @@ TOOLBAR = r"""
       #bento-work-editor button{border:0;border-radius:4px;padding:4px 7px;cursor:pointer;background:#e2e8f0;color:#0f172a;font:inherit}
       #bento-work-editor-mode{font-size:10px;opacity:.72}
       #bento-work-editor-status{display:block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      /* Embedded browsers may leave the generic math family unmapped; match Chrome/Edge on Windows. */
+      math{font-family:"Cambria Math",math}
       </style>
       <div id="bento-work-editor" data-work-editor-ui="true">
         <button id="work-save" type="button">&#x30ED;&#x30FC;&#x30AB;&#x30EB;&#x4FDD;&#x5B58;</button>

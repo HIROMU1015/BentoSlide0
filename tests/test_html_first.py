@@ -146,6 +146,30 @@ class HtmlConversionTests(unittest.TestCase):
         )
         self.assertEqual(converted, r"$\kappa^{2}$")
 
+    def test_inline_math_keeps_html_special_characters_escaped(self) -> None:
+        # A decoded "<" inside inline math must stay escaped, or Bento reads "<k" as a tag.
+        converted = sanitize_inline_html(
+            '<span data-bento-inline-math="v1">∑<sub>j&lt;k</sub>‖[H<sub>k</sub>,H<sub>j</sub>]‖</span>'
+            ' と <span data-bento-inline-math="v1">a &amp; b</span>'
+        )
+        self.assertEqual(converted, "$∑_{j&lt;k}‖[H_{k},H_{j}]‖$ と $a &amp; b$")
+        self.assertNotIn("<k", converted)
+
+    def test_equation_html_escapes_latex_markup_characters(self) -> None:
+        # Registry LaTeX such as \sum_{i<n} or aligned "&" is embedded into HTML content; the
+        # unescaped source stays in latexSource.
+        self.registry["equations"]["sum"] = {"latex": r"P=\sum_{i<n}H_i,\quad x>0"}
+        self.registry["equations"]["aligned"] = {"latex": r"\begin{aligned} a={}&b\\ &+c \end{aligned}"}
+        result = self.convert([
+            element("sum", "equation", equationId="sum"),
+            element("aligned", "equation", equationId="aligned", domIndex=1),
+        ])
+        native = {item["id"]: item for item in result.document["slides"][0]["elements"]}
+        self.assertEqual(native["sum"]["html"], r"$$P=\sum_{i&lt;n}H_i,\quad x&gt;0$$")
+        self.assertEqual(native["sum"]["latexSource"], r"P=\sum_{i<n}H_i,\quad x>0")
+        self.assertEqual(native["aligned"]["html"], r"$$\begin{aligned} a={}&amp;b\\ &amp;+c \end{aligned}$$")
+        validate_bento_doc(result.document)
+
     def test_table_inline_math_becomes_editable_text_overlay(self) -> None:
         table = element(
             "math-table", "table", x=100, y=120, w=600, h=100,
@@ -278,6 +302,52 @@ class HtmlConversionTests(unittest.TestCase):
         self.assertEqual(label["x"], 70)
         self.assertGreater(label["w"], 154)
         self.assertLess(label["w"], 158)
+
+    def test_centered_single_line_label_widens_around_its_center(self) -> None:
+        source = element(
+            "chip-label", "text", x=138.9, y=320, w=24.1, h=30,
+            scrollWidth=24, scrollHeight=30,
+            textLayout={
+                "singleLine": True, "requiredWidth": 24.05, "maxWidth": 24.1,
+                "lines": [{"index": 0, "x": 0.03, "y": 6, "w": 24.05, "h": 18, "fragments": 1}],
+            },
+            style={
+                **element("unused", "text")["style"], "fontSize": 15, "lineHeight": 2,
+                "fontWeight": 800, "textAlign": "center", "whiteSpace": "nowrap",
+            },
+        )
+
+        result = self.convert([source])
+
+        label = next(
+            item for item in result.document["slides"][0]["elements"] if item["id"] == "chip-label"
+        )
+        self.assertGreater(label["w"], 25.5)
+        self.assertLess(label["w"], 27.5)
+        self.assertAlmostEqual(label["x"] + label["w"] / 2, 138.9 + 24.1 / 2, places=1)
+        self.assertIn(
+            "text-font-metric-width-guard",
+            {item["kind"] for item in result.report["corrections"] if item["elementId"] == "chip-label"},
+        )
+
+    def test_right_aligned_single_line_text_widens_leftward(self) -> None:
+        source = element(
+            "page-number", "text", x=1136, y=674, w=80, h=20,
+            scrollWidth=80, scrollHeight=20,
+            textLayout={
+                "singleLine": True, "requiredWidth": 80, "maxWidth": 80,
+                "lines": [{"index": 0, "x": 0, "y": 2, "w": 80, "h": 16, "fragments": 1}],
+            },
+            style={**element("unused", "text")["style"], "fontSize": 14, "lineHeight": 1.2, "textAlign": "right"},
+        )
+
+        result = self.convert([source])
+
+        label = next(
+            item for item in result.document["slides"][0]["elements"] if item["id"] == "page-number"
+        )
+        self.assertGreater(label["w"], 80)
+        self.assertAlmostEqual(label["x"] + label["w"], 1216, places=2)
 
     def test_adjacent_single_line_text_does_not_gain_an_overlap(self) -> None:
         left = element(

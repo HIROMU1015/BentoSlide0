@@ -277,6 +277,8 @@ def build_from_html(
                 "format": render_calibration["format"],
                 "equations": render_calibration["equations"],
                 "adjusted": render_calibration["adjusted"],
+                "inlineMathTexts": render_calibration["inlineMathTexts"],
+                "inlineMathAdjusted": render_calibration["inlineMathAdjusted"],
                 "path": "diagnostics/render-calibration.json",
             }
             emit("validating-document", slideCount=len(conversion.document["slides"]))

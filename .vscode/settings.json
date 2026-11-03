@@ -1,6 +1,7 @@
 {
   "files.exclude": {
     ".agents": true,
+    ".claude": true,
     ".github": true,
     ".vscode": true,
     "bento_converter": true,
@@ -20,6 +21,7 @@
     ".gitattributes": true,
     ".gitignore": true,
     "AGENTS.md": true,
+    "CLAUDE.md": true,
     "Bento_Slides.base.bento.html": true,
     "deck.yaml": true,
     "demo.bento.html": true,
